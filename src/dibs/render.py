@@ -250,3 +250,181 @@ def render_info(info: dict) -> str:
         f"State      {_home(info['paths']['state'])}",
     ]
     return "\n".join(lines)
+
+
+# dibs top ----------------------------------------------------------------------------------------
+
+_PALETTE = ["36", "35", "33", "32", "34", "91", "96", "95", "93", "92", "94", "31"]
+_TICKS = [60, 120, 300, 600, 900, 1800, 3600, 7200, 10800, 21600, 43200, 86400, 172800, 604800]
+
+
+def _job_color(job_id: int) -> str:
+    return _PALETTE[job_id % len(_PALETTE)]
+
+
+class _Line:
+    """A line of styled pieces that can be cut to a width without counting escape codes."""
+
+    def __init__(self, *parts: tuple[str, str | None]):
+        self.parts = list(parts)
+
+    def add(self, text: str, sgr: str | None = None) -> "_Line":
+        self.parts.append((text, sgr))
+        return self
+
+    def __len__(self) -> int:
+        return sum(len(t) for t, _ in self.parts)
+
+    def render(self, width: int, color: bool) -> str:
+        out, used = [], 0
+        for text, sgr in self.parts:
+            text = text[: max(0, width - used)]
+            used += len(text)
+            out.append(f"\033[{sgr}m{text}\033[0m" if color and sgr and text else text)
+        return "".join(out).rstrip()
+
+
+def _bar(width: int, total: float, shares: list[tuple[float, str]]) -> list[tuple[str, str | None]]:
+    pieces, filled = [], 0
+    for amount, sgr in shares:
+        cells = round(amount / total * width) if total else 0
+        cells = min(max(cells, 1 if amount > 0 else 0), width - filled)
+        if cells:
+            pieces.append(("█" * cells, sgr))
+            filled += cells
+    pieces.append(("░" * (width - filled), "2"))
+    return pieces
+
+
+def _short(text: str, n: int) -> str:
+    return text if len(text) <= n else text[: n - 1] + "…"
+
+
+def _job_cells(job: dict, now: float) -> tuple[str, str, str]:
+    """(resources, when, why) for a job row."""
+    req = job["request"]
+    res = f"{req['cpus']} CPU {format_size(req['mem'])} {_vram_cell(job)}"
+    if job["state"] == "running":
+        if job.get("over_estimate"):
+            return res, f"over by {format_duration(job['over_estimate'])}", ""
+        return res, f"ends in {format_duration(max(0.0, job['expected_end'] - now))}", ""
+    if job.get("predicted_start") is None:
+        return res, "can't run", job.get("waiting_for", "")
+    if job["predicted_start"] <= now + 0.5:
+        return res, "starting", ""
+    return res, f"starts in {format_duration(job['predicted_start'] - now)}", job.get("waiting_for", "")
+
+
+def _span(job: dict, now: float) -> tuple[float, float] | None:
+    if job["state"] == "running":
+        return now, job["expected_end"]
+    if job.get("predicted_start") is None:
+        return None
+    return job["predicted_start"], job["predicted_end"]
+
+
+def _axis(width: int, left: int, span: float) -> tuple[_Line, float]:
+    """The timeline's time axis, and the tick interval chosen."""
+    area = width - left
+    interval = next((t for t in _TICKS if span / t <= max(1, area // 9)), _TICKS[-1])
+    axis = [" "] * width
+    marks = [(left, "now")]
+    t = interval
+    while t <= span:
+        marks.append((left + int(t / span * (area - 1)), "+" + format_duration(t)))
+        t += interval
+    for x, label in marks:
+        if x + len(label) <= width and all(c == " " for c in axis[max(0, x - 1) : x + len(label) + 1]):
+            axis[x : x + len(label)] = label
+    return _Line((" PLAN".ljust(left), "1"), ("".join(axis[left:]).rstrip(), "2")), interval
+
+
+def _frame(snapshot: dict, width: int, rows_per_list: int) -> list[_Line]:
+    now, cap, guard = snapshot["now"], snapshot["capacity"], snapshot.get("guard", {})
+    running = [j for j in snapshot["jobs"] if j["state"] == "running"]
+    queued = [j for j in snapshot["jobs"] if j["state"] == "queued"]
+    lines: list[_Line] = []
+
+    summary = (
+        f"guard {guard.get('mode', '?')} · {_plural(len(cap['cpus']), 'CPU')} · "
+        f"{format_size(cap['mem'])} RAM · {_plural(len(cap['gpus']), 'GPU')} "
+    )
+    head = f" dibs  {time.strftime('%H:%M:%S', time.localtime(now))}"
+    lines.append(_Line((" dibs ", "1;7"), (head[6:], None), (summary.rjust(max(0, width - len(head))), "2")))
+    lines.append(_Line())
+
+    label = 7
+    bar_width = max(10, min(48, width - label - 14))
+    used_cpu = [(j["request"]["cpus"], _job_color(j["id"])) for j in running]
+    used_mem = [(j["request"]["mem"], _job_color(j["id"])) for j in running]
+    rows = [("CPU", len(cap["cpus"]), used_cpu, lambda n: str(int(n))), ("RAM", cap["mem"], used_mem, format_size)]
+    for g in cap["gpus"]:
+        shares = [(j["request"]["vram"], _job_color(j["id"])) for j in running if g["index"] in j.get("gpu_ids", [])]
+        rows.append((f"GPU {g['index']}", g["vram"], shares, format_size, g["name"]))
+    for name, total, shares, fmt, *extra in rows:
+        used = sum(a for a, _ in shares)
+        line = _Line((f" {name}".ljust(label), "1"), *_bar(bar_width, total, shares), (f" {fmt(used)}/{fmt(total)}", None))
+        if extra:
+            line.add(f"  {extra[0]}", "2")
+        lines.append(line)
+    lines.append(_Line())
+
+    if not running and not queued:
+        lines.append(_Line(("  Nothing running or queued.", "2")))
+    for title, jobs in (("RUNNING", running), ("QUEUED", queued)):
+        if not jobs:
+            continue
+        lines.append(_Line((f" {title}", "1")))
+        for job in jobs[:rows_per_list]:
+            res, when_text, why = _job_cells(job, now)
+            line = _Line(
+                (f"  #{job['id']:<3}", _job_color(job["id"])),
+                (f"{_short(job['name'], 13):<14}", _job_color(job["id"])),
+                (f"{_short(job['session_label'], 14):<15}", "2"),
+                (f"{res:<17}", None),
+                (f"{when_text:<15}", None),
+            )
+            if why:
+                line.add(why, "2")
+            lines.append(line)
+        if len(jobs) > rows_per_list:
+            lines.append(_Line((f"  … {len(jobs) - rows_per_list} more {title.lower()}", "2")))
+
+    planned = [(j, s) for j in running + queued if (s := _span(j, now))]
+    if planned:
+        left = 22
+        horizon = max(end for _, (_, end) in planned)
+        span = max(60.0, horizon - now)
+        lines.append(_Line())
+        axis, _ = _axis(width, left, span)
+        lines.append(axis)
+        area = max(1, width - left)
+        for job, (start, end) in planned[: rows_per_list * 2]:
+            x0 = int((max(start, now) - now) / span * (area - 1))
+            x1 = max(x0 + 1, int((end - now) / span * (area - 1)))
+            lines.append(
+                _Line(
+                    (f"  #{job['id']:<3}{_short(job['name'], 13):<17}", _job_color(job["id"])),
+                    (" " * x0, None),
+                    ("█" * (min(x1, area) - x0), _job_color(job["id"])),
+                )
+            )
+        if len(planned) > rows_per_list * 2:
+            lines.append(_Line((f"  … {len(planned) - rows_per_list * 2} more", "2")))
+
+    extra = guard_lines(guard, now)
+    if extra:
+        lines.append(_Line())
+        lines += [_Line((f" {text}", "33" if text.startswith("Stopped") else "2")) for text in extra[:4]]
+    return lines
+
+
+def render_top(snapshot: dict, *, width: int, height: int, color: bool) -> str:
+    """One screen of `dibs top`: what's reserved, what runs, what's next, and the plan over time."""
+    width = max(width, 20)
+    rows = max(1, len(snapshot["jobs"]))
+    lines = _frame(snapshot, width, rows)
+    while len(lines) > height and rows > 1:
+        rows -= 1
+        lines = _frame(snapshot, width, rows)
+    return "\n".join(line.render(width, color) for line in lines[:height])

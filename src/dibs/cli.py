@@ -3,9 +3,13 @@
 import argparse
 import json
 import os
+import select
+import shutil
 import signal
 import sys
+import termios
 import time
+import tty
 
 from dibs import client as dc
 from dibs import render
@@ -100,6 +104,8 @@ def build_parser() -> argparse.ArgumentParser:
     c = sub.add_parser("cancel", help="cancel queued or running jobs")
     c.add_argument("ids", type=int, nargs="+", metavar="ID")
     c.add_argument("--json", action="store_true")
+
+    sub.add_parser("top", help="live view: what's reserved, what runs, what's next")
 
     i = sub.add_parser("info", help="what dibs hands out and what it enforces")
     i.add_argument("--json", action="store_true")
@@ -276,6 +282,34 @@ def cmd_info(args, paths: Paths, _) -> int:
     return 0
 
 
+def cmd_top(args, paths: Paths, _) -> int:
+    client = dc.Client(paths)
+    if not sys.stdout.isatty():
+        size = shutil.get_terminal_size((100, 40))
+        print(render.render_top(client.call("queue"), width=size.columns, height=size.lines, color=False))
+        return 0
+    saved = termios.tcgetattr(sys.stdin) if sys.stdin.isatty() else None
+    if saved:
+        tty.setcbreak(sys.stdin)
+    sys.stdout.write("\033[?1049h\033[?25l")  # alternate screen, hide the cursor
+    try:
+        while True:
+            size = shutil.get_terminal_size()
+            frame = render.render_top(client.call("queue"), width=size.columns, height=size.lines, color=True)
+            sys.stdout.write("\033[H" + frame.replace("\n", "\033[K\n") + "\033[K\033[J")
+            sys.stdout.flush()
+            ready, _, _ = select.select([sys.stdin] if saved else [], [], [], 1.0)
+            if ready and sys.stdin.read(1) in ("q", "Q", "\x03"):
+                return 0
+    except (KeyboardInterrupt, _Interrupted):
+        return 0
+    finally:
+        if saved:
+            termios.tcsetattr(sys.stdin, termios.TCSADRAIN, saved)
+        sys.stdout.write("\033[?25h\033[?1049l")
+        sys.stdout.flush()
+
+
 def _start(paths: Paths) -> int:
     running = dc.ping(paths)
     if running:
@@ -326,6 +360,7 @@ HANDLERS = {
     "logs": cmd_logs,
     "cancel": cmd_cancel,
     "info": cmd_info,
+    "top": cmd_top,
     "daemon": cmd_daemon,
 }
 
