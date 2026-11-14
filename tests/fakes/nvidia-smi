@@ -1,0 +1,35 @@
+#!/usr/bin/env python3
+"""A stand-in for nvidia-smi, for tests and the demo.
+
+Reads the GPUs and their compute processes from the JSON file named by $DIBS_FAKE_GPU_FILE:
+{"gpus": [{"index": 0, "uuid": "GPU-fake-0", "name": "Fake GPU", "memory_mib": 8192}],
+ "processes": [{"pid": 123, "gpu_uuid": "GPU-fake-0", "used_mib": 3100}]}
+"""
+import json
+import os
+import sys
+
+args = sys.argv[1:]
+try:
+    with open(os.environ["DIBS_FAKE_GPU_FILE"]) as f:
+        data = json.load(f)
+except (KeyError, OSError, ValueError):
+    print("NVIDIA-SMI has failed because it couldn't communicate with the NVIDIA driver.")
+    sys.exit(9)
+
+gpus = data.get("gpus", [])
+if not gpus:
+    print("No devices were found")
+    sys.exit(6)
+
+query = next((a for a in args if a.startswith("--query-")), None)
+if query == "--query-gpu=index,uuid,name,memory.total":
+    for g in gpus:
+        print(f"{g['index']}, {g['uuid']}, {g['name']}, {g['memory_mib']}")
+elif query == "--query-compute-apps=pid,used_memory,gpu_uuid":
+    for p in data.get("processes", []):
+        used = "[N/A]" if p.get("used_mib") is None else p["used_mib"]
+        print(f"{p['pid']}, {used}, {p['gpu_uuid']}")
+else:
+    print(f"fake nvidia-smi: unsupported arguments {args}", file=sys.stderr)
+    sys.exit(2)
