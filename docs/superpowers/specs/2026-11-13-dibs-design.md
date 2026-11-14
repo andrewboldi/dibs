@@ -572,15 +572,21 @@ never touched.
 1. Target every unmanaged GPU process being stopped plus all of its descendants. Never its
    ancestors: the agent itself, and the shell it ran the command in, are left alone (a launcher
    like `torchrun` that doesn't hold the GPU itself sees its workers die and exits on its own).
-2. Freeze them all with SIGSTOP, so none can write over the message.
-3. Write the message once to each distinct destination among the stopped processes' stdout and
-   stderr (open `/proc/<pid>/fd/1` and `/fd/2` with `O_WRONLY|O_APPEND|O_NONBLOCK`; skip a
-   destination already written to, comparing device and inode; skip ones that can't be opened,
-   such as sockets). With `O_APPEND`, the message lands at the end of a log file even though the
-   process had its own offset.
-4. SIGKILL them all.
-5. Record the stop (time, pid, command, GPU, VRAM, the session marker if the environment has one)
+2. Open each distinct destination among their stdout and stderr (`/proc/<pid>/fd/1` and `/fd/2`
+   with `O_WRONLY|O_APPEND|O_NONBLOCK|O_NOCTTY`; one per device and inode; skip ones that can't be
+   opened, such as sockets, and `/dev/null`).
+3. Write the message to the destinations that are terminals, so it reads before the shell's next
+   prompt.
+4. SIGKILL them all, looking again for children forked at the last moment.
+5. Write the message to the other destinations (log files, pipes). The processes are dead, so
+   none can write over it; with `O_APPEND` it lands at the end of a log file even though the
+   process had its own offset; a reader of a pipe gets it before end-of-file.
+6. Record the stop (time, pid, command, GPU, VRAM, the session marker if the environment has one)
    so `queue` and `top` can show it.
+
+(An earlier version froze the processes with SIGSTOP before writing. The demo showed why not: an
+interactive shell reports a stopped foreground job as "Stopped" and returns to its prompt before
+the message. Covered by `test_stopping_a_job_in_an_interactive_shell_reads_cleanly`.)
 
 The message, filled from what the guard saw (`/proc/<pid>/cmdline`, VRAM rounded up, RAM rounded
 up from the process's resident memory). CPUs and time can't be observed, so they stay for the

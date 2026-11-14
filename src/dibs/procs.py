@@ -128,34 +128,33 @@ def cgroup(pid: int) -> str | None:
     return None
 
 
-def write_once(pids: Sequence[int], text: str) -> int:
-    """Append text to the stdout and stderr of these processes, once per distinct destination.
+def _open_outputs(pids: Sequence[int]) -> list[int]:
+    """Open each distinct stdout/stderr destination of these processes for appending.
 
-    Opening with O_APPEND puts it at the end of a log file even if the process wrote with its own
-    offset. Destinations that can't be opened (sockets, gone processes) are skipped, and so is
-    /dev/null. Returns how many destinations got the text.
+    Destinations that can't be opened (sockets, gone processes) are skipped, and so is /dev/null.
+    O_APPEND puts what we write at the end of a log file even if the process kept its own offset.
     """
-    message = ("\n" + text.rstrip("\n") + "\n").encode()
-    seen, written = set(), 0
+    seen, fds = set(), []
     for pid in pids:
-        for fd in (1, 2):
-            path = f"/proc/{pid}/fd/{fd}"
+        for n in (1, 2):
+            path = f"/proc/{pid}/fd/{n}"
             try:
                 st = os.stat(path)
                 if os.path.realpath(path) == "/dev/null" or (st.st_dev, st.st_ino) in seen:
                     continue
-                seen.add((st.st_dev, st.st_ino))
-                out = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_NONBLOCK)
+                fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_NONBLOCK | os.O_NOCTTY)
             except OSError:
                 continue
-            try:
-                os.write(out, message)
-                written += 1
-            except OSError:
-                pass
-            finally:
-                os.close(out)
-    return written
+            seen.add((st.st_dev, st.st_ino))
+            fds.append(fd)
+    return fds
+
+
+def _write(fd: int, data: bytes) -> None:
+    try:
+        os.write(fd, data)
+    except OSError:
+        pass
 
 
 def _signal(pid: int, sig: int) -> None:
@@ -165,20 +164,32 @@ def _signal(pid: int, sig: int) -> None:
         pass
 
 
-def freeze_write_kill(pids: Sequence[int], text: str | None) -> None:
-    """Stop these processes and everything they started, leaving text in their output first.
+def stop_with_message(pids: Sequence[int], text: str | None) -> None:
+    """Kill these processes and everything they started, leaving text in their output.
 
-    Freezing first means none of them can write over the message or start anything new.
+    The text goes to a terminal before the kill, so it reads before the shell's next prompt, and
+    to log files and pipes after it, so a dying process can't write over it. Nothing is paused
+    first: SIGSTOP would make an interactive shell report the job as "Stopped".
     """
-    frozen: set[int] = set()
-    todo = set(pids)
-    while todo - frozen:
-        for pid in todo - frozen:
-            _signal(pid, signal.SIGSTOP)
-            frozen.add(pid)
+    targets = set(pids)
+    cmap = children_map()
+    targets |= {d for pid in pids for d in descendants(pid, cmap)}
+    fds = _open_outputs(sorted(targets)) if text else []
+    message = ("\n" + (text or "").rstrip("\n") + "\n").encode()
+    ttys = {fd for fd in fds if os.isatty(fd)}
+    for fd in ttys:
+        _write(fd, message)
+    killed: set[int] = set()
+    for _ in range(5):  # children forked just before the kill turn up on the next look
+        for pid in targets - killed:
+            _signal(pid, signal.SIGKILL)
+            killed.add(pid)
         cmap = children_map()
-        todo = frozen | {d for pid in frozen for d in descendants(pid, cmap)}
-    if text:
-        write_once(sorted(frozen), text)
-    for pid in frozen:
-        _signal(pid, signal.SIGKILL)
+        more = {d for pid in killed for d in descendants(pid, cmap)} - killed
+        if not more:
+            break
+        targets |= more
+    for fd in fds:
+        if fd not in ttys:
+            _write(fd, message)
+        os.close(fd)

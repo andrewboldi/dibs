@@ -95,7 +95,7 @@ def enforce(verdicts: Sequence[Verdict]) -> list[dict]:
         argv = procs.cmdline(v.pid) or []
         env = procs.environ(v.pid) or {}
         message = stop_message(v.pid, argv, v.gpu_index, v.used, procs.rss(v.pid))
-        procs.freeze_write_kill([v.pid, *procs.descendants(v.pid)], message)
+        procs.stop_with_message([v.pid], message)
         events.append(
             {
                 "pid": v.pid,

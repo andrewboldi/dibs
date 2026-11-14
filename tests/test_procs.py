@@ -94,21 +94,21 @@ def test_gone_process_reads_none():
     assert not procs.alive(gone)
 
 
-def test_write_once_pipe(spawn):
+def test_stop_with_message_pipe(spawn):
     p = spawn(SLEEP, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-    assert procs.write_once([p.pid], "dibs: hello") == 1
-    p.kill()
+    procs.stop_with_message([p.pid], "dibs: hello")
+    assert p.wait(timeout=5) == -9
     out = p.stdout.read().decode()
     assert out.count("dibs: hello") == 1
 
 
-def test_freeze_write_kill_log_file(spawn, tmp_path):
+def test_stop_with_message_log_file(spawn, tmp_path):
     log = tmp_path / "out.log"
     with open(log, "w") as f:  # truncating, not appending: the process keeps its own offset
         code = "print('line 1', flush=True); import time; time.sleep(30); print('never')"
         p = spawn([PY, "-c", code], stdout=f, stderr=subprocess.STDOUT)
     wait_for(lambda: "line 1" in log.read_text())
-    procs.freeze_write_kill([p.pid], "dibs: stopped")
+    procs.stop_with_message([p.pid], "dibs: stopped")
     p.wait()
     text = log.read_text()
     assert text.startswith("line 1\n")
@@ -116,27 +116,27 @@ def test_freeze_write_kill_log_file(spawn, tmp_path):
     assert text.count("dibs: stopped") == 1 and "never" not in text
 
 
-def test_freeze_write_kill_kills_tree(spawn):
+def test_stop_with_message_kills_tree(spawn):
     p = spawn(["bash", "-c", "sleep 30 & sleep 30 & wait"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     kids = wait_for(lambda: two_children(p.pid))
-    procs.freeze_write_kill([p.pid, *kids], "dibs: stopped")
+    procs.stop_with_message([p.pid, *kids], "dibs: stopped")
     assert p.wait(timeout=5) == -9
     wait_for(lambda: not any(procs.alive(k) for k in kids))
     assert p.stdout.read().decode().count("dibs: stopped") == 1
 
 
-def test_freeze_write_kill_catches_children_spawned_late(spawn):
+def test_stop_with_message_finds_children_not_named(spawn):
     p = spawn(["bash", "-c", "sleep 30 & wait"])
     kid = wait_for(lambda: (d := procs.descendants(p.pid)) and d[0])
-    procs.freeze_write_kill([p.pid], None)  # only the parent is named
+    procs.stop_with_message([p.pid], None)  # only the parent is named
     p.wait(timeout=5)
     wait_for(lambda: not procs.alive(kid))
 
 
-def test_freeze_write_kill_ignores_gone_pids(spawn):
+def test_stop_with_message_ignores_gone_pids(spawn):
     p = spawn(["true"])
     p.wait()
-    procs.freeze_write_kill([p.pid, 2**22 + 7], "x")
+    procs.stop_with_message([p.pid, 2**22 + 7], "x")
 
 
 def test_start_time_is_precise(spawn):
@@ -147,3 +147,41 @@ def test_start_time_is_precise(spawn):
         p = spawn(["sleep", "5"])
         errors.append(abs(procs.start_time(p.pid) - before))
     assert max(errors) < 0.1
+
+
+def test_stopping_a_job_in_an_interactive_shell_reads_cleanly():
+    """An interactive bash must not report the job as "Stopped" (SIGSTOP would make it), and the
+    message must come before the shell's next prompt."""
+    import pty
+    import select
+
+    pid, fd = pty.fork()
+    if pid == 0:
+        os.execvpe("bash", ["bash", "--noprofile", "--norc", "-i"], {**os.environ, "PS1": "PROMPT> "})
+    out = b""
+
+    def read_for(seconds):
+        nonlocal out
+        deadline = time.time() + seconds
+        while time.time() < deadline:
+            if select.select([fd], [], [], 0.05)[0]:
+                try:
+                    out += os.read(fd, 65536)
+                except OSError:
+                    return
+
+    try:
+        read_for(0.5)
+        os.write(fd, f"'{PY}' -c 'import time; time.sleep(30)'\n".encode())
+        job = wait_for(lambda: next((c for c in procs.descendants(pid) if (procs.cmdline(c) or [""])[0] == PY), None))
+        read_for(0.3)
+        out = b""
+        procs.stop_with_message([job], "dibs: stopped it")
+        read_for(1.0)
+        text = out.decode(errors="replace")
+        assert "Stopped" not in text
+        assert "dibs: stopped it" in text and text.index("dibs: stopped it") < text.rindex("PROMPT> ")
+    finally:
+        os.kill(pid, 9)
+        os.waitpid(pid, 0)
+        os.close(fd)
