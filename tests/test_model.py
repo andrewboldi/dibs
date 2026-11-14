@@ -128,3 +128,10 @@ def test_job_roundtrip():
 )
 def test_default_name(argv, expected):
     assert default_name(argv) == expected
+
+
+@pytest.mark.parametrize("time", [float("inf"), float("nan"), -float("inf")])
+def test_resolve_rejects_non_finite_time(time):
+    with pytest.raises(RequestError) as err:
+        resolve_request(raw(time=time), CAP)
+    assert "--time" in str(err.value)

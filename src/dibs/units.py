@@ -32,7 +32,10 @@ def parse_size(text: str) -> int:
     m = _SIZE_RE.fullmatch(s)
     if not m:
         raise UnitError(f"can't read size {text!r}: use a number and a unit, like 16G or 512M")
-    return round(float(m.group(1)) * _SIZE_UNITS[m.group(2).upper()])
+    value = float(m.group(1)) * _SIZE_UNITS[m.group(2).upper()]
+    if not math.isfinite(value):
+        raise UnitError(f"size {text!r} is too large")
+    return round(value)
 
 
 def parse_duration(text: str) -> float:
@@ -43,13 +46,15 @@ def parse_duration(text: str) -> float:
     elif _CLOCK_RE.fullmatch(s):
         seconds = 0.0
         for part in s.split(":"):
-            seconds = seconds * 60 + int(part)
+            seconds = seconds * 60 + float(part)  # float: a huge number becomes inf, not an error
     elif _DURATION_RE.fullmatch(s):
         seconds = sum(
             float(number) * _DURATION_UNITS[unit] for number, unit in re.findall(_DURATION_PART, s)
         )
     else:
         raise UnitError(f"can't read duration {text!r}: use something like 90s, 20m, 1h30m or 2d")
+    if not math.isfinite(seconds):
+        raise UnitError(f"duration {text!r} is too long")
     if seconds <= 0:
         raise UnitError(f"duration {text!r} must be more than 0")
     return seconds

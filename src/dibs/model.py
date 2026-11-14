@@ -123,8 +123,10 @@ def _whole(value: Any, flag: str) -> int:
 def resolve_request(raw: Mapping[str, Any], cap: Capacity) -> Request:
     """Turn what was typed (numbers or "all") into a concrete request, or explain the refusal."""
     time = raw.get("time")
-    if not isinstance(time, (int, float)) or isinstance(time, bool) or time <= 0:
+    if not isinstance(time, (int, float)) or isinstance(time, bool) or math.isnan(time) or time <= 0:
         raise RequestError("--time must be more than 0")
+    if not math.isfinite(time):
+        raise RequestError("--time must be a finite duration")  # one infinite job would stall the plan
 
     cpus = len(cap.cpus) if raw.get("cpus") == "all" else _whole(raw.get("cpus"), "--cpus")
     if cpus < 1:

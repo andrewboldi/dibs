@@ -102,3 +102,20 @@ def test_format_duration(seconds, expected):
 )
 def test_suggest_size(n, expected):
     assert suggest_size(n) == expected
+
+
+@pytest.mark.parametrize("bad", ["9" * 400, "1e999s", "9" * 400 + "h"])
+def test_parse_duration_rejects_infinite(bad):
+    with pytest.raises(UnitError):
+        parse_duration(bad)
+
+
+@pytest.mark.parametrize("bad", ["9" * 400 + ":00", "9" * 400 + ":00:00"])
+def test_parse_duration_rejects_huge_clock(bad):
+    with pytest.raises(UnitError):
+        parse_duration(bad)
+
+
+def test_parse_size_rejects_huge():
+    with pytest.raises(UnitError):
+        parse_size("9" * 400 + "G")
