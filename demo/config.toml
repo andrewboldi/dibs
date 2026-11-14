@@ -1,0 +1,3 @@
+# The demo's machine: 8 CPUs, 16G of RAM and one 8G GPU (from gpus.json).
+cpus = 8
+mem = "16G"

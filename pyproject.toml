@@ -6,6 +6,7 @@ build-backend = "hatchling.build"
 name = "dibs"
 dynamic = ["version"]
 description = "A job queue for one machine: coding agents reserve GPU, CPU and RAM, short jobs go first, and nothing uses the GPU behind its back."
+readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
 authors = [{ name = "Andrew Boldi" }]

@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" role="img" aria-label="dibs">
+  <defs>
+    <linearGradient id="body" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2d333f"/>
+      <stop offset="1" stop-color="#191c23"/>
+    </linearGradient>
+    <clipPath id="die"><rect x="153" y="105" width="50" height="50" rx="7"/></clipPath>
+  </defs>
+  <!-- window -->
+  <rect x="12" y="24" width="232" height="208" rx="26" fill="url(#body)"/>
+  <circle cx="40" cy="47" r="6.5" fill="#ff5f57"/>
+  <circle cx="61" cy="47" r="6.5" fill="#febc2e"/>
+  <circle cx="82" cy="47" r="6.5" fill="#28c840"/>
+  <!-- the queue: shortest job first -->
+  <rect x="80" y="100" width="34" height="14" rx="7" fill="#36c5f0"/>
+  <rect x="56" y="123" width="58" height="14" rx="7" fill="#c86bfa"/>
+  <rect x="32" y="146" width="82" height="14" rx="7" fill="#f5b13d"/>
+  <!-- next one in -->
+  <path d="M 121 101 L 129 107 L 121 113" fill="none" stroke="#36c5f0" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round"/>
+  <!-- the GPU: pins -->
+  <g fill="#59606d">
+    <rect x="152" y="80" width="7" height="10" rx="2"/><rect x="168" y="80" width="7" height="10" rx="2"/>
+    <rect x="184" y="80" width="7" height="10" rx="2"/><rect x="200" y="80" width="7" height="10" rx="2"/>
+    <rect x="152" y="170" width="7" height="10" rx="2"/><rect x="168" y="170" width="7" height="10" rx="2"/>
+    <rect x="184" y="170" width="7" height="10" rx="2"/><rect x="200" y="170" width="7" height="10" rx="2"/>
+    <rect x="227" y="102" width="10" height="7" rx="2"/><rect x="227" y="118" width="10" height="7" rx="2"/>
+    <rect x="227" y="134" width="10" height="7" rx="2"/><rect x="227" y="150" width="10" height="7" rx="2"/>
+  </g>
+  <!-- the GPU: body, and its memory filling with the job whose turn it is -->
+  <rect x="138" y="90" width="90" height="80" rx="14" fill="#3a414e"/>
+  <rect x="153" y="105" width="50" height="50" rx="7" fill="#20242c"/>
+  <rect x="153" y="124" width="50" height="31" fill="#36c5f0" clip-path="url(#die)"/>
+</svg>

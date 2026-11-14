@@ -323,6 +323,18 @@ def _span(job: dict, now: float) -> tuple[float, float] | None:
     return job["predicted_start"], job["predicted_end"]
 
 
+def _tick(seconds: float) -> str:
+    """A tick label that keeps the units ticks need: 1m10s, 1h30m."""
+    s = int(seconds)
+    if s < 60:
+        return f"{s}s"
+    if s < 3600:
+        return f"{s // 60}m{s % 60}s" if s % 60 else f"{s // 60}m"
+    if s < 86400:
+        return f"{s // 3600}h{s % 3600 // 60}m" if s % 3600 // 60 else f"{s // 3600}h"
+    return format_duration(s)
+
+
 def _axis(width: int, left: int, span: float) -> tuple[_Line, float]:
     """The timeline's time axis, and the tick interval chosen."""
     area = width - left
@@ -331,7 +343,7 @@ def _axis(width: int, left: int, span: float) -> tuple[_Line, float]:
     marks = [(left, "now")]
     t = interval
     while t <= span:
-        marks.append((left + int(t / span * (area - 1)), "+" + format_duration(t)))
+        marks.append((left + int(t / span * (area - 1)), "+" + _tick(t)))
         t += interval
     for x, label in marks:
         if x + len(label) <= width and all(c == " " for c in axis[max(0, x - 1) : x + len(label) + 1]):

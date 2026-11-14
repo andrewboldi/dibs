@@ -115,3 +115,15 @@ def test_short_plans_get_second_ticks(snapshot):
     ]}  # fmt: skip
     text = render_top(short, width=110, height=30, color=False)
     assert "+10s" in text and "+30s" in text
+
+
+def test_tick_labels_are_distinct(snapshot):
+    longer = {**snapshot, "jobs": [
+        view(1, "train", State.RUNNING, 4, 8 * GiB, 6 * GiB, 25, started=NOW - 5,
+             cpu_ids=[0, 1, 2, 3], gpu_ids=[0], expected_end=NOW + 20, over_estimate=0),
+        view(2, "finetune", State.QUEUED, 8, 8 * GiB, 8 * GiB, 60, position=1,
+             predicted_start=NOW + 20, predicted_end=NOW + 80, waiting_for=""),
+    ]}  # fmt: skip
+    axis = next(l for l in render_top(longer, width=160, height=30, color=False).splitlines() if "PLAN" in l)
+    labels = axis.split()[2:]
+    assert len(labels) == len(set(labels)) and "+1m10s" in labels
