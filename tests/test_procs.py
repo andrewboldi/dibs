@@ -137,3 +137,13 @@ def test_freeze_write_kill_ignores_gone_pids(spawn):
     p = spawn(["true"])
     p.wait()
     procs.freeze_write_kill([p.pid, 2**22 + 7], "x")
+
+
+def test_start_time_is_precise(spawn):
+    # The guard compares start times with the moment it was switched on, so whole seconds won't do.
+    errors = []
+    for _ in range(5):
+        before = time.time()
+        p = spawn(["sleep", "5"])
+        errors.append(abs(procs.start_time(p.pid) - before))
+    assert max(errors) < 0.1

@@ -16,7 +16,7 @@ import sys
 import time
 from collections.abc import Callable, Mapping
 
-from dibs import __version__, build_id, launcher, procs
+from dibs import __version__, build_id, guard, launcher, procs
 from dibs.gpu import GpuBackend, open_backend
 from dibs.machine import Config, ConfigError, build_capacity, detect_cpus, detect_mem, load_config
 from dibs.model import (
@@ -83,6 +83,11 @@ class Daemon:
         self._sees_processes = backend.processes() is not None
         self._wake: set[asyncio.Event] = set()  # waits to wake when any job finishes
         self._stop: asyncio.Event | None = None
+        # The guard leaves alone whatever was already running when it was first switched on.
+        if config.guard != "off" and self.store.get_meta("guard_mode") in (None, "off"):
+            self.store.set_meta("guard_since", repr(clock()))
+        self.store.set_meta("guard_mode", config.guard)
+        self.guard_since = float(self.store.get_meta("guard_since") or clock())
 
     def close(self) -> None:
         if not self.closed:
@@ -372,6 +377,7 @@ class Daemon:
                 self._finish(job, result, now)
             else:
                 self._push_stop(job, now)
+        self._watch_gpus(now)
         self.schedule()
         if now - self._last_retention >= RETENTION_EVERY:
             self._retention(now)
@@ -385,6 +391,90 @@ class Daemon:
                 self._finish(job, result, now)
             elif not (job.shim_pid and procs.alive(job.shim_pid, job.shim_ticks)):
                 self._lose(job, now, "lost: its process ended while dibs was not running")
+
+    # Watching the GPUs ---------------------------------------------------------------------------
+
+    def _job_of(self, pid: int, shims: dict[int, int], units: dict[str, int]) -> int | None:
+        """The running job a process belongs to: by its systemd scope, else by its shim ancestor."""
+        cg = procs.cgroup(pid) or ""
+        scope = cg.rsplit("/", 1)[-1].removesuffix(".scope")
+        if scope in units:
+            return units[scope]
+        for _ in range(64):  # the shim is a subreaper, so job processes always descend from it
+            if pid in shims:
+                return shims[pid]
+            parent = procs.parent(pid)
+            if not parent or parent == pid:
+                return None
+            pid = parent
+        return None
+
+    def _watch_gpus(self, now: float) -> None:
+        """Hold jobs to their VRAM reservations, and run the guard on everything else."""
+        seen = self.backend.processes() if self.capacity.gpus else []
+        if not seen:
+            self.outside = []
+            return
+        managed = {g.index for g in self.capacity.gpus}
+        seen = [p for p in seen if p.gpu_index in managed]
+        running = {j.id: j for j in self.store.jobs([State.RUNNING])}
+        shims = {j.shim_pid: j.id for j in running.values() if j.shim_pid}
+        units = {j.unit: j.id for j in running.values() if j.unit}
+        job_of_pid = {}
+        for p in seen:
+            job_id = self._job_of(p.pid, shims, units)
+            if job_id is not None:
+                job_of_pid[p.pid] = job_id
+        verdicts = guard.classify(
+            seen,
+            job_of_pid=job_of_pid,
+            mode=self.config.guard,
+            allow=self.config.guard_allow,
+            since=self.guard_since,
+            my_uid=os.getuid(),
+        )
+
+        usage: dict[int, dict[int, int]] = {}
+        for v in verdicts:
+            if v.kind == "job" and v.used is not None:
+                per_gpu = usage.setdefault(v.job_id, {})
+                per_gpu[v.gpu_index] = per_gpu.get(v.gpu_index, 0) + v.used
+        for job_id, per_gpu in usage.items():
+            job = running[job_id]
+            peak = max(per_gpu.values())
+            changed = job.peak_vram is None or peak > job.peak_vram
+            if changed:
+                job.peak_vram = peak
+            over = [(g, used) for g, used in sorted(per_gpu.items())
+                    if used > (job.request.vram if g in job.gpu_ids else 0)]  # fmt: skip
+            if over and job.stop_reason is None:
+                gpu, used = over[0]
+                reserved = job.request.vram if gpu in job.gpu_ids else 0
+                job.stop_reason = (
+                    f"stopped: used {format_size(used)} VRAM on GPU {gpu}, reserved {format_size(reserved)}"
+                )
+                job.stop_requested = now
+                changed = True
+                log.info("job %d %s", job.id, job.stop_reason)
+            if changed:
+                self.store.update_job(job)
+            if job.stop_requested is not None:
+                self._push_stop(job, now)
+
+        for event in guard.enforce(verdicts):
+            self.store.add_event("stop", event, now)
+            log.info("guard stopped pid %d on GPU %d: %s", event["pid"], event["gpu"], event["command"])
+        self.outside = [
+            {
+                "pid": v.pid,
+                "gpu": v.gpu_index,
+                "used": v.used,
+                "command": procs.cmdline(v.pid) or [],
+                "why": guard.WHY[v.kind],
+            }
+            for v in verdicts
+            if v.kind in guard.WHY
+        ]
 
     # Internals ----------------------------------------------------------------------------------
 

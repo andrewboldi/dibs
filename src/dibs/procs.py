@@ -5,10 +5,10 @@ Every reader returns None when the process is gone or can't be read, rather than
 
 import os
 import signal
+import time
 from collections.abc import Sequence
 
 _CLK_TCK = os.sysconf("SC_CLK_TCK") if hasattr(os, "sysconf") else 100
-_boot_time: float | None = None
 
 
 def _read(path: str, binary: bool = False):
@@ -28,15 +28,12 @@ def _stat_fields(pid: int) -> list[str] | None:
 
 
 def boot_time() -> float:
-    global _boot_time
-    if _boot_time is None:
-        for line in (_read("/proc/stat") or "").splitlines():
-            if line.startswith("btime "):
-                _boot_time = float(line.split()[1])
-                break
-        else:
-            _boot_time = 0.0
-    return _boot_time
+    """When the machine booted, in epoch seconds, to the precision of process start times.
+
+    /proc/stat's btime is whole seconds; process start times count from boot in clock ticks
+    (CLOCK_BOOTTIME), so derive boot from that same clock.
+    """
+    return time.time() - time.clock_gettime(time.CLOCK_BOOTTIME)
 
 
 def state(pid: int) -> str | None:
