@@ -4,16 +4,21 @@ Everything it knows is in the store, written before it acts, so a crash or resta
 and never touches running jobs: they're adopted again on start (recover).
 """
 
+import asyncio
+import fcntl
+import json
+import logging
 import math
 import os
 import shutil
 import signal
+import sys
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 
-from dibs import __version__, launcher, procs
-from dibs.gpu import GpuBackend
-from dibs.machine import Config
+from dibs import __version__, build_id, launcher, procs
+from dibs.gpu import GpuBackend, open_backend
+from dibs.machine import Config, ConfigError, build_capacity, detect_cpus, detect_mem, load_config
 from dibs.model import (
     TERMINAL,
     Capacity,
@@ -25,7 +30,7 @@ from dibs.model import (
     job_to_dict,
     resolve_request,
 )
-from dibs.paths import Paths, ensure_dirs
+from dibs.paths import Paths, ensure_dirs, get_paths
 from dibs.planner import Plan, Queued, Running, plan
 from dibs.store import Store
 from dibs.units import format_size
@@ -34,6 +39,10 @@ KILL_AFTER = 10.0  # seconds between asking a job to stop (SIGTERM) and forcing 
 RETENTION_EVERY = 3600.0
 RECENT = 86400.0  # how far back `queue --all` looks
 STOPS_SHOWN = 3600.0  # how far back guard stops are shown
+WAIT_RECHECK = 5.0  # a long-polling wait re-checks its jobs at least this often
+LOG_MAX = 5 * 1024 * 1024
+
+log = logging.getLogger("dibs")
 
 
 def _rejected(message: str) -> dict:
@@ -72,6 +81,8 @@ class Daemon:
         self._terminated: set[int] = set()  # jobs that have been sent SIGTERM
         self._last_retention = -math.inf
         self._sees_processes = backend.processes() is not None
+        self._wake: set[asyncio.Event] = set()  # waits to wake when any job finishes
+        self._stop: asyncio.Event | None = None
 
     def close(self) -> None:
         if not self.closed:
@@ -182,6 +193,7 @@ class Daemon:
         return {
             "ok": True,
             "version": __version__,
+            "build": build_id(),
             "pid": os.getpid(),
             "capacity": self._capacity(),
             "enforcement": {
@@ -197,6 +209,118 @@ class Daemon:
                 "socket": str(self.paths.socket),
             },
         }
+
+    # Serving ------------------------------------------------------------------------------------
+
+    async def serve(self) -> None:
+        """Answer requests on the socket and tick every second, until shutdown or SIGTERM/SIGINT."""
+        loop = asyncio.get_running_loop()
+        self._stop = asyncio.Event()
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            try:
+                loop.add_signal_handler(sig, self._stop.set)
+            except (NotImplementedError, RuntimeError, ValueError):
+                pass  # not the main thread (tests)
+        self.on_finished(lambda job: [event.set() for event in list(self._wake)])
+        ensure_dirs(self.paths)
+        if os.path.lexists(self.paths.socket):
+            os.unlink(self.paths.socket)  # stale: we hold the lock, so nobody else serves it
+        clients: set[asyncio.Task] = set()
+
+        async def client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+            clients.add(asyncio.current_task())
+            try:
+                while line := await reader.readline():
+                    try:
+                        request = json.loads(line)
+                    except ValueError:
+                        response = {"ok": False, "code": "bad_request", "error": "requests are JSON lines"}
+                    else:
+                        response = await self.handle(request)
+                    writer.write(json.dumps(response).encode() + b"\n")
+                    await writer.drain()
+            except (ConnectionError, asyncio.CancelledError):
+                pass
+            finally:
+                clients.discard(asyncio.current_task())
+                writer.close()
+
+        server = await asyncio.start_unix_server(client, path=str(self.paths.socket), limit=16 * 1024 * 1024)
+        os.chmod(self.paths.socket, 0o600)
+        ticker = asyncio.create_task(self._tick_forever())
+        try:
+            await self._stop.wait()
+        finally:
+            ticker.cancel()
+            server.close()
+            for task in list(clients):
+                task.cancel()
+            try:
+                await asyncio.wait_for(server.wait_closed(), 2)
+            except asyncio.TimeoutError:
+                pass
+            if os.path.lexists(self.paths.socket):
+                os.unlink(self.paths.socket)
+            log.info("stopped")
+
+    async def _tick_forever(self) -> None:
+        while True:
+            try:
+                self.tick()
+            except Exception:
+                log.exception("tick failed")
+            await asyncio.sleep(1.0)
+
+    async def handle(self, request: dict) -> dict:
+        op = request.get("op")
+        if op not in ("ping", "shutdown") and request.get("build") != build_id():
+            return {"ok": False, "code": "build_mismatch", "build": build_id()}
+        try:
+            if op == "ping":
+                return {"ok": True, "build": build_id(), "pid": os.getpid()}
+            if op == "submit":
+                return self.submit(request)
+            if op == "queue":
+                return self.snapshot(include_finished=bool(request.get("all")), session=request.get("session"))
+            if op == "show":
+                return self.show(int(request["id"]))
+            if op == "cancel":
+                return self.cancel([int(i) for i in request["ids"]])
+            if op == "wait":
+                return await self._wait([int(i) for i in request["ids"]], request.get("timeout"))
+            if op == "info":
+                return self.info()
+            if op == "shutdown":
+                if self._stop is not None:
+                    self._stop.set()
+                return {"ok": True}
+            return {"ok": False, "code": "bad_request", "error": f"unknown request {op!r}"}
+        except (KeyError, TypeError, ValueError) as e:
+            return {"ok": False, "code": "bad_request", "error": f"bad {op} request: {e}"}
+        except Exception as e:
+            log.exception("request %s failed", op)
+            return {"ok": False, "code": "error", "error": str(e)}
+
+    async def _wait(self, ids: list[int], timeout: float | None) -> dict:
+        for job_id in ids:
+            if self.store.get_job(job_id) is None:
+                return {"ok": False, "code": "not_found", "error": f"no job {job_id}"}
+        deadline = None if timeout is None else time.monotonic() + float(timeout)
+        while True:
+            jobs = [self.store.get_job(i) for i in ids]
+            done = all(j.state in TERMINAL for j in jobs)
+            left = None if deadline is None else deadline - time.monotonic()
+            if done or (left is not None and left <= 0):
+                views = [self.show(i)["job"] for i in ids]
+                return {"ok": True, "jobs": views, "timed_out": not done}
+            event = asyncio.Event()
+            self._wake.add(event)
+            try:
+                await asyncio.wait_for(event.wait(), WAIT_RECHECK if left is None else min(left, WAIT_RECHECK))
+            except asyncio.TimeoutError:
+                pass
+            finally:
+                self._wake.discard(event)
 
     # Scheduling ---------------------------------------------------------------------------------
 
@@ -338,3 +462,53 @@ class Daemon:
             view["expected_end"] = current.running_ends.get(job.id, started + job.request.time)
             view["over_estimate"] = max(0.0, now - (started + job.request.time))
         return view
+
+
+_lock_fd: int | None = None  # held for the daemon's whole life
+
+
+def _setup_logging(paths: Paths) -> None:
+    try:
+        if paths.daemon_log.stat().st_size > LOG_MAX:
+            os.replace(paths.daemon_log, paths.daemon_log.with_suffix(".log.1"))
+    except OSError:
+        pass
+    handler = logging.FileHandler(paths.daemon_log)
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+    log.handlers[:] = [handler]
+    log.setLevel(logging.INFO)
+
+
+def run_daemon(env: Mapping[str, str] = os.environ) -> int:
+    """Run the daemon in this process until it's told to stop. Returns an exit code."""
+    global _lock_fd
+    paths = get_paths(env)
+    ensure_dirs(paths)
+    fd = os.open(paths.lock, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        os.close(fd)
+        return 0  # another daemon is already running here
+    _lock_fd = fd
+    _setup_logging(paths)
+    try:
+        config = load_config(paths.config_file)
+        backend = open_backend(env)
+        capacity = build_capacity(config, detect_cpus(), detect_mem(), backend.list_gpus())
+    except (ConfigError, ValueError, OSError) as e:
+        log.error("can't start: %s", e)
+        print(f"dibs: can't start: {e}", file=sys.stderr)
+        return 1
+    daemon = Daemon(paths, config, capacity, backend, use_systemd=launcher.systemd_available(env))
+    daemon.recover()
+    gpus = ", ".join(f"GPU {g.index} {format_size(g.vram)}" for g in capacity.gpus) or "no GPUs"
+    log.info(
+        "dibs %s started (pid %d): %d CPUs, %s RAM, %s; guard %s",
+        build_id(), os.getpid(), len(capacity.cpus), format_size(capacity.mem), gpus, config.guard,
+    )
+    try:
+        asyncio.run(daemon.serve())
+    finally:
+        daemon.close()
+    return 0
