@@ -215,3 +215,31 @@ def test_job_pids_from_scope(paths):
     assert all(procs.cmdline(p)[0] == "sleep" for p in pids)
     launcher.signal_job(job, signal.SIGKILL)
     assert wait_exit(paths, job)["exit_code"] == 137
+
+
+def test_orphans_are_reaped_while_the_job_runs(paths):
+    # (sleep &) orphans each sleep; as a subreaper the shim inherits them and must reap them.
+    script = "for i in $(seq 20); do (sleep 0.1 &); done; sleep 3"
+    job = run(paths, make_job(paths, ["bash", "-c", script]))
+    time.sleep(1.5)
+    zombies = [c for c in procs.children_map().get(job.shim_pid, []) if procs.state(c) == "Z"]
+    try:
+        assert zombies == []
+    finally:
+        wait_exit(paths, job)
+
+
+def test_probe_uses_the_properties_jobs_need(tmp_path, monkeypatch):
+    # An older systemd that doesn't know OOMPolicy= for scopes must mean "no systemd", not lost jobs.
+    fake = tmp_path / "systemd-run"
+    fake.write_text(
+        '#!/bin/sh\nfor a in "$@"; do case "$a" in OOMPolicy=*) echo "Unknown assignment: $a" >&2; exit 1;; esac; done\n'
+        "echo 67108864\n"
+    )
+    fake.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{tmp_path}:{os.environ['PATH']}")
+    monkeypatch.setattr(launcher, "_systemd", None)
+    try:
+        assert launcher.systemd_available({}) is False
+    finally:
+        launcher._systemd = None

@@ -40,13 +40,19 @@ def systemd_available(env: Mapping[str, str] = os.environ) -> bool:
     return _systemd
 
 
+def scope_properties(mem: int) -> list[str]:
+    """What a job's scope gets. The probe asks for exactly these, so an older systemd that doesn't
+    know one of them means running without systemd, not every job failing to launch."""
+    return ["-p", f"MemoryMax={mem}", "-p", "MemorySwapMax=0", "-p", "OOMPolicy=continue"]
+
+
 def _probe_systemd() -> bool:
     if not shutil.which("systemd-run"):
         return False
     script = "cat /sys/fs/cgroup$(cut -d: -f3 /proc/self/cgroup)/memory.max"
     try:
         out = subprocess.run(
-            ["systemd-run", "--user", "--scope", "--quiet", "-p", "MemoryMax=64M", "--", "sh", "-c", script],
+            ["systemd-run", "--user", "--scope", "--quiet", *scope_properties(64 * MiB), "--", "sh", "-c", script],
             capture_output=True,
             text=True,
             timeout=20,
@@ -105,8 +111,7 @@ def launch(job: Job, paths: Paths, *, use_systemd: bool) -> tuple[int, int | Non
     if unit:
         command = [
             "systemd-run", "--user", "--scope", "--quiet", "--collect", f"--unit={unit}",
-            "-p", f"MemoryMax={job.request.mem}", "-p", "MemorySwapMax=0", "-p", "OOMPolicy=continue",
-            "--", *command,
+            *scope_properties(job.request.mem), "--", *command,
         ]  # fmt: skip
     with open(job_dir / "shim.log", "ab") as log:
         child = subprocess.Popen(

@@ -63,6 +63,15 @@ def _stop_leftovers(in_scope: bool) -> None:
             time.sleep(0.02)
 
 
+def _wait_reaping(main_pid: int) -> int:
+    """Wait for the command, reaping every orphan handed to us meanwhile (we're their subreaper);
+    otherwise they'd pile up as zombies for as long as the job runs."""
+    while True:
+        pid, status = os.waitpid(-1, 0)
+        if pid == main_pid:
+            return os.waitstatus_to_exitcode(status)
+
+
 def _write_exit(job_dir: Path, result: dict) -> None:
     tmp = job_dir / "exit.json.tmp"
     with open(tmp, "w") as f:
@@ -105,7 +114,8 @@ def main(argv: list[str]) -> int:
             # Only now: ignored signals would otherwise be inherited by the command.
             for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
                 signal.signal(sig, signal.SIG_IGN)
-            code = command.wait()
+            code = _wait_reaping(command.pid)
+            command.returncode = code
             exit_code = code if code >= 0 else 128 - code
     if out is not None:
         os.close(out)
