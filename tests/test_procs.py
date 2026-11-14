@@ -151,29 +151,32 @@ def test_start_time_is_precise(spawn):
 
 def test_stopping_a_job_in_an_interactive_shell_reads_cleanly():
     """An interactive bash must not report the job as "Stopped" (SIGSTOP would make it), and the
-    message must come before the shell's next prompt."""
-    import pty
+    message must come before the shell's next prompt. `script` gives bash a real terminal, so job
+    control is on."""
     import select
 
-    pid, fd = pty.fork()
-    if pid == 0:
-        os.execvpe("bash", ["bash", "--noprofile", "--norc", "-i"], {**os.environ, "PS1": "PROMPT> "})
+    shell = subprocess.Popen(
+        ["script", "-qfc", "bash --noprofile --norc -i", "/dev/null"],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        env={**os.environ, "PS1": "PROMPT> "},
+    )  # fmt: skip
     out = b""
 
     def read_for(seconds):
         nonlocal out
         deadline = time.time() + seconds
         while time.time() < deadline:
-            if select.select([fd], [], [], 0.05)[0]:
-                try:
-                    out += os.read(fd, 65536)
-                except OSError:
+            if select.select([shell.stdout], [], [], 0.05)[0]:
+                chunk = os.read(shell.stdout.fileno(), 65536)
+                if not chunk:
                     return
+                out += chunk
 
     try:
         read_for(0.5)
-        os.write(fd, f"'{PY}' -c 'import time; time.sleep(30)'\n".encode())
-        job = wait_for(lambda: next((c for c in procs.descendants(pid) if (procs.cmdline(c) or [""])[0] == PY), None))
+        shell.stdin.write(f"'{PY}' -c 'import time; time.sleep(30)'\n".encode())
+        shell.stdin.flush()
+        job = wait_for(lambda: next((c for c in procs.descendants(shell.pid) if (procs.cmdline(c) or [""])[0] == PY), None))
         read_for(0.3)
         out = b""
         procs.stop_with_message([job], "dibs: stopped it")
@@ -182,6 +185,7 @@ def test_stopping_a_job_in_an_interactive_shell_reads_cleanly():
         assert "Stopped" not in text
         assert "dibs: stopped it" in text and text.index("dibs: stopped it") < text.rindex("PROMPT> ")
     finally:
-        os.kill(pid, 9)
-        os.waitpid(pid, 0)
-        os.close(fd)
+        shell.kill()
+        shell.wait()
+        shell.stdin.close()
+        shell.stdout.close()
