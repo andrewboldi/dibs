@@ -1,0 +1,166 @@
+"""Talking to the daemon, and starting it when nobody has yet."""
+
+import fcntl
+import json
+import os
+import socket
+import subprocess
+import sys
+import time
+from collections.abc import Mapping
+from pathlib import Path
+
+from dibs import build_id, launcher
+from dibs.paths import Paths, ensure_dirs
+
+START_TIMEOUT = 15.0
+WAIT_CHUNK = 60.0  # a long wait is made of requests this long, so a vanished daemon is noticed
+
+
+class DibsError(Exception):
+    def __init__(self, message: str, code: str | None = None):
+        super().__init__(message)
+        self.code = code
+
+
+def _request(sock: Path, payload: dict, io_timeout: float | None) -> dict:
+    with socket.socket(socket.AF_UNIX) as s:
+        s.settimeout(io_timeout)
+        s.connect(str(sock))
+        s.sendall(json.dumps(payload).encode() + b"\n")
+        buf = bytearray()
+        while not buf.endswith(b"\n"):
+            chunk = s.recv(1 << 16)
+            if not chunk:
+                raise ConnectionResetError("the dibs daemon closed the connection")
+            buf += chunk
+    return json.loads(buf)
+
+
+def ping(paths: Paths) -> dict | None:
+    """The running daemon's {build, pid}, or None if none answers."""
+    try:
+        return _request(paths.socket, {"op": "ping"}, 5)
+    except (OSError, ValueError):
+        return None
+
+
+def _daemon_gone(paths: Paths) -> bool:
+    try:
+        fd = os.open(paths.lock, os.O_RDWR)
+    except FileNotFoundError:
+        return True
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        return False
+    finally:
+        os.close(fd)  # closing releases the lock if we got it
+    return True
+
+
+def start_daemon(paths: Paths, env: Mapping[str, str] = os.environ) -> None:
+    """Start the daemon, fully detached from this process (it must outlive the caller)."""
+    ensure_dirs(paths)
+    command = [sys.executable, "-m", "dibs", "daemon", "run"]
+    service = Path(env.get("HOME") or Path.home()) / ".config/systemd/user/dibs.service"
+    if launcher.systemd_available(env):
+        if not paths.home_mode and service.exists():
+            subprocess.run(["systemctl", "--user", "start", "dibs.service"], capture_output=True, timeout=30)
+            return
+        setenv = [f"--setenv={k}={v}" for k, v in env.items() if k.startswith("DIBS_") or k == "PATH"]
+        unit = f"--unit=dibs-{paths.instance}-daemon"
+        subprocess.run(
+            ["systemd-run", "--user", "--quiet", "--collect", unit, *setenv, "--", *command],
+            capture_output=True,
+            timeout=30,
+        )
+        return
+    subprocess.Popen(
+        command,
+        env=dict(env),
+        start_new_session=True,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+
+def stop_daemon(paths: Paths, timeout: float = 10.0) -> bool:
+    """Ask the daemon to stop and wait until it has. Running jobs keep running. False if none ran."""
+    try:
+        _request(paths.socket, {"op": "shutdown"}, 5)
+    except (OSError, ValueError):
+        return False
+    deadline = time.monotonic() + timeout
+    while not _daemon_gone(paths):
+        if time.monotonic() > deadline:
+            raise DibsError("the dibs daemon didn't stop in time")
+        time.sleep(0.05)
+    return True
+
+
+class Client:
+    def __init__(self, paths: Paths, *, autostart: bool = True, env: Mapping[str, str] = os.environ):
+        self.paths = paths
+        self.autostart = autostart
+        self.env = env
+
+    def _send(self, payload: dict, io_timeout: float | None) -> dict:
+        try:
+            return _request(self.paths.socket, payload, io_timeout)
+        except (FileNotFoundError, ConnectionRefusedError):
+            if not self.autostart:
+                raise DibsError("dibs isn't running", "not_running") from None
+        start_daemon(self.paths, self.env)
+        deadline = time.monotonic() + START_TIMEOUT
+        while True:
+            try:
+                return _request(self.paths.socket, payload, io_timeout)
+            except (FileNotFoundError, ConnectionRefusedError):
+                if time.monotonic() > deadline:
+                    raise DibsError(
+                        f"the dibs daemon didn't start; see {self.paths.daemon_log}", "not_running"
+                    ) from None
+                time.sleep(0.05)
+
+    def call(self, op: str, *, io_timeout: float | None = 60.0, **fields) -> dict:
+        payload = {"op": op, "build": build_id(), **fields}
+        response = self._send(payload, io_timeout)
+        if response.get("code") == "build_mismatch":
+            # The daemon runs other code (dibs was upgraded): restarting it is safe, jobs keep running.
+            stop_daemon(self.paths)
+            response = self._send(payload, io_timeout)
+        if not response.get("ok"):
+            raise DibsError(response.get("error") or "the dibs daemon refused", response.get("code"))
+        return response
+
+    def wait(self, ids: list[int], timeout: float | None) -> dict:
+        """Wait for the jobs to finish, across daemon restarts; {"jobs", "timed_out"}."""
+        deadline = None if timeout is None else time.monotonic() + timeout
+        while True:
+            left = None if deadline is None else max(0.0, deadline - time.monotonic())
+            chunk = WAIT_CHUNK if left is None else min(left, WAIT_CHUNK)
+            try:
+                response = self.call("wait", ids=ids, timeout=chunk, io_timeout=chunk + 30)
+            except (ConnectionResetError, BrokenPipeError, socket.timeout):
+                time.sleep(0.2)  # the daemon went away mid-wait; the next call brings it back
+                continue
+            if not response["timed_out"] or (left is not None and left <= chunk):
+                return response
+
+
+def _git_root(path: str) -> str | None:
+    current = Path(path).resolve()
+    for folder in (current, *current.parents):
+        if (folder / ".git").exists():
+            return str(folder)
+    return None
+
+
+def current_session(env: Mapping[str, str] = os.environ, cwd: str | None = None) -> tuple[str, str]:
+    """(session id, label): DIBS_SESSION if set, else the Claude Code session, else the terminal's."""
+    session = env.get("DIBS_SESSION") or env.get("CLAUDE_CODE_SESSION_ID") or f"t{os.getsid(0)}"
+    cwd = cwd or os.getcwd()
+    project = os.path.basename((_git_root(cwd) or cwd).rstrip("/")) or "/"
+    return session, f"{project}·{session[:4]}"
