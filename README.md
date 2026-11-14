@@ -51,11 +51,11 @@ still get theirs, and anything that grabs the GPU behind the queue's back is sto
 ## Install
 
 ```sh
-uv tool install git+https://github.com/andrewboldi/dibs   # or: pipx install git+https://github.com/andrewboldi/dibs
+uv tool install git+https://github.com/andrewboldi/dibs
 dibs setup
 ```
 
-Python 3.11 or newer, on Linux. No root, no dependencies. dibs works as soon as it's installed: the
+(Or `pipx install git+https://github.com/andrewboldi/dibs`.) Python 3.11 or newer, on Linux. No root, no dependencies. dibs works as soon as it's installed: the
 first `dibs` command starts the scheduler. `dibs setup` is what makes it the rule:
 
 - adds a short marked block about dibs to the global instructions of every agent CLI you have
