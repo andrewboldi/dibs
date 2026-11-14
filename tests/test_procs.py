@@ -158,32 +158,36 @@ def test_stopping_a_job_in_an_interactive_shell_reads_cleanly():
     shell = subprocess.Popen(
         ["script", "-qfc", "bash --noprofile --norc -i", "/dev/null"],
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-        env={**os.environ, "PS1": "PROMPT> "},
     )  # fmt: skip
     out = b""
 
-    def read_for(seconds):
+    def type_line(text):
+        shell.stdin.write(text.encode() + b"\n")
+        shell.stdin.flush()
+
+    def read_until(predicate, seconds):
         nonlocal out
         deadline = time.time() + seconds
-        while time.time() < deadline:
+        while time.time() < deadline and not predicate(out.decode(errors="replace")):
             if select.select([shell.stdout], [], [], 0.05)[0]:
                 chunk = os.read(shell.stdout.fileno(), 65536)
                 if not chunk:
-                    return
+                    break
                 out += chunk
+        return out.decode(errors="replace")
 
     try:
-        read_for(0.5)
-        shell.stdin.write(f"'{PY}' -c 'import time; time.sleep(30)'\n".encode())
-        shell.stdin.flush()
+        type_line("PS1='PROMPT> '")
+        read_until(lambda text: "PROMPT> " in text, 10)
+        type_line(f"'{PY}' -c 'import time; time.sleep(30)'")
         job = wait_for(lambda: next((c for c in procs.descendants(shell.pid) if (procs.cmdline(c) or [""])[0] == PY), None))
-        read_for(0.3)
+        read_until(lambda text: False, 0.3)
         out = b""
         procs.stop_with_message([job], "dibs: stopped it")
-        read_for(1.0)
-        text = out.decode(errors="replace")
-        assert "Stopped" not in text
-        assert "dibs: stopped it" in text and text.index("dibs: stopped it") < text.rindex("PROMPT> ")
+        text = read_until(lambda text: "dibs: stopped it" in text and "PROMPT> " in text.split("dibs: stopped it")[-1], 10)
+        assert "Stopped" not in text, text
+        assert "dibs: stopped it" in text, text
+        assert "PROMPT> " in text.split("dibs: stopped it")[-1], text
     finally:
         shell.kill()
         shell.wait()
