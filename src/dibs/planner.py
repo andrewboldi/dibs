@@ -1,0 +1,217 @@
+"""Who goes next.
+
+Queued jobs are taken in order of their tags (see model.compute_tag). Each one is placed at the
+earliest time it fits for its whole estimated run, around the running jobs and the places already
+given to jobs ahead of it ("conservative backfill"). Jobs placed at "now" start now. So a job can
+only start early in a gap if that delays no one ahead of it, and every queued job gets a predicted
+start time.
+
+plan() is a pure function: same inputs, same plan; no clock, no I/O.
+"""
+
+import bisect
+import math
+from collections.abc import Sequence
+from dataclasses import dataclass
+
+from dibs.model import Capacity, Request, fits_machine
+from dibs.units import format_size
+
+OVERRUN_MIN = 60.0
+OVERRUN_FRACTION = 0.10
+
+
+@dataclass(frozen=True)
+class Running:
+    job_id: int
+    request: Request
+    cpu_ids: tuple[int, ...]
+    gpu_ids: tuple[int, ...]
+    started: float
+
+
+@dataclass(frozen=True)
+class Queued:
+    job_id: int
+    request: Request
+    tag: float
+    submitted: float
+
+
+@dataclass(frozen=True)
+class Start:
+    job_id: int
+    cpu_ids: tuple[int, ...]
+    gpu_ids: tuple[int, ...]
+
+
+@dataclass(frozen=True)
+class Prediction:
+    job_id: int
+    position: int  # 1 = next in line
+    start: float | None  # None: it can't fit this machine
+    end: float | None
+    gpu_ids: tuple[int, ...]
+    reason: str  # why it isn't starting now; "" if it is
+
+
+@dataclass(frozen=True)
+class Plan:
+    starts: list[Start]
+    predictions: dict[int, Prediction]
+    running_ends: dict[int, float]
+
+
+def expected_end(job: Running, now: float) -> float:
+    """When a running job should end. Past its estimate, it's assumed to need a little longer."""
+    end = job.started + job.request.time
+    if end > now:
+        return end
+    return now + max(OVERRUN_MIN, OVERRUN_FRACTION * job.request.time)
+
+
+class _Profile:
+    """Free resources over time, as a step function: segment k covers [times[k], times[k+1])."""
+
+    def __init__(self, now: float, cpus: int, mem: int, vram: list[int]):
+        self.times = [now]
+        self.cpus = [cpus]
+        self.mem = [mem]
+        self.vram = [list(vram)]
+
+    def _boundary(self, t: float) -> int:
+        """Make t the start of a segment (t >= times[0]) and return that segment's index."""
+        k = bisect.bisect_right(self.times, t) - 1
+        if self.times[k] == t:
+            return k
+        self.times.insert(k + 1, t)
+        self.cpus.insert(k + 1, self.cpus[k])
+        self.mem.insert(k + 1, self.mem[k])
+        self.vram.insert(k + 1, list(self.vram[k]))
+        return k + 1
+
+    def add(self, start: float, end: float, cpus: int, mem: int, vram: dict[int, int]) -> None:
+        """Add (or, with negative amounts, take) resources over [start, end)."""
+        first = self._boundary(start)
+        last = len(self.times) if end == math.inf else self._boundary(end)
+        for k in range(first, last):
+            self.cpus[k] += cpus
+            self.mem[k] += mem
+            for pos, amount in vram.items():
+                self.vram[k][pos] += amount
+
+    def earliest(self, req: Request) -> tuple[float, tuple[int, ...]]:
+        """The earliest start at which req fits for its whole run, and the GPU positions to use."""
+        n, k = len(self.times), 0
+        while k < n:
+            start = self.times[k]
+            end = start + req.time
+            low_vram = list(self.vram[k])
+            j, short = k, False
+            while j < n and self.times[j] < end:
+                if self.cpus[j] < req.cpus or self.mem[j] < req.mem:
+                    short = True
+                    break
+                low_vram = [min(a, b) for a, b in zip(low_vram, self.vram[j])]
+                j += 1
+            if short:
+                # Every start up to segment j overlaps it, so none of them fit either.
+                k = j + 1
+                continue
+            if req.gpus == 0:
+                return start, ()
+            eligible = sorted((free, pos) for pos, free in enumerate(low_vram) if free >= req.vram)
+            if len(eligible) >= req.gpus:
+                return start, tuple(sorted(pos for _, pos in eligible[: req.gpus]))
+            k += 1
+        raise AssertionError("a request that fits the machine must fit once everything ends")
+
+
+def _plural(n: int, word: str) -> str:
+    return f"{n} {word}" if n == 1 else f"{n} {word}s"
+
+
+def plan(capacity: Capacity, running: Sequence[Running], queued: Sequence[Queued], now: float) -> Plan:
+    gpu_pos = {g.index: pos for pos, g in enumerate(capacity.gpus)}
+    cpu_set = set(capacity.cpus)
+
+    busy_cpus = {c for r in running for c in r.cpu_ids if c in cpu_set}
+    free_vram = [g.vram for g in capacity.gpus]
+    free_mem = capacity.mem
+    for r in running:
+        free_mem -= r.request.mem
+        for g in r.gpu_ids:
+            if g in gpu_pos:
+                free_vram[gpu_pos[g]] -= r.request.vram
+    profile = _Profile(now, len(cpu_set) - len(busy_cpus), free_mem, free_vram)
+
+    running_ends = {}
+    for r in running:
+        end = expected_end(r, now)
+        running_ends[r.job_id] = end
+        released = {gpu_pos[g]: r.request.vram for g in r.gpu_ids if g in gpu_pos}
+        profile.add(end, math.inf, sum(1 for c in r.cpu_ids if c in cpu_set), r.request.mem, released)
+
+    order = sorted(queued, key=lambda q: (q.tag, q.submitted, q.job_id))
+    placed: dict[int, tuple[float, float, tuple[int, ...]]] = {}
+    starts: list[Start] = []
+    for q in order:
+        if fits_machine(q.request, capacity):
+            continue
+        start, positions = profile.earliest(q.request)
+        end = start + q.request.time
+        profile.add(start, end, -q.request.cpus, -q.request.mem, {p: -q.request.vram for p in positions})
+        gpu_ids = tuple(capacity.gpus[p].index for p in positions)
+        placed[q.job_id] = (start, end, gpu_ids)
+        if start == now:
+            cpu_ids = tuple(c for c in capacity.cpus if c not in busy_cpus)[: q.request.cpus]
+            busy_cpus.update(cpu_ids)
+            starts.append(Start(q.job_id, cpu_ids, gpu_ids))
+
+    # What is free right now, once the jobs starting now have taken their share.
+    now_cpus, now_mem, now_vram = profile.cpus[0], profile.mem[0], profile.vram[0]
+    predictions: dict[int, Prediction] = {}
+    for position, q in enumerate(order, 1):
+        problem = fits_machine(q.request, capacity)
+        if problem:
+            predictions[q.job_id] = Prediction(
+                q.job_id, position, None, None, (), f"can't fit this machine: {problem}"
+            )
+            continue
+        start, end, gpu_ids = placed[q.job_id]
+        reason = ""
+        if start > now:
+            reason = _reason(q, order, placed, now, now_cpus, now_mem, now_vram)
+        predictions[q.job_id] = Prediction(q.job_id, position, start, end, gpu_ids, reason)
+
+    return Plan(starts, predictions, running_ends)
+
+
+def _reason(q, order, placed, now, free_cpus, free_mem, free_vram) -> str:
+    req = q.request
+    short = []
+    if req.cpus > free_cpus:
+        short.append(f"needs {_plural(req.cpus, 'CPU')}; {max(free_cpus, 0)} free")
+    if req.mem > free_mem:
+        short.append(f"needs {format_size(req.mem)} RAM; {format_size(max(free_mem, 0))} free")
+    if req.gpus:
+        roomy = sum(1 for free in free_vram if free >= req.vram)
+        if roomy < req.gpus:
+            if req.gpus == 1:
+                most = format_size(max(max(free_vram, default=0), 0))
+                short.append(f"needs {format_size(req.vram)} VRAM; most free on a GPU: {most}")
+            else:
+                has = "has" if roomy == 1 else "have"
+                short.append(
+                    f"needs {req.gpus} GPUs with {format_size(req.vram)} VRAM free; {roomy} {has}"
+                )
+    if short:
+        return "; ".join(short)
+    for ahead in order:
+        if ahead is q:
+            break
+        if ahead.job_id in placed:
+            start, _, _ = placed[ahead.job_id]
+            if now < start < now + req.time:
+                return f"would delay #{ahead.job_id}, which is ahead in line"
+    return "waiting for a job ahead in line"
