@@ -85,7 +85,7 @@ def _write_private(path: Path, text: str) -> None:
     os.replace(tmp, path)
 
 
-def launch(job: Job, paths: Paths, *, use_systemd: bool) -> tuple[int, int, str | None]:
+def launch(job: Job, paths: Paths, *, use_systemd: bool) -> tuple[int, int | None, str | None]:
     """Start the job's shim, detached. Returns (shim pid, its start ticks, systemd unit or None)."""
     job_dir = paths.job_dir(job.id)
     job_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -113,7 +113,7 @@ def launch(job: Job, paths: Paths, *, use_systemd: bool) -> tuple[int, int, str 
             command, start_new_session=True, stdin=subprocess.DEVNULL, stdout=log, stderr=log
         )
     _children[child.pid] = child
-    return child.pid, procs.start_ticks(child.pid) or 0, unit
+    return child.pid, procs.start_ticks(child.pid), unit
 
 
 def reap() -> None:
@@ -140,12 +140,16 @@ def job_pids(job: Job) -> list[int]:
     return [p for p in pids if p != job.shim_pid]
 
 
-def signal_job(job: Job, sig: int) -> None:
+def signal_job(job: Job, sig: int) -> int:
+    """Signal every process of the job; returns how many got it."""
+    sent = 0
     for pid in job_pids(job):
         try:
             os.kill(pid, sig)
+            sent += 1
         except (ProcessLookupError, PermissionError):
             pass
+    return sent
 
 
 def read_exit(paths: Paths, job_id: int) -> dict | None:
