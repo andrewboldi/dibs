@@ -67,22 +67,24 @@ def test_parent_and_descendants(spawn):
     p = spawn(["bash", "-c", "sleep 30 & sleep 30 & wait"])
     assert procs.parent(p.pid) == os.getpid()
     kids = wait_for(lambda: two_children(p.pid))
-    assert all(procs.cmdline(k)[0] == "sleep" for k in kids)
+    assert wait_for(lambda: all((procs.cmdline(k) or [""])[0] == "sleep" for k in kids))
     for k in kids:
         os.kill(k, 9)
 
 
 def test_environ_and_cmdline(spawn):
     p = spawn([PY, "-c", "import time; time.sleep(30)", "arg two"], env={**os.environ, "FOO": "bar baz"})
-    assert procs.environ(p.pid)["FOO"] == "bar baz"
-    assert procs.cmdline(p.pid) == [PY, "-c", "import time; time.sleep(30)", "arg two"]
+    # Popen returns as soon as exec begins; /proc shows the new environment a moment later.
+    assert wait_for(lambda: (procs.environ(p.pid) or {}).get("FOO")) == "bar baz"
+    expected = [PY, "-c", "import time; time.sleep(30)", "arg two"]
+    assert wait_for(lambda: procs.cmdline(p.pid) == expected)
 
 
 def test_exe_name_uid_rss_cgroup(spawn):
     p = spawn(["sleep", "5"])
-    assert procs.exe_name(p.pid) == "sleep"
+    assert wait_for(lambda: procs.exe_name(p.pid) == "sleep")
     assert procs.uid(p.pid) == os.getuid()
-    assert procs.rss(p.pid) > 0
+    assert wait_for(lambda: procs.rss(p.pid))
     assert procs.cgroup(p.pid).startswith("/")
 
 
