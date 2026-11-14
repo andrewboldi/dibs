@@ -410,11 +410,12 @@ def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     parser = build_parser()
     command: list[str] = []
-    if argv and argv[0] in ("submit", "run") and not {"-h", "--help"} & set(argv):
-        if "--" not in argv:
+    split = argv.index("--") if "--" in argv else len(argv)
+    # Only dibs's own options count: a -h in the job's command (df -h) belongs to the job.
+    if argv and argv[0] in ("submit", "run") and not {"-h", "--help"} & set(argv[:split]):
+        if split == len(argv):
             print(f"dibs: {COMMAND_HINT}", file=sys.stderr)
             return 2
-        split = argv.index("--")
         argv, command = argv[:split], argv[split + 1 :]
         if not command:
             print(f"dibs: nothing to run: {COMMAND_HINT}", file=sys.stderr)

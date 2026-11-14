@@ -96,7 +96,7 @@ def test_run_streams_output_and_exit_code(dibs):
 
 
 def test_run_preserves_argv(dibs):
-    args = ["--flag", "two words", 'quo"te', "", "üñí"]
+    args = ["--flag", "two words", 'quo"te', "", "üñí", "-h", "--help"]
     code = "import json, sys; print(json.dumps(sys.argv[1:]))"
     result = dibs("run", *RES, "--", PY, "-c", code, *args, check=0)
     assert json.loads(result.stdout.strip().splitlines()[-1]) == args
