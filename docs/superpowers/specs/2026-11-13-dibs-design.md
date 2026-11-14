@@ -562,6 +562,12 @@ it manages:
   first switched on. "Switched on" is a timestamp stored in the database when the daemon first runs
   with `guard = "all"`, kept across daemon restarts, so turning on enforcement never kills work
   that was already running, while processes started during a daemon restart are still caught.
+  That work includes what it starts later: the parent of each process that was already running
+  (torchrun, a Jupyter server, a pipeline script) is remembered, also across restarts, and new GPU
+  processes descending from it are left alone too. Parents that adopt orphans (init, the user's
+  systemd, dibs's own ancestors) are never remembered, since sparing them would spare everything.
+  (Added after the final review; a terminal shell that was running a GPU job at switch-on is
+  spared the same way, a narrow and accepted gap.)
 
 Graphics-only processes (the desktop, browsers drawing on the GPU) don't appear in the compute
 process list (seen on the user's machine: `gnome-shell` holds the GPU but isn't listed), so they're

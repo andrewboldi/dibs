@@ -238,3 +238,64 @@ def test_queue_shows_guard_lines(world, spawned):
     p.wait(timeout=5)
     text = render_queue(d.snapshot(), color=False)
     assert "Stopped outside dibs: pid" in text and "(3.1G on GPU 0)" in text
+
+
+def _find_by_marker(marker):
+    for name in os.listdir("/proc"):
+        if name.isdigit() and marker in (procs.cmdline(int(name)) or []) and procs.alive(int(name)):
+            return int(name)
+    return None
+
+
+def test_new_gpu_processes_of_work_already_running_are_left_alone(make_daemon, spawned):
+    # Like torchrun restarting a worker, or a new kernel under a Jupyter server that was running.
+    sleeper = f"'{PY}' -c 'import time; time.sleep(60)'"
+    launcher_proc = spawned(["bash", "-c", f"{sleeper} & sleep 1.5; {sleeper} & wait"])
+    first = wait_for(lambda: next(iter(procs.descendants(launcher_proc.pid)), None))
+    exec_done(first, PY)
+    backend = FakeBackend()
+    d = make_daemon(backend=backend)  # the guard switches on while `first` runs
+    backend.procs = [GpuProcess(first, 0, GiB)]
+    d.tick()
+    second = wait_for(
+        lambda: next(
+            (c for c in procs.descendants(launcher_proc.pid) if c != first and (procs.cmdline(c) or [""])[0] == PY),
+            None,
+        )
+    )
+    backend.procs = [GpuProcess(first, 0, GiB), GpuProcess(second, 0, GiB)]
+    d.tick()
+    assert procs.alive(first) and procs.alive(second)
+    assert outside(d)[second] == "started by work that was already running when the guard started"
+    d.close()
+    restarted = make_daemon(backend=backend)  # remembered across a restart
+    restarted.tick()
+    assert procs.alive(second)
+
+
+def test_orphans_never_make_their_adopter_exempt(make_daemon):
+    # An orphan is adopted by init or the session manager; remembering that parent would exempt
+    # everything the user runs.
+    def orphan(marker):
+        subprocess.run(["bash", "-c", f"('{PY}' -c 'import time, sys; time.sleep(60)' {marker} &)"], check=True)
+        pid = wait_for(lambda: _find_by_marker(marker))
+        exec_done(pid, PY)
+        return pid
+
+    old = orphan("dibs-test-old-orphan")
+    backend = FakeBackend()
+    d = make_daemon(backend=backend)
+    try:
+        backend.procs = [GpuProcess(old, 0, GiB)]
+        d.tick()
+        time.sleep(0.05)  # start times are in 10 ms ticks: keep `new` clearly after the guard started
+        new = orphan("dibs-test-new-orphan")
+        backend.procs = [GpuProcess(old, 0, GiB), GpuProcess(new, 0, GiB)]
+        d.tick()
+        assert procs.alive(old)
+        wait_for(lambda: not procs.alive(new))
+    finally:
+        for marker in ("dibs-test-old-orphan", "dibs-test-new-orphan"):
+            pid = _find_by_marker(marker)
+            if pid:
+                os.kill(pid, 9)

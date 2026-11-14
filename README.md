@@ -117,8 +117,9 @@ longer than expected.
 | GPU use outside dibs | the guard stops it within about a second, after writing into its output how to queue it | needs the daemon running (`dibs setup`) |
 | Time | never: the estimate only orders the queue | |
 
-The guard leaves alone processes of other users, programs in `guard_allow`, and anything that was
-already running when it was switched on, and lists them in `dibs queue`. Its limits, plainly: a job
+The guard leaves alone processes of other users, programs in `guard_allow`, and work that was
+already running when it was switched on (including what that work starts later, like torchrun
+restarting a worker), and lists them in `dibs queue`. Its limits, plainly: a job
 that grabs memory very fast can still collide once before it's stopped; CPU and RAM use outside
 dibs isn't stopped (nothing reliably tells a heavy job from a build or a test run); and an agent
 determined to get around it could stop the daemon, which its instructions tell it not to do.

@@ -190,3 +190,22 @@ def test_config_error_exits_1(dibs_env):
     _, err = p.communicate(timeout=20)
     assert p.returncode == 1
     assert "guard" in err.decode() and "guard" in paths.daemon_log.read_text()
+
+
+def test_daemon_log_rotates_while_running(tmp_path, monkeypatch):
+    # A failure repeating every second must not fill the disk.
+    from dibs import daemon as dmod
+
+    paths = get_paths({"DIBS_HOME": str(tmp_path / "h"), "HOME": str(tmp_path)})
+    ensure_dirs(paths)
+    monkeypatch.setattr(dmod, "LOG_MAX", 10_000)
+    try:
+        dmod._setup_logging(paths)
+        for _ in range(2000):
+            dmod.log.info("x" * 50)
+        assert paths.daemon_log.stat().st_size <= 10_000
+        assert paths.daemon_log.with_name("daemon.log.1").exists()
+    finally:
+        for handler in dmod.log.handlers:
+            handler.close()
+        dmod.log.handlers.clear()

@@ -227,3 +227,20 @@ def test_vram_watch_off_when_driver_is_blind(make_daemon):
     backend = FakeBackend()
     backend.blind = True
     assert make_daemon(backend=backend).info()["enforcement"]["vram_watch"] is False
+
+
+def test_lost_job_says_what_the_launcher_said(daemon, tmp_path, monkeypatch):
+    def broken_launch(job, paths, *, use_systemd):
+        job_dir = paths.job_dir(job.id)
+        job_dir.mkdir(parents=True, exist_ok=True)
+        (job_dir / "shim.log").write_text("Failed to start transient scope unit: Unknown assignment\n")
+        gone = subprocess.Popen(["true"])
+        gone.wait()
+        return gone.pid, None, None
+
+    monkeypatch.setattr(launcher, "launch", broken_launch)
+    job_id = submit(daemon, tmp_path, ["true"])
+    run_until(daemon, lambda: finished(daemon, job_id))
+    assert job(daemon, job_id).reason == (
+        "lost: its launcher exited without reporting (Failed to start transient scope unit: Unknown assignment)"
+    )

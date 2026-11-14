@@ -8,6 +8,7 @@ import asyncio
 import fcntl
 import json
 import logging
+import logging.handlers
 import math
 import os
 import shutil
@@ -86,8 +87,15 @@ class Daemon:
         # The guard leaves alone whatever was already running when it was first switched on.
         if config.guard != "off" and self.store.get_meta("guard_mode") in (None, "off"):
             self.store.set_meta("guard_since", repr(clock()))
+            self.store.set_meta("guard_parents", "[]")
         self.store.set_meta("guard_mode", config.guard)
         self.guard_since = float(self.store.get_meta("guard_since") or clock())
+        # Programs whose GPU processes were already running when the guard started (see _remember).
+        self.guard_parents = {tuple(p) for p in json.loads(self.store.get_meta("guard_parents") or "[]")}
+        self._ancestors = set()  # never remembered: adopting an orphan would exempt everything
+        pid = os.getpid()
+        while (pid := procs.parent(pid) or 0) > 1:
+            self._ancestors.add(pid)
 
     def close(self) -> None:
         if not self.closed:
@@ -371,7 +379,7 @@ class Daemon:
             if result is None and not (job.shim_pid and procs.alive(job.shim_pid, job.shim_ticks)):
                 result = launcher.read_exit(self.paths, job.id)  # it may have just been written
                 if result is None:
-                    self._lose(job, now, "lost: its launcher exited without reporting")
+                    self._lose(job, now, "lost: its launcher exited without reporting" + self._shim_said(job))
                     continue
             if result is not None:
                 self._finish(job, result, now)
@@ -432,7 +440,9 @@ class Daemon:
             allow=self.config.guard_allow,
             since=self.guard_since,
             my_uid=os.getuid(),
+            parents=self.guard_parents,
         )
+        self._remember(verdicts)
 
         usage: dict[int, dict[int, int]] = {}
         for v in verdicts:
@@ -476,6 +486,25 @@ class Daemon:
             if v.kind in guard.WHY
         ]
 
+    def _remember(self, verdicts: list) -> None:
+        """Remember the programs that started GPU processes which were running when the guard
+        started (torchrun, a Jupyter server, a pipeline script), so what they start next is spared.
+        Never init, the session manager or dibs's own ancestors: they adopt orphans, and sparing
+        them would spare everything."""
+        remembered = {p for p in self.guard_parents if procs.alive(p[0], p[1])}
+        for v in verdicts:
+            if v.kind != "preexisting":
+                continue
+            parent = procs.parent(v.pid) or 0
+            if parent <= 1 or parent in self._ancestors or procs.exe_name(parent) == "systemd":
+                continue
+            ticks = procs.start_ticks(parent)
+            if ticks is not None:
+                remembered.add((parent, ticks))
+        if remembered != self.guard_parents:
+            self.guard_parents = remembered
+            self.store.set_meta("guard_parents", json.dumps(sorted(remembered)))
+
     # Internals ----------------------------------------------------------------------------------
 
     def _push_stop(self, job: Job, now: float) -> None:
@@ -509,6 +538,15 @@ class Daemon:
         self.store.update_job(job)
         self._terminated.discard(job.id)
         self._notify(job)
+
+    def _shim_said(self, job: Job) -> str:
+        """The last thing the job's launcher logged, as " (...)", for a job that was lost."""
+        try:
+            lines = (self.paths.job_dir(job.id) / "shim.log").read_text(errors="replace").splitlines()
+        except OSError:
+            return ""
+        last = next((line.strip() for line in reversed(lines) if line.strip()), "")
+        return f" ({last[:200]})" if last else ""
 
     def _lose(self, job: Job, now: float, reason: str) -> None:
         job.state, job.ended, job.reason = State.FAILED, now, reason
@@ -558,12 +596,8 @@ _lock_fd: int | None = None  # held for the daemon's whole life
 
 
 def _setup_logging(paths: Paths) -> None:
-    try:
-        if paths.daemon_log.stat().st_size > LOG_MAX:
-            os.replace(paths.daemon_log, paths.daemon_log.with_suffix(".log.1"))
-    except OSError:
-        pass
-    handler = logging.FileHandler(paths.daemon_log)
+    # Size-capped while running, so even an error repeating every second can't fill the disk.
+    handler = logging.handlers.RotatingFileHandler(paths.daemon_log, maxBytes=LOG_MAX, backupCount=1)
     handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
     log.handlers[:] = [handler]
     log.setLevel(logging.INFO)
