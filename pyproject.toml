@@ -1,0 +1,30 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "dibs"
+dynamic = ["version"]
+description = "A job queue for one machine: coding agents reserve GPU, CPU and RAM, short jobs go first, and nothing uses the GPU behind its back."
+requires-python = ">=3.11"
+license = "MIT"
+authors = [{ name = "Andrew Boldi" }]
+dependencies = []
+
+[project.scripts]
+dibs = "dibs.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/andrewboldi/dibs"
+
+[tool.hatch.version]
+path = "src/dibs/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/dibs"]
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
