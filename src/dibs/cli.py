@@ -10,6 +10,7 @@ import sys
 import termios
 import time
 import tty
+from pathlib import Path
 
 from dibs import client as dc
 from dibs import render
@@ -109,6 +110,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     i = sub.add_parser("info", help="what dibs hands out and what it enforces")
     i.add_argument("--json", action="store_true")
+
+    st = sub.add_parser("setup", help="tell your agent CLIs about dibs and keep it running (turns the guard on)")
+    st.add_argument("--dry-run", action="store_true", help="only show what would change")
+    st.add_argument("--undo", action="store_true", help="remove everything setup added")
+    st.add_argument("--no-service", action="store_true", help="don't install the systemd user service")
+
+    sub.add_parser("agent-help", help="the full instructions for agents")
 
     d = sub.add_parser("daemon", help="start, stop or check the background scheduler")
     d.add_argument("action", choices=["start", "stop", "restart", "status", "run"])
@@ -310,6 +318,34 @@ def cmd_top(args, paths: Paths, _) -> int:
         sys.stdout.flush()
 
 
+def cmd_setup(args, paths: Paths, _) -> int:
+    from dibs import agents
+
+    home = Path.home()
+    if args.undo:
+        print("\n".join(agents.undo(home, service=not args.no_service)))
+        return 0
+    exe = shutil.which("dibs") or f"{sys.executable} -m dibs"
+    lines = agents.setup(
+        home, path_env=os.environ.get("PATH", ""), dry_run=args.dry_run, service=not args.no_service, dibs_exe=exe
+    )
+    print("\n".join(lines))
+    if not args.dry_run:
+        print(
+            "\nThe guard is on: GPU processes started outside dibs get stopped, with a note on how to "
+            f'resubmit them.\nTo only warn instead, put guard = "warn" in {paths.config_file} '
+            "and run dibs daemon restart. Undo all of this with dibs setup --undo."
+        )
+    return 0
+
+
+def cmd_agent_help(args, paths: Paths, _) -> int:
+    from dibs.instructions import AGENT_HELP
+
+    print(AGENT_HELP.rstrip())
+    return 0
+
+
 def _start(paths: Paths) -> int:
     running = dc.ping(paths)
     if running:
@@ -361,6 +397,8 @@ HANDLERS = {
     "cancel": cmd_cancel,
     "info": cmd_info,
     "top": cmd_top,
+    "setup": cmd_setup,
+    "agent-help": cmd_agent_help,
     "daemon": cmd_daemon,
 }
 
