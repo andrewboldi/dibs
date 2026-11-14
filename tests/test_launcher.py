@@ -1,0 +1,217 @@
+import os
+import signal
+import sys
+import time
+
+import pytest
+
+from dibs import launcher, procs
+from dibs.model import Job, Request, State
+from dibs.paths import ensure_dirs, get_paths
+from dibs.units import GiB, MiB
+
+PY = sys.executable
+
+
+@pytest.fixture
+def paths(tmp_path):
+    p = get_paths({"DIBS_HOME": str(tmp_path / "home"), "HOME": str(tmp_path)})
+    ensure_dirs(p)
+    return p
+
+
+_ids = iter(range(1, 10_000))
+
+
+def make_job(paths, argv, *, cpu_ids=(0,), gpu_ids=(), mem=1 * GiB, vram=0, cwd=None, env=None):
+    job_id = next(_ids)
+    return Job(
+        id=job_id,
+        name="test",
+        argv=list(argv),
+        cwd=str(cwd or paths.state_dir),
+        env=dict(os.environ if env is None else env),
+        request=Request(cpus=len(cpu_ids), mem=mem, gpus=len(gpu_ids), vram=vram, time=60.0),
+        session="s",
+        session_label="test·s",
+        submitted=time.time(),
+        tag=0.0,
+        state=State.RUNNING,
+        output=str(paths.job_dir(job_id) / "output.log"),
+        cpu_ids=list(cpu_ids),
+        gpu_ids=list(gpu_ids),
+    )
+
+
+def run(paths, job, *, use_systemd=False):
+    job.shim_pid, job.shim_ticks, job.unit = launcher.launch(job, paths, use_systemd=use_systemd)
+    return job
+
+
+def wait_exit(paths, job, timeout=15.0):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        result = launcher.read_exit(paths, job.id)
+        if result:
+            launcher.reap()
+            return result
+        time.sleep(0.05)
+    raise AssertionError("job never reported an exit")
+
+
+def wait_running(job, name, timeout=5.0):
+    """The job's processes running `name` (after the fork, a child still looks like the shim)."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        pids = [p for p in launcher.job_pids(job) if (procs.cmdline(p) or [""])[0] == name]
+        if pids:
+            return pids
+        time.sleep(0.02)
+    raise AssertionError(f"{name} never started")
+
+
+def output(job):
+    with open(job.output) as f:
+        return f.read()
+
+
+def test_job_env_sets_gpu_threads_and_ids(paths):
+    job = make_job(paths, ["true"], cpu_ids=(0, 1, 2, 3), gpu_ids=(0,), vram=6 * GiB, env={"PATH": "/usr/bin"})
+    env = launcher.job_env(job, "abcd1234")
+    assert env["CUDA_VISIBLE_DEVICES"] == "0"
+    assert env["CUDA_DEVICE_ORDER"] == "PCI_BUS_ID"
+    assert env["OMP_NUM_THREADS"] == env["MKL_NUM_THREADS"] == env["OPENBLAS_NUM_THREADS"] == "4"
+    assert env["NUMEXPR_NUM_THREADS"] == env["VECLIB_MAXIMUM_THREADS"] == "4"
+    assert env["PYTHONUNBUFFERED"] == "1"
+    assert env["DIBS_JOB_ID"] == str(job.id) and env["DIBS_INSTANCE"] == "abcd1234"
+    assert env["DIBS_VRAM"] == str(6 * GiB) and env["DIBS_MEM"] == str(1 * GiB)
+    assert env["DIBS_CPUS"] == "4" and env["DIBS_GPUS"] == "0"
+    assert env["PATH"] == "/usr/bin"
+
+
+def test_job_env_hides_gpus_and_keeps_submitter_threads(paths):
+    job = make_job(paths, ["true"], env={"OMP_NUM_THREADS": "2", "CUDA_VISIBLE_DEVICES": "0"})
+    env = launcher.job_env(job, "abcd1234")
+    assert env["CUDA_VISIBLE_DEVICES"] == ""
+    assert env["OMP_NUM_THREADS"] == "2"
+
+
+def test_launch_runs_and_reports_exit(paths):
+    job = run(paths, make_job(paths, [PY, "-c", "print('hi'); raise SystemExit(3)"]))
+    result = wait_exit(paths, job)
+    assert result["exit_code"] == 3 and result["reason"] is None
+    assert "hi" in output(job)
+
+
+def test_launch_pins_cpus(paths):
+    job = run(paths, make_job(paths, [PY, "-c", "import os; print(sorted(os.sched_getaffinity(0)))"], cpu_ids=(0, 1)))
+    wait_exit(paths, job)
+    assert output(job).strip() == "[0, 1]"
+
+
+def test_launch_uses_cwd_and_env(paths, tmp_path):
+    work = tmp_path / "work"
+    work.mkdir()
+    code = "import os; print(os.getcwd()); print(os.environ['FOO'])"
+    job = run(paths, make_job(paths, [PY, "-c", code], cwd=work, env={**os.environ, "FOO": "bar baz"}))
+    wait_exit(paths, job)
+    assert output(job).split("\n")[:2] == [str(work), "bar baz"]
+
+
+def test_launch_is_detached(paths):
+    job = run(paths, make_job(paths, ["sleep", "30"]))
+    try:
+        wait_running(job, "sleep")
+        assert os.getsid(job.shim_pid) != os.getsid(0)
+    finally:
+        launcher.signal_job(job, signal.SIGKILL)
+        wait_exit(paths, job)
+
+
+def test_bad_command_reports_127(paths):
+    job = run(paths, make_job(paths, ["definitely-not-a-command-xyz"]))
+    result = wait_exit(paths, job)
+    assert result["exit_code"] == 127
+    assert result["reason"].startswith("couldn't start:")
+
+
+def test_vanished_cwd_reports_127(paths, tmp_path):
+    gone = tmp_path / "gone"
+    job = run(paths, make_job(paths, ["true"], cwd=gone))
+    result = wait_exit(paths, job)
+    assert result["exit_code"] == 127
+    assert result["reason"] == f"couldn't start: working directory {gone} no longer exists"
+
+
+def _job_processes(paths, job):
+    found = []
+    for name in os.listdir("/proc"):
+        if name.isdigit():
+            env = procs.environ(int(name)) or {}
+            if env.get("DIBS_JOB_ID") == str(job.id) and env.get("DIBS_INSTANCE") == paths.instance:
+                if procs.alive(int(name)):
+                    found.append(int(name))
+    return found
+
+
+def test_leftovers_are_stopped(paths):
+    job = run(paths, make_job(paths, ["bash", "-c", "sleep 300 & echo started"]))
+    wait_exit(paths, job)
+    assert "started" in output(job)
+    deadline = time.time() + 3
+    while _job_processes(paths, job) and time.time() < deadline:
+        time.sleep(0.05)
+    assert _job_processes(paths, job) == []
+
+
+def test_signal_job_terminates(paths):
+    job = run(paths, make_job(paths, ["sleep", "60"]))
+    wait_running(job, "sleep")
+    launcher.signal_job(job, signal.SIGTERM)
+    assert wait_exit(paths, job)["exit_code"] == 143
+
+
+def test_job_pids_empty_once_shim_is_gone(paths):
+    job = run(paths, make_job(paths, ["true"]))
+    wait_exit(paths, job)
+    deadline = time.time() + 5
+    while procs.alive(job.shim_pid, job.shim_ticks) and time.time() < deadline:
+        time.sleep(0.02)
+    assert launcher.job_pids(job) == []
+
+
+def test_unit_name_includes_instance():
+    assert launcher.unit_name("ab12cd34", 7) == "dibs-ab12cd34-job-7"
+
+
+def test_systemd_can_be_turned_off():
+    assert launcher.systemd_available({"DIBS_NO_SYSTEMD": "1"}) is False
+
+
+needs_systemd = pytest.mark.skipif(
+    not launcher.systemd_available({k: v for k, v in os.environ.items() if k != "DIBS_NO_SYSTEMD"}),
+    reason="needs systemd-run --user with memory limits",
+)
+
+
+@needs_systemd
+def test_ram_cap_kills_with_oom_flag(paths):
+    code = "x = bytearray(300 << 20); print('allocated')"
+    job = run(paths, make_job(paths, [PY, "-c", code], mem=100 * MiB), use_systemd=True)
+    result = wait_exit(paths, job)
+    assert result["exit_code"] == 137
+    assert result["oom_killed"] is True
+    assert result["peak_mem"] >= 99 * MiB
+    assert "allocated" not in output(job)
+
+
+@needs_systemd
+def test_job_pids_from_scope(paths):
+    job = run(paths, make_job(paths, ["sleep", "30"]), use_systemd=True)
+    assert job.unit == launcher.unit_name(paths.instance, job.id)
+    wait_running(job, "sleep")
+    pids = launcher.job_pids(job)
+    assert pids and job.shim_pid not in pids
+    assert all(procs.cmdline(p)[0] == "sleep" for p in pids)
+    launcher.signal_job(job, signal.SIGKILL)
+    assert wait_exit(paths, job)["exit_code"] == 137
