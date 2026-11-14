@@ -105,7 +105,7 @@ def test_vram_packing():
     jobs = [queued(i, req(gpus=1, vram=3 * GiB), tag=i) for i in (1, 2, 3)]
     p = plan(cap(), [], jobs, NOW)
     assert [s.job_id for s in p.starts] == [1, 2]
-    assert p.predictions[3].reason == "needs 3G VRAM; most free on a GPU: 2G"
+    assert p.predictions[3].reason == "needs 3G VRAM (2G free)"
 
 
 def test_best_fit_gpu():
@@ -138,12 +138,12 @@ def test_expected_end_overrun():
 @pytest.mark.parametrize(
     "held,wanted,reason",
     [
-        (dict(cpus=4, mem=1 * GiB), dict(cpus=8, mem=1 * GiB), "needs 8 CPUs; 4 free"),
-        (dict(cpus=1, mem=24 * GiB), dict(cpus=1, mem=16 * GiB), "needs 16G RAM; 8G free"),
+        (dict(cpus=4, mem=1 * GiB), dict(cpus=8, mem=1 * GiB), "needs 8 CPUs (4 free)"),
+        (dict(cpus=1, mem=24 * GiB), dict(cpus=1, mem=16 * GiB), "needs 16G RAM (8G free)"),
         (
             dict(cpus=4, mem=24 * GiB),
             dict(cpus=8, mem=16 * GiB),
-            "needs 8 CPUs; 4 free; needs 16G RAM; 8G free",
+            "needs 8 CPUs (4 free), 16G RAM (8G free)",
         ),
     ],
 )
@@ -156,7 +156,14 @@ def test_reason_names_short_resources(held, wanted, reason):
 def test_multi_gpu_reason():
     r = running(1, req(gpus=1, vram=4 * GiB, time=600), (0,), (0,))
     p = plan(cap(gpus=(8 * GiB, 8 * GiB)), [r], [queued(2, req(gpus=2, vram=6 * GiB))], NOW)
-    assert p.predictions[2].reason == "needs 2 GPUs with 6G VRAM free; 1 has"
+    assert p.predictions[2].reason == "needs 2 GPUs with 6G VRAM free (1 has it)"
+
+
+def test_vram_reason_on_a_multi_gpu_machine():
+    r = running(1, req(gpus=1, vram=6 * GiB, time=600), (0,), (0,))
+    s = running(2, req(gpus=1, vram=5 * GiB, time=600), (1,), (1,))
+    p = plan(cap(gpus=(8 * GiB, 8 * GiB)), [r, s], [queued(3, req(gpus=1, vram=4 * GiB))], NOW)
+    assert p.predictions[3].reason == "needs 4G VRAM (at most 3G free on one GPU)"
 
 
 def test_positions_follow_tag_order():

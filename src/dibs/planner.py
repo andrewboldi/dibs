@@ -191,22 +191,21 @@ def _reason(q, order, placed, now, free_cpus, free_mem, free_vram) -> str:
     req = q.request
     short = []
     if req.cpus > free_cpus:
-        short.append(f"needs {_plural(req.cpus, 'CPU')}; {max(free_cpus, 0)} free")
+        short.append(f"{_plural(req.cpus, 'CPU')} ({max(free_cpus, 0)} free)")
     if req.mem > free_mem:
-        short.append(f"needs {format_size(req.mem)} RAM; {format_size(max(free_mem, 0))} free")
+        short.append(f"{format_size(req.mem)} RAM ({format_size(max(free_mem, 0))} free)")
     if req.gpus:
         roomy = sum(1 for free in free_vram if free >= req.vram)
         if roomy < req.gpus:
-            if req.gpus == 1:
-                most = format_size(max(max(free_vram, default=0), 0))
-                short.append(f"needs {format_size(req.vram)} VRAM; most free on a GPU: {most}")
+            vram = format_size(req.vram)
+            if req.gpus > 1:
+                short.append(f"{req.gpus} GPUs with {vram} VRAM free ({roomy} {'has' if roomy == 1 else 'have'} it)")
             else:
-                has = "has" if roomy == 1 else "have"
-                short.append(
-                    f"needs {req.gpus} GPUs with {format_size(req.vram)} VRAM free; {roomy} {has}"
-                )
+                most = format_size(max(max(free_vram, default=0), 0))
+                where = f"{most} free" if len(free_vram) == 1 else f"at most {most} free on one GPU"
+                short.append(f"{vram} VRAM ({where})")
     if short:
-        return "; ".join(short)
+        return "needs " + ", ".join(short)
     for ahead in order:
         if ahead is q:
             break

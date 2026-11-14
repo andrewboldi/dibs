@@ -49,9 +49,9 @@ def snapshot():
                  cpu_ids=[4, 5, 6, 7], expected_end=NOW + 240, over_estimate=0),
             view(3, "eval", State.QUEUED, 2, 4 * GiB, 8 * GiB, 180, position=1,
                  predicted_start=NOW + 900, predicted_end=NOW + 1080,
-                 waiting_for="needs 8G VRAM; most free on a GPU: 2G"),
+                 waiting_for="needs 8G VRAM (2G free)"),
             view(2, "finetune", State.QUEUED, 8, 16 * GiB, 8 * GiB, 7200, position=2,
-                 predicted_start=NOW + 1080, predicted_end=NOW + 8280, waiting_for="needs 8G VRAM; most free on a GPU: 2G"),
+                 predicted_start=NOW + 1080, predicted_end=NOW + 8280, waiting_for="needs 8G VRAM (2G free)"),
         ],
         "guard": {
             "mode": "all",
@@ -104,3 +104,14 @@ def test_top_without_tty_prints_once(dibs_env, tmp_path):
     subprocess.run([sys.executable, "-m", "dibs", "daemon", "stop"], env=dibs_env, timeout=60)
     assert result.returncode == 0
     assert "GPU 0" in result.stdout and "\x1b[?1049h" not in result.stdout
+
+
+def test_short_plans_get_second_ticks(snapshot):
+    short = {**snapshot, "jobs": [
+        view(1, "train", State.RUNNING, 4, 8 * GiB, 6 * GiB, 25, started=NOW - 5,
+             cpu_ids=[0, 1, 2, 3], gpu_ids=[0], expected_end=NOW + 20, over_estimate=0),
+        view(2, "finetune", State.QUEUED, 8, 8 * GiB, 8 * GiB, 45, position=1,
+             predicted_start=NOW + 20, predicted_end=NOW + 65, waiting_for=""),
+    ]}  # fmt: skip
+    text = render_top(short, width=110, height=30, color=False)
+    assert "+10s" in text and "+30s" in text

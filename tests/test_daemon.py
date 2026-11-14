@@ -188,7 +188,7 @@ def test_snapshot_has_predictions(daemon, tmp_path):
     assert views[blocker]["expected_end"] > snap["now"] and views[blocker]["over_estimate"] == 0
     q = views[waiting]
     assert q["position"] == 1 and q["predicted_start"] >= snap["now"] + 99
-    assert q["waiting_for"] == "needs 2G VRAM; most free on a GPU: 0"
+    assert q["waiting_for"] == "needs 2G VRAM (0 free)"
     assert "env" not in q
     assert snap["capacity"]["gpus"][0]["vram"] == 8 * GiB
     assert snap["guard"]["mode"] == "all"
