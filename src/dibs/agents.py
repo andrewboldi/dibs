@@ -77,7 +77,7 @@ def service_unit(dibs_exe: str) -> str:
         "\n"
         "[Service]\n"
         f"ExecStart={dibs_exe} daemon run\n"
-        "Restart=on-failure\n"
+        "Restart=always\n"
         "\n"
         "[Install]\n"
         "WantedBy=default.target\n"
@@ -108,8 +108,16 @@ def _write(path: Path, text: str, record: dict) -> None:
         record["dirs"].append(str(folder))
     key = str(path)
     if path.exists():
-        if key not in record["modified"] and key not in record["created"]:
-            record["modified"][key] = path.read_text()
+        current = path.read_text()
+        edited = key in record["written"] and current != record["written"][key]
+        if edited and key in record["created"]:
+            # The user has made this file theirs: from now on undo keeps it, minus the dibs block.
+            record["created"].remove(key)
+            record["modified"][key] = remove_block(current)
+        elif edited and key in record["modified"]:
+            record["modified"][key] = remove_block(current)
+        elif key not in record["modified"] and key not in record["created"]:
+            record["modified"][key] = current
     elif key not in record["created"]:
         record["created"].append(key)
     path.write_text(text)
@@ -168,13 +176,16 @@ def setup(home: Path, *, path_env: str, dry_run: bool, service: bool, dibs_exe: 
             lines.append(f"Claude Code: {'would write' if dry_run else 'wrote'} the dibs skill to {skill}")
             if not dry_run:
                 _write(skill, SKILL, record)
-    if service:
-        if dry_run:
+    if dry_run:
+        if service:
             lines.append("Would install and start a systemd user service so dibs (and its guard) always runs.")
-        else:
+        return lines
+    _save_record(home, record)  # before the service part, which can fail: undo must still work
+    if service:
+        try:
             _install_service(home, dibs_exe, record, lines)
-    if not dry_run:
-        _save_record(home, record)
+        finally:
+            _save_record(home, record)
     return lines
 
 

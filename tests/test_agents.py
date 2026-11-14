@@ -120,7 +120,7 @@ def test_service_unit_text():
     unit = agents.service_unit(EXE)
     assert "Description=dibs job scheduler" in unit
     assert f"ExecStart={EXE} daemon run" in unit
-    assert "Restart=on-failure" in unit and "WantedBy=default.target" in unit
+    assert "Restart=always" in unit and "WantedBy=default.target" in unit
 
 
 def test_block_warns_about_guard():
@@ -137,3 +137,32 @@ def test_agent_help_cli(tmp_path):
     result = subprocess.run([sys.executable, "-m", "dibs", "agent-help"], capture_output=True, text=True,
                             env={**os.environ, "DIBS_HOME": str(tmp_path)}, timeout=60)  # fmt: skip
     assert result.returncode == 0 and result.stdout.strip() == AGENT_HELP.strip()
+
+
+@pytest.mark.parametrize("existed", [True, False])
+def test_rerun_after_edits_then_undo_keeps_the_edits(home, monkeypatch, existed):
+    target = home / ".codex" / "AGENTS.md"
+    if existed:
+        target.write_text("original\n")
+    setup(home)
+    with open(target, "a") as f:
+        f.write("MY NOTES\n")
+    monkeypatch.setattr(agents, "BLOCK", BLOCK + "\nA newer dibs says more.")  # an upgrade
+    setup(home)
+    agents.undo(home, service=False)
+    text = target.read_text()
+    assert "MY NOTES" in text and BEGIN not in text
+    if existed:
+        assert text.startswith("original\n")
+
+
+def test_failed_service_install_still_leaves_a_record(home, monkeypatch):
+    def broken(*args, **kwargs):
+        raise RuntimeError("systemctl hung")
+
+    monkeypatch.setattr(agents, "_install_service", broken)
+    with pytest.raises(RuntimeError):
+        agents.setup(home, path_env="", dry_run=False, service=True, dibs_exe=EXE)
+    assert BEGIN in (home / ".claude" / "CLAUDE.md").read_text()
+    agents.undo(home, service=False)
+    assert not (home / ".claude" / "CLAUDE.md").exists()

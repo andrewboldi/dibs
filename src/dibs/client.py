@@ -59,23 +59,43 @@ def _daemon_gone(paths: Paths) -> bool:
     return True
 
 
+_PASSED_ON = ("PATH", "HOME", "XDG_CONFIG_HOME", "XDG_STATE_HOME", "XDG_RUNTIME_DIR")
+
+
+def daemon_setenv(env: Mapping[str, str]) -> list[str]:
+    """systemd-run options that give a daemon started by systemd the caller's dibs settings and
+    folders (a systemd unit starts with the user manager's environment, not ours)."""
+    return [f"--setenv={k}={v}" for k, v in env.items() if k.startswith("DIBS_") or k in _PASSED_ON]
+
+
+def _service_installed(paths: Paths, env: Mapping[str, str]) -> bool:
+    """Whether `dibs setup` installed the systemd user service that runs this dibs."""
+    unit = Path(env.get("HOME") or Path.home()) / ".config/systemd/user/dibs.service"
+    return not paths.home_mode and unit.exists()
+
+
 def start_daemon(paths: Paths, env: Mapping[str, str] = os.environ) -> None:
     """Start the daemon, fully detached from this process (it must outlive the caller)."""
     ensure_dirs(paths)
     command = [sys.executable, "-m", "dibs", "daemon", "run"]
-    service = Path(env.get("HOME") or Path.home()) / ".config/systemd/user/dibs.service"
     if launcher.systemd_available(env):
-        if not paths.home_mode and service.exists():
+        if _service_installed(paths, env):
             subprocess.run(["systemctl", "--user", "start", "dibs.service"], capture_output=True, timeout=30)
             return
-        setenv = [f"--setenv={k}={v}" for k, v in env.items() if k.startswith("DIBS_") or k == "PATH"]
         unit = f"--unit=dibs-{paths.instance}-daemon"
         subprocess.run(
-            ["systemd-run", "--user", "--quiet", "--collect", unit, *setenv, "--", *command],
+            ["systemd-run", "--user", "--quiet", "--collect", unit, *daemon_setenv(env), "--", *command],
             capture_output=True,
             timeout=30,
         )
         return
+    if env.get("DIBS_JOB_ID"):
+        # Started from here, it would run on the job's CPUs and be stopped with the job's leftovers.
+        raise DibsError(
+            "dibs isn't running, and it can't be started from inside a dibs job (it would stop when "
+            "the job ends). Start it outside the job: dibs daemon start",
+            "not_running",
+        )
     subprocess.Popen(
         command,
         env=dict(env),
@@ -86,8 +106,15 @@ def start_daemon(paths: Paths, env: Mapping[str, str] = os.environ) -> None:
     )
 
 
-def stop_daemon(paths: Paths, timeout: float = 10.0) -> bool:
+def stop_daemon(paths: Paths, timeout: float = 10.0, env: Mapping[str, str] = os.environ) -> bool:
     """Ask the daemon to stop and wait until it has. Running jobs keep running. False if none ran."""
+    if _service_installed(paths, env):
+        active = subprocess.run(
+            ["systemctl", "--user", "is-active", "--quiet", "dibs.service"], capture_output=True, timeout=30, env=dict(env)
+        )
+        if active.returncode == 0:  # the service restarts a daemon that just exits, so stop the service
+            subprocess.run(["systemctl", "--user", "stop", "dibs.service"], capture_output=True, timeout=60, env=dict(env))
+            return True
     try:
         _request(paths.socket, {"op": "shutdown"}, 5)
     except (OSError, ValueError):
