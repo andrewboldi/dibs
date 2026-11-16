@@ -260,6 +260,10 @@ def test_priority_flag(dibs):
     dibs("cancel", "1")
 
 
+UPGRADED = ("dibs was upgraded while this command ran: the daemon runs 0.1.0+new, this command still runs "
+            "the code it started with (0.1.0+old). Run the command again")
+
+
 def _upgraded_under(monkeypatch, tmp_path):
     """Every request finds dibs upgraded under this command; execve is recorded, not done."""
     from dibs import cli
@@ -269,7 +273,7 @@ def _upgraded_under(monkeypatch, tmp_path):
     monkeypatch.delenv("DIBS_RERUN", raising=False)
 
     def call(self, op, **fields):
-        raise dc.DibsError("dibs was upgraded while this command ran", "upgraded")
+        raise dc.DibsError(UPGRADED, "upgraded")
 
     monkeypatch.setattr(dc.Client, "call", call)
     execs = []
@@ -301,6 +305,29 @@ def test_a_command_that_would_do_something_twice_isnt_run_again(argv, monkeypatc
     assert cli.main(argv) == 1
     assert execs == []
     assert "dibs was upgraded while this command ran" in capsys.readouterr().err
+
+
+def test_a_run_the_upgrade_reaches_after_its_submit_names_the_running_job(monkeypatch, tmp_path, capsys):
+    # Issue #70: `dibs run` had already submitted its job when the upgrade reached its follow, and
+    # "Run the command again" would have an agent submit the job a second time.
+    from dibs import client as dc
+
+    cli, execs = _upgraded_under(monkeypatch, tmp_path)
+    job = {"id": 7, "name": "train", "state": "running", "output": str(tmp_path / "7.out")}
+
+    def call(self, op, **fields):
+        if op == "submit":
+            return {"ok": True, "now": 0.0, "job": job}
+        raise dc.DibsError(UPGRADED, "upgraded")
+
+    monkeypatch.setattr(dc.Client, "call", call)
+    assert cli.main(["run", *RES, "--", "true"]) == 1
+    err = capsys.readouterr().err
+    assert execs == [] and "Run the command again" not in err
+    assert err.rstrip().splitlines()[-1] == (
+        "dibs: dibs was upgraded while this command ran, and job 7 keeps running. "
+        "Wait for it: dibs wait 7   Follow it: dibs logs 7 -f"
+    )
 
 
 def test_a_command_runs_again_only_once(monkeypatch, tmp_path, capsys):
