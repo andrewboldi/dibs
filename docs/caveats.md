@@ -29,6 +29,11 @@ What dibs doesn't do, or does only partly. Each item says what happens and what 
 - **A busy desktop leaves jobs less RAM.** dibs doesn't hand out the RAM other programs use, so with
   a browser holding 12G, jobs share what's left. Close programs to give it back; jobs already
   running keep their reservations.
+- **Files in a folder kept in RAM count as RAM.** What a job writes to /dev/shm, or to /tmp where
+  /tmp is a tmpfs, counts against its RAM reservation; a job killed at its limit says so when such
+  files were a big part of it. Files a job leaves there keep holding RAM after it ends, and dibs then
+  counts them as in use outside dibs, until someone deletes them. Point big scratch files at disk
+  (most tools follow TMPDIR).
 - **Jobs' environments are stored.** To run a job with the submitter's virtualenv and settings,
   dibs keeps its environment, which can include API keys, in `~/.local/state/dibs/dibs.db`. Only
   you can read the file. Finished jobs are deleted after `keep_days` (14 days by default).

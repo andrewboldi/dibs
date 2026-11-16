@@ -447,6 +447,40 @@ def test_ram_a_finished_job_is_letting_go_of_is_not_counted_as_outside(make_daem
     assert job(d, second).state != State.QUEUED, json.dumps(d.show(second)["job"])
 
 
+def _killed_for_ram_holding(d, tmp_path, monkeypatch, mem, anon, shmem):
+    """A job that held this much (anon, shmem) at its last sample, then was killed at its RAM limit."""
+    job_id, stat, go = _job_holding(d, tmp_path, monkeypatch, mem)
+    stat.write_text(f"anon {anon}\nfile {4 * GiB}\nshmem {shmem}\n")
+    d.tick()
+    real_read_exit = launcher.read_exit
+    monkeypatch.setattr(
+        launcher, "read_exit",
+        lambda paths, i: (r := real_read_exit(paths, i)) and {**r, "exit_code": 137, "oom_killed": True},
+    )  # fmt: skip
+    go.touch()
+    run_until(d, lambda: finished(d, job_id))
+    return job(d, job_id)
+
+
+def test_a_ram_kill_says_when_most_of_the_ram_was_shared_memory(daemon, tmp_path, monkeypatch):
+    # Issue #74: six of seven RAM kills were mostly scratch files in a /tmp kept in RAM, which count
+    # against --mem, and the reason said only "went over its 10G RAM reservation".
+    gib = 1 << 30
+    killed = _killed_for_ram_holding(daemon, tmp_path, monkeypatch, 10 * gib, int(4.1 * gib), int(5.4 * gib))
+    assert killed.peak_mem == int(4.1 * gib) + int(5.4 * gib)
+    assert killed.peak_shmem == int(5.4 * gib)
+    assert killed.reason == (
+        "killed: went over its 10G RAM reservation "
+        "(5.4G of it was files in /dev/shm or a RAM-backed /tmp, or other shared memory)"
+    )
+
+
+def test_a_ram_kill_with_little_shared_memory_says_only_that_it_went_over(daemon, tmp_path, monkeypatch):
+    gib = 1 << 30
+    killed = _killed_for_ram_holding(daemon, tmp_path, monkeypatch, 8 * gib, int(7.8 * gib), int(0.1 * gib))
+    assert killed.reason == "killed: went over its 8G RAM reservation"
+
+
 def test_submit_reports_earlier_runs_of_the_same_command(daemon, tmp_path):
     # Issue #31: agents guess their requests; dibs tells them what the same command used before.
     first = submit(daemon, tmp_path, [PY, "-c", "pass"])

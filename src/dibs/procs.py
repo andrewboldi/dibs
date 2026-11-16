@@ -154,11 +154,15 @@ def keyed_numbers(text: str | None) -> dict[str, int]:
     return stat
 
 
-def memory_in_use(cgroup_path: str) -> int | None:
+def memory_in_use(cgroup_path: str) -> tuple[int, int] | None:
     """What a cgroup's processes hold (anon + shmem), leaving out the file cache that memory.current
-    and memory.peak also count: the kernel drops that cache when memory runs short."""
+    and memory.peak also count: the kernel drops that cache when memory runs short. With it, the
+    shmem part: files in /dev/shm or a RAM-backed /tmp, and other shared memory."""
     stat = keyed_numbers(_read(f"{CGROUP_ROOT}{cgroup_path}/memory.stat"))
-    return stat["anon"] + stat.get("shmem", 0) if "anon" in stat else None
+    if "anon" not in stat:
+        return None
+    shmem = stat.get("shmem", 0)
+    return stat["anon"] + shmem, shmem
 
 
 def cgroup(pid: int) -> str | None:

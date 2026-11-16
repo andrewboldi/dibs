@@ -78,6 +78,7 @@ class Job:
     stop_requested: float | None = None
     peak_vram: int | None = None
     peak_mem: int | None = None
+    peak_shmem: int | None = None  # the shared memory in peak_mem: files in /dev/shm or a RAM-backed /tmp, and the like
     cpu_seconds: float | None = None  # CPU time the job used, from its scope
     priority: int = 5  # 1-10; see compute_tag
     plain_tag: float | None = None  # its place at priority 5 with nothing owed; the session's next jobs line up behind it
