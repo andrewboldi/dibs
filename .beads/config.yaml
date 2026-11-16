@@ -53,3 +53,12 @@
 # Secret keys (stored in this file but prefer env vars to avoid git exposure):
 # - linear.api_key  → use LINEAR_API_KEY env var instead
 # - github.token    → use GITHUB_TOKEN env var instead
+
+# dibs: the Dolt database is the source of truth. The JSONL export stays local (it isn't tracked:
+# it records people's email addresses), is never staged, and is never imported back on checkout or
+# merge (that once reopened closed issues from a stale export). Issues are shared through GitHub:
+# `bd github sync` (see CONTRIBUTING.md).
+import:
+  auto: false
+export:
+  git-add: false
