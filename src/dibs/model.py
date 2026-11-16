@@ -1,6 +1,7 @@
 """What a machine has, what a job asks for, and where a job stands in line."""
 
 import math
+import shlex
 import os
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field
@@ -216,6 +217,29 @@ def job_from_dict(d: Mapping[str, Any]) -> Job:
 
 
 _SCRIPT_SUFFIXES = (".py", ".sh", ".js", ".ts", ".rb", ".pl")
+
+
+_SHELLS = ("sh", "bash", "zsh", "dash")
+
+
+def script_of(argv: Sequence[str]) -> str | None:
+    """The script a command runs: the first script path in it (also inside a shell's -c string), or
+    "-m module" for Python. Earlier runs of the same script with other arguments are a guide to
+    sizing the next one. None if there's no script, or a -c string doesn't parse."""
+    words = list(argv)
+    for i, word in enumerate(argv):
+        if word == "-c" and i + 1 < len(argv) and any(os.path.basename(w) in _SHELLS for w in argv[:i]):
+            try:
+                words = [*argv[:i], *shlex.split(argv[i + 1]), *argv[i + 2 :]]
+            except ValueError:
+                return None
+            break
+    for i, word in enumerate(words):
+        if word == "-m" and i + 1 < len(words):
+            return f"-m {words[i + 1]}"
+        if word.endswith(_SCRIPT_SUFFIXES):
+            return word
+    return None
 
 
 def default_name(argv: Sequence[str]) -> str:

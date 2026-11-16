@@ -10,7 +10,7 @@ import sqlite3
 from collections.abc import Iterable
 from pathlib import Path
 
-from dibs.model import TERMINAL, Job, State, job_from_dict, job_to_dict
+from dibs.model import TERMINAL, Job, State, job_from_dict, job_to_dict, script_of
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS jobs (id INTEGER PRIMARY KEY AUTOINCREMENT, state TEXT NOT NULL, data TEXT NOT NULL, ended REAL);
@@ -19,6 +19,12 @@ CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY AUTOINCREMENT, kind TE
 CREATE INDEX IF NOT EXISTS jobs_state ON jobs (state);
 """
 _TERMINAL = tuple(str(s) for s in TERMINAL)
+
+
+def _script(cwd: str, argv: list[str]) -> str | None:
+    """What makes two jobs runs of the same script: the folder and the script (see model.script_of)."""
+    script = script_of(argv)
+    return json.dumps([cwd, script]) if script else None
 
 
 def _command(cwd: str, argv: list[str]) -> str:
@@ -37,6 +43,7 @@ class Store:
             self._db.executescript(_SCHEMA)
             self._add_ended_column()
             self._add_command_column()
+            self._add_script_column()
 
     def _add_ended_column(self) -> None:
         """Databases from before the ended column get it, filled in from each job's data."""
@@ -62,6 +69,19 @@ class Store:
             self._db.executemany("UPDATE jobs SET command = ? WHERE id = ?", commands)
         self._db.execute("CREATE INDEX IF NOT EXISTS jobs_command ON jobs (command)")
 
+    def _add_script_column(self) -> None:
+        """Databases from before the script column get it, filled in from each job's data."""
+        columns = {row[1] for row in self._db.execute("PRAGMA table_info(jobs)")}
+        if "script" not in columns:
+            self._db.execute("ALTER TABLE jobs ADD COLUMN script TEXT")
+            rows = self._db.execute("SELECT id, data FROM jobs").fetchall()
+            scripts = []
+            for i, data in rows:
+                d = json.loads(data) if data else {}
+                scripts.append((_script(d.get("cwd", ""), d.get("argv", [])), i))
+            self._db.executemany("UPDATE jobs SET script = ? WHERE id = ?", scripts)
+        self._db.execute("CREATE INDEX IF NOT EXISTS jobs_script ON jobs (script)")
+
     def close(self) -> None:
         self._db.close()
 
@@ -70,17 +90,18 @@ class Store:
             cur = self._db.execute("INSERT INTO jobs (state, data) VALUES (?, '')", (str(job.state),))
             job.id = cur.lastrowid
             self._db.execute(
-                "UPDATE jobs SET data = ?, ended = ?, command = ? WHERE id = ?",
-                (json.dumps(job_to_dict(job, include_env=True)), job.ended, _command(job.cwd, job.argv), job.id),
+                "UPDATE jobs SET data = ?, ended = ?, command = ?, script = ? WHERE id = ?",
+                (json.dumps(job_to_dict(job, include_env=True)), job.ended, _command(job.cwd, job.argv),
+                 _script(job.cwd, job.argv), job.id),  # fmt: skip
             )
         return job.id
 
     def update_job(self, job: Job) -> None:
         with self._db:
             self._db.execute(
-                "UPDATE jobs SET state = ?, data = ?, ended = ?, command = ? WHERE id = ?",
+                "UPDATE jobs SET state = ?, data = ?, ended = ?, command = ?, script = ? WHERE id = ?",
                 (str(job.state), json.dumps(job_to_dict(job, include_env=True)), job.ended,
-                 _command(job.cwd, job.argv), job.id),
+                 _command(job.cwd, job.argv), _script(job.cwd, job.argv), job.id),
             )  # fmt: skip
 
     def earlier_runs(self, cwd: str, argv: list[str], limit: int = 3) -> list[Job]:
@@ -89,6 +110,15 @@ class Store:
         rows = self._db.execute(
             f"SELECT data FROM jobs WHERE command = ? AND state IN ({marks}) ORDER BY ended DESC, id DESC LIMIT ?",
             (_command(cwd, argv), *_TERMINAL, limit),
+        ).fetchall()
+        return [job_from_dict(json.loads(r[0])) for r in rows]
+
+    def earlier_runs_of_script(self, cwd: str, script: str, limit: int = 3) -> list[Job]:
+        """Finished runs of this script in this folder, with any arguments, newest first."""
+        marks = ",".join("?" * len(_TERMINAL))
+        rows = self._db.execute(
+            f"SELECT data FROM jobs WHERE script = ? AND state IN ({marks}) ORDER BY ended DESC, id DESC LIMIT ?",
+            (json.dumps([cwd, script]), *_TERMINAL, limit),
         ).fetchall()
         return [job_from_dict(json.loads(r[0])) for r in rows]
 

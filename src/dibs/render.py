@@ -4,6 +4,7 @@ import os
 import shlex
 import time
 
+from dibs.model import script_of
 from dibs.units import format_duration, format_size
 
 _COLORS = {"running": "32", "queued": "33", "failed": "31", "done": "2", "cancelled": "2"}
@@ -80,11 +81,15 @@ def finished_line(job: dict) -> str:
     return line
 
 
-def render_earlier(earlier: list[dict]) -> str:
-    """What earlier runs of the same command used: what to size the next request from."""
+def render_earlier(earlier: list[dict], match: str = "command") -> str:
+    """What earlier runs of the same command (or, with match="script", the same script with other
+    arguments) used: what to size the next request from."""
     if not earlier:
         return ""
-    lines = ["Earlier runs of this command here:"]
+    if match == "script":
+        lines = [f"Earlier runs of {script_of(earlier[0].get('argv') or []) or 'this script'} here, with other arguments:"]
+    else:
+        lines = ["Earlier runs of this command here:"]
     for e in earlier:
         r = e["request"]
         ran = e["ended"] - e["started"] if e.get("ended") and e.get("started") is not None else None

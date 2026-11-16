@@ -185,4 +185,15 @@ def test_a_database_from_before_the_command_column_finds_earlier_runs(tmp_path):
     old.close()
     s = Store(path)
     assert [j.id for j in s.earlier_runs(job.cwd, job.argv)] == [1]
+    assert [j.id for j in s.earlier_runs_of_script(job.cwd, "train.py")] == [1]  # make_job runs python train.py
+    s.close()
+
+
+def test_earlier_runs_of_the_same_script_are_found_in_sql(tmp_path):
+    s = Store(tmp_path / "dibs.db")
+    s.add_job(make_job(state=State.DONE, ended=100.0, cwd="/w", argv=["python", "train.py", "--lr", "1"]))
+    s.add_job(make_job(state=State.DONE, ended=200.0, cwd="/w", argv=["python", "train.py", "--lr", "2"]))
+    s.add_job(make_job(state=State.DONE, ended=300.0, cwd="/w", argv=["python", "eval.py"]))
+    s.add_job(make_job(state=State.DONE, ended=400.0, cwd="/x", argv=["python", "train.py"]))
+    assert [j.id for j in s.earlier_runs_of_script("/w", "train.py")] == [2, 1]
     s.close()
