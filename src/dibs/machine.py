@@ -23,6 +23,7 @@ class Config:
     keep_days: int = 14
     guard: str = "all"
     guard_allow: tuple[str, ...] = ()
+    agent_files: tuple[str, ...] = ()  # more instructions files for dibs setup (agent CLIs it doesn't know)
 
 
 class ConfigError(ValueError):
@@ -77,6 +78,12 @@ def load_config(path: Path) -> Config:
             if not isinstance(value, list) or not all(isinstance(s, str) and s for s in value):
                 raise ConfigError(
                     "config setting 'guard_allow' must be a list of program names, like [\"ollama\"]"
+                )
+            fields[key] = tuple(value)
+        elif key == "agent_files":
+            if not isinstance(value, list) or not all(isinstance(s, str) and s for s in value):
+                raise ConfigError(
+                    "config setting 'agent_files' must be a list of files, like [\"~/.cursor/rules/dibs.mdc\"]"
                 )
             fields[key] = tuple(value)
         else:

@@ -165,6 +165,7 @@ vram = "7.5G"      # hand out at most this much VRAM per GPU, default: each GPU'
 keep_days = 14     # delete finished jobs' logs after this many days
 guard = "all"      # "all": stop GPU processes outside dibs; "warn": only report them; "off"
 guard_allow = []   # executable names the guard leaves alone, e.g. ["ollama", "obs"]
+agent_files = []   # more instructions files for dibs setup, e.g. ["~/.cursor/rules/dibs.mdc"]
 ```
 
 Values larger than what was detected are an error at daemon start (with a clear message). Config is

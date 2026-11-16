@@ -234,3 +234,31 @@ def test_undo_without_service_leaves_the_service_alone(tmp_path, fake_systemd):
     assert "systemctl --user disable --now dibs.service" in calls
     assert f"loginctl disable-linger {user}" in calls
     assert not unit.exists()
+
+
+def test_setup_writes_into_configured_agent_files_and_undo_takes_it_back(home):
+    # Issue #26: an agent CLI dibs doesn't know gets the instructions through config, without a PR.
+    (home / "mine.md").write_text("# my agent's rules\n")
+    before = snapshot(home)
+    lines = agents.setup(home, path_env="", dry_run=False, service=False, dibs_exe=EXE,
+                         agent_files=["~/mine.md", "~/.cursor/rules/dibs.mdc"])  # fmt: skip
+    assert (home / "mine.md").read_text().startswith("# my agent's rules\n") and BEGIN in (home / "mine.md").read_text()
+    assert BEGIN in (home / ".cursor" / "rules" / "dibs.mdc").read_text()
+    assert any("mine.md" in line for line in lines)
+    agents.undo(home, service=False)
+    assert snapshot(home) == before
+    assert not (home / ".cursor").exists()
+
+
+def test_setup_reads_agent_files_from_config(tmp_path):
+    home, dibs_home = tmp_path / "home", tmp_path / "dibs"
+    home.mkdir()
+    dibs_home.mkdir()
+    (dibs_home / "config.toml").write_text('agent_files = ["~/notes/agent.md"]\n')
+    env = {**os.environ, "HOME": str(home), "DIBS_HOME": str(dibs_home), "PATH": "/usr/bin:/bin"}
+    run = lambda *a: subprocess.run([sys.executable, "-m", "dibs", "setup", *a], env=env, capture_output=True, text=True)  # noqa: E731
+    out = run("--no-service")
+    assert out.returncode == 0, out.stderr
+    assert BEGIN in (home / "notes" / "agent.md").read_text()
+    assert run("--undo", "--no-service").returncode == 0
+    assert not (home / "notes").exists()
