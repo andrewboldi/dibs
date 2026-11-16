@@ -317,3 +317,24 @@ def test_a_leftover_of_our_own_finished_job_is_still_stopped(world, spawned):
     backend.procs = [GpuProcess(p.pid, 0, GiB)]
     d.tick()
     wait_for(lambda: not procs.alive(p.pid))
+
+
+def test_a_process_that_already_exited_is_not_recorded_as_stopped():
+    # Issue #60: the guard recorded a stop, with no command and no session, for a GPU process that
+    # had exited between being seen on the GPU and being stopped.
+    gone = subprocess.Popen([PY, "-c", "pass"])
+    gone.wait()
+    assert guard.enforce([guard.Verdict(gone.pid, 0, 1 << 30, "stop", None)]) == []
+
+
+def test_a_live_process_without_a_readable_command_is_recorded_by_its_name(monkeypatch):
+    p = subprocess.Popen(SLEEPER)
+    try:
+        monkeypatch.setattr(procs, "cmdline", lambda pid: None)
+        events = guard.enforce([guard.Verdict(p.pid, 0, 1 << 30, "stop", None)])
+        assert len(events) == 1 and events[0]["command"][0].startswith("python")
+        p.wait(timeout=15)
+    finally:
+        if p.poll() is None:
+            p.kill()
+            p.wait()
