@@ -261,3 +261,13 @@ def test_job_pids_never_reach_outside_the_jobs_own_scope(paths):
     finally:
         stand_in.kill()
         stand_in.wait()
+
+
+@needs_systemd
+def test_cpu_time_is_reported(paths):
+    # Issue #31: what a job used is shown to the next agent that submits it; CPU time is part of it.
+    code = "import time\nend = time.process_time() + 0.5\nwhile time.process_time() < end: pass"
+    job = run(paths, make_job(paths, [PY, "-c", code]), use_systemd=True)
+    result = wait_exit(paths, job)
+    assert result["exit_code"] == 0
+    assert 0.4 <= result["cpu_seconds"] < 5

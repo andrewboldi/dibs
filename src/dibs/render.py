@@ -80,6 +80,31 @@ def finished_line(job: dict) -> str:
     return line
 
 
+def render_earlier(earlier: list[dict]) -> str:
+    """What earlier runs of the same command used: what to size the next request from."""
+    if not earlier:
+        return ""
+    lines = ["Earlier runs of this command here:"]
+    for e in earlier:
+        r = e["request"]
+        ran = e["ended"] - e["started"] if e.get("ended") and e.get("started") is not None else None
+        line = f"  #{e['id']} {e['state']}" + (f" after {format_duration(ran)}" if ran is not None else "")
+        line += f" (estimated {format_duration(r['time'])})"
+        used = []
+        if e.get("cpu_seconds") is not None and ran:
+            used.append(f"{e['cpu_seconds'] / ran:.1f} of {r['cpus']} CPUs")
+        if e.get("peak_mem") is not None:
+            used.append(f"RAM {format_size(e['peak_mem'])} of {format_size(r['mem'])}")
+        if e.get("peak_vram") is not None and r.get("vram"):
+            used.append(f"VRAM {format_size(e['peak_vram'])} of {format_size(r['vram'])}")
+        if used:
+            line += ": " + ", ".join(used)
+        if e.get("reason") and e["state"] != "done":
+            line += f"; {e['reason']}"
+        lines.append(line)
+    return "\n".join(lines)
+
+
 def render_submit(job: dict, now: float) -> str:
     name, job_id = f"Job {job['id']} ({job['name']})", job["id"]
     if job["state"] == "running":

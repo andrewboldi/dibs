@@ -1,3 +1,4 @@
+import json
 import os
 import stat
 
@@ -142,4 +143,46 @@ def test_a_database_from_before_the_ended_column_keeps_working(tmp_path):
     s = Store(path)
     assert [j.id for j in s.finished_before(60.0)] == [1]
     assert s.get_job(1) == job
+    s.close()
+
+
+def test_earlier_runs_of_a_command_are_found_in_sql(tmp_path, monkeypatch):
+    # Issue #31: submitting a command shows what its earlier runs in the same folder used.
+    from dibs import store as store_module
+
+    s = Store(tmp_path / "dibs.db")
+    same = dict(cwd="/w", argv=["python", "train.py"])
+    s.add_job(make_job(state=State.DONE, ended=100.0, **same))  # 1
+    s.add_job(make_job(state=State.FAILED, ended=200.0, **same))  # 2
+    s.add_job(make_job(state=State.RUNNING, **same))  # 3: not finished
+    s.add_job(make_job(state=State.DONE, ended=300.0, cwd="/w", argv=["python", "eval.py"]))  # 4
+    s.add_job(make_job(state=State.DONE, ended=400.0, cwd="/other", argv=["python", "train.py"]))  # 5
+    decoded = []
+    real = store_module.job_from_dict
+    monkeypatch.setattr(store_module, "job_from_dict", lambda d: decoded.append(d["id"]) or real(d))
+    assert [j.id for j in s.earlier_runs("/w", ["python", "train.py"])] == [2, 1]
+    assert sorted(decoded) == [1, 2]
+    assert [j.id for j in s.earlier_runs("/w", ["python", "train.py"], limit=1)] == [2]
+    s.close()
+
+
+def test_a_database_from_before_the_command_column_finds_earlier_runs(tmp_path):
+    import sqlite3
+
+    from dibs.model import job_to_dict
+
+    path = tmp_path / "dibs.db"
+    old = sqlite3.connect(path)
+    old.executescript(
+        "CREATE TABLE jobs (id INTEGER PRIMARY KEY AUTOINCREMENT, state TEXT NOT NULL, data TEXT NOT NULL, ended REAL);"
+        "CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);"
+        "CREATE TABLE events (id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL, time REAL NOT NULL, data TEXT NOT NULL);"
+    )
+    job = make_job(id=1, state=State.DONE, ended=50.0)
+    old.execute("INSERT INTO jobs (id, state, data, ended) VALUES (1, 'done', ?, 50.0)",
+                (json.dumps(job_to_dict(job, include_env=True)),))  # fmt: skip
+    old.commit()
+    old.close()
+    s = Store(path)
+    assert [j.id for j in s.earlier_runs(job.cwd, job.argv)] == [1]
     s.close()

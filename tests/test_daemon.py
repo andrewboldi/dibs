@@ -341,9 +341,9 @@ def test_peak_ram_falls_back_to_the_launchers_figure_and_says_what_it_counts(dae
 
 
 def test_memory_stat_parsing():
-    stat = procs.memory_stat("anon 2048\nfile 4096\nshmem 1024\nbogus x\n")
+    stat = procs.keyed_numbers("anon 2048\nfile 4096\nshmem 1024\nbogus x\n")
     assert stat == {"anon": 2048, "file": 4096, "shmem": 1024}
-    assert procs.memory_stat(None) == {}
+    assert procs.keyed_numbers(None) == {}
 
 
 def test_ram_used_outside_dibs_is_held_back_for_a_few_minutes(make_daemon, tmp_path):
@@ -382,3 +382,33 @@ def test_ram_in_use_by_jobs_is_not_counted_as_outside(make_daemon, tmp_path, mon
     second = submit(d, tmp_path, [PY, "-c", "pass"], mem=7 * GiB)
     d.tick()
     assert job(d, second).state != State.QUEUED, json.dumps(d.show(second)["job"])
+
+
+def test_submit_reports_earlier_runs_of_the_same_command(daemon, tmp_path):
+    # Issue #31: agents guess their requests; dibs tells them what the same command used before.
+    first = submit(daemon, tmp_path, [PY, "-c", "pass"])
+    run_until(daemon, lambda: finished(daemon, first))
+    again = daemon.submit(req(tmp_path, [PY, "-c", "pass"]))
+    assert [e["id"] for e in again["earlier"]] == [first]
+    assert daemon.submit(req(tmp_path, [PY, "-c", "print(1)"]))["earlier"] == []
+
+
+def test_earlier_runs_render_what_they_used():
+    from dibs.render import render_earlier
+
+    gib = 1 << 30
+    earlier = [
+        {"id": 43, "state": "failed", "started": 0.0, "ended": 10.0, "cpu_seconds": None,
+         "peak_mem": int(2.7 * gib), "peak_vram": int(4.4 * gib),
+         "request": {"cpus": 6, "mem": 6 * gib, "gpus": 1, "vram": 4 * gib, "time": 1200.0},
+         "reason": "stopped: used 4.4G VRAM on GPU 0, reserved 4G"},
+        {"id": 41, "state": "done", "started": 0.0, "ended": 1140.0, "cpu_seconds": 3306.0,
+         "peak_mem": int(2.8 * gib), "peak_vram": int(4.1 * gib),
+         "request": {"cpus": 6, "mem": 6 * gib, "gpus": 1, "vram": 5 * gib, "time": 2400.0}, "reason": None},
+    ]  # fmt: skip
+    assert render_earlier(earlier) == (
+        "Earlier runs of this command here:\n"
+        "  #43 failed after 10s (estimated 20m): RAM 2.7G of 6G, VRAM 4.4G of 4G; stopped: used 4.4G VRAM on GPU 0, reserved 4G\n"
+        "  #41 done after 19m (estimated 40m): 2.9 of 6 CPUs, RAM 2.8G of 6G, VRAM 4.1G of 5G"
+    )
+    assert render_earlier([]) == ""

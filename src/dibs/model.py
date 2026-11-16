@@ -77,6 +77,7 @@ class Job:
     stop_requested: float | None = None
     peak_vram: int | None = None
     peak_mem: int | None = None
+    cpu_seconds: float | None = None  # CPU time the job used, from its scope
 
 
 class RequestError(ValueError):

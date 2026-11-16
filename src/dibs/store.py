@@ -21,6 +21,11 @@ CREATE INDEX IF NOT EXISTS jobs_state ON jobs (state);
 _TERMINAL = tuple(str(s) for s in TERMINAL)
 
 
+def _command(cwd: str, argv: list[str]) -> str:
+    """What makes two jobs the same command: the folder and the exact command line."""
+    return json.dumps([cwd, list(argv)])
+
+
 class Store:
     def __init__(self, path: Path):
         fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
@@ -31,6 +36,7 @@ class Store:
         with self._db:
             self._db.executescript(_SCHEMA)
             self._add_ended_column()
+            self._add_command_column()
 
     def _add_ended_column(self) -> None:
         """Databases from before the ended column get it, filled in from each job's data."""
@@ -43,6 +49,19 @@ class Store:
             )
         self._db.execute("CREATE INDEX IF NOT EXISTS jobs_ended ON jobs (ended)")
 
+    def _add_command_column(self) -> None:
+        """Databases from before the command column get it, filled in from each job's data."""
+        columns = {row[1] for row in self._db.execute("PRAGMA table_info(jobs)")}
+        if "command" not in columns:
+            self._db.execute("ALTER TABLE jobs ADD COLUMN command TEXT")
+            rows = self._db.execute("SELECT id, data FROM jobs").fetchall()
+            commands = []
+            for i, data in rows:
+                d = json.loads(data) if data else {}
+                commands.append((_command(d.get("cwd", ""), d.get("argv", [])), i))
+            self._db.executemany("UPDATE jobs SET command = ? WHERE id = ?", commands)
+        self._db.execute("CREATE INDEX IF NOT EXISTS jobs_command ON jobs (command)")
+
     def close(self) -> None:
         self._db.close()
 
@@ -51,17 +70,27 @@ class Store:
             cur = self._db.execute("INSERT INTO jobs (state, data) VALUES (?, '')", (str(job.state),))
             job.id = cur.lastrowid
             self._db.execute(
-                "UPDATE jobs SET data = ?, ended = ? WHERE id = ?",
-                (json.dumps(job_to_dict(job, include_env=True)), job.ended, job.id),
+                "UPDATE jobs SET data = ?, ended = ?, command = ? WHERE id = ?",
+                (json.dumps(job_to_dict(job, include_env=True)), job.ended, _command(job.cwd, job.argv), job.id),
             )
         return job.id
 
     def update_job(self, job: Job) -> None:
         with self._db:
             self._db.execute(
-                "UPDATE jobs SET state = ?, data = ?, ended = ? WHERE id = ?",
-                (str(job.state), json.dumps(job_to_dict(job, include_env=True)), job.ended, job.id),
-            )
+                "UPDATE jobs SET state = ?, data = ?, ended = ?, command = ? WHERE id = ?",
+                (str(job.state), json.dumps(job_to_dict(job, include_env=True)), job.ended,
+                 _command(job.cwd, job.argv), job.id),
+            )  # fmt: skip
+
+    def earlier_runs(self, cwd: str, argv: list[str], limit: int = 3) -> list[Job]:
+        """Finished runs of this command in this folder, newest first."""
+        marks = ",".join("?" * len(_TERMINAL))
+        rows = self._db.execute(
+            f"SELECT data FROM jobs WHERE command = ? AND state IN ({marks}) ORDER BY ended DESC, id DESC LIMIT ?",
+            (_command(cwd, argv), *_TERMINAL, limit),
+        ).fetchall()
+        return [job_from_dict(json.loads(r[0])) for r in rows]
 
     def get_job(self, job_id: int) -> Job | None:
         row = self._db.execute("SELECT data FROM jobs WHERE id = ?", (job_id,)).fetchone()

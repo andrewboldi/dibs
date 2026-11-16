@@ -121,8 +121,10 @@ def main(argv: list[str]) -> int:
         os.close(out)
 
     in_scope = bool(spec.get("unit"))
-    oom_killed, peak_mem = False, None
+    oom_killed, peak_mem, cpu_seconds = False, None, None
     if in_scope:
+        usage = procs.keyed_numbers(_cgroup_file("cpu.stat")).get("usage_usec")
+        cpu_seconds = usage / 1e6 if usage is not None else None
         for line in (_cgroup_file("memory.events") or "").splitlines():
             key, _, count = line.partition(" ")
             if key == "oom_kill" and count.strip() not in ("", "0"):
@@ -130,7 +132,7 @@ def main(argv: list[str]) -> int:
         peak = _cgroup_file("memory.peak")
         if peak and peak.strip().isdigit():
             # memory.peak counts file cache; take off what's still cached, like the daemon's samples
-            peak_mem = max(0, int(peak) - procs.memory_stat(_cgroup_file("memory.stat")).get("file", 0))
+            peak_mem = max(0, int(peak) - procs.keyed_numbers(_cgroup_file("memory.stat")).get("file", 0))
     _stop_leftovers(in_scope)
     _write_exit(
         job_dir,
@@ -139,6 +141,7 @@ def main(argv: list[str]) -> int:
             "ended": time.time(),
             "oom_killed": oom_killed,
             "peak_mem": peak_mem,
+            "cpu_seconds": cpu_seconds,
             "reason": reason,
         },
     )
