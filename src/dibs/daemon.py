@@ -441,6 +441,7 @@ class Daemon:
             since=self.guard_since,
             my_uid=os.getuid(),
             parents=self.guard_parents,
+            instance=self.paths.instance,
         )
         self._remember(verdicts)
 

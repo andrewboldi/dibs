@@ -16,6 +16,7 @@ from dibs.units import format_size, suggest_size
 WHY = {
     "allowed": "allowlisted",
     "other-user": "another user's",
+    "other-dibs": "another dibs's job",
     "preexisting": "already running when the guard started",
     "inherited": "started by work that was already running when the guard started",
     "warn": "warn mode",
@@ -27,7 +28,7 @@ class Verdict:
     pid: int
     gpu_index: int
     used: int | None
-    kind: str  # job, stop, warn, allowed, other-user, preexisting, inherited
+    kind: str  # job, stop, warn, allowed, other-user, other-dibs, preexisting, inherited
     job_id: int | None
 
 
@@ -50,6 +51,7 @@ def classify(
     since: float,
     my_uid: int,
     parents: Collection[tuple[int, int]] = (),
+    instance: str = "",
 ) -> list[Verdict]:
     """What to do about each GPU process. `parents` are (pid, start ticks) of programs whose GPU
     processes were already running when the guard started: what they start later is theirs too."""
@@ -66,6 +68,8 @@ def classify(
             continue  # already gone
         if owner != my_uid:
             kind = "other-user"
+        elif _other_dibs_job(p.pid, instance):
+            kind = "other-dibs"
         elif _allowed(p.pid, allow):
             kind = "allowed"
         elif started < since:
@@ -76,6 +80,14 @@ def classify(
             kind = "stop" if mode == "all" else "warn"
         verdicts.append(Verdict(p.pid, p.gpu_index, p.used, kind, None))
     return verdicts
+
+
+def _other_dibs_job(pid: int, instance: str) -> bool:
+    """Whether the process is a job of another dibs of this user (another DIBS_HOME): every job
+    carries its dibs's instance id and its job id in its environment."""
+    env = procs.environ(pid) or {}
+    theirs = env.get("DIBS_INSTANCE")
+    return bool(env.get("DIBS_JOB_ID") and theirs and theirs != instance)
 
 
 def _descends_from(pid: int, parents: Collection[tuple[int, int]]) -> bool:
