@@ -190,25 +190,28 @@ def setup(home: Path, *, path_env: str, dry_run: bool, service: bool, dibs_exe: 
 
 
 def undo(home: Path, *, service: bool) -> list[str]:
+    """Take back what setup did. With service=False (--no-service), the systemd service, lingering
+    and the record of them stay, so a later full undo can still remove them."""
     record = _load_record(home)
     lines = []
     if service and record.get("service"):
         _run("systemctl", "--user", "disable", "--now", "dibs.service")
         lines.append("Service: stopped and disabled dibs.service.")
-    if record.get("linger_enabled"):
+    if service and record.get("linger_enabled"):
         user = pwd.getpwuid(os.getuid()).pw_name
         _run("loginctl", "disable-linger", user)
         lines.append("Lingering: turned back off.")
+    keep = set() if service else {str(home / ".config" / "systemd" / "user" / "dibs.service")}
     for key, original in record.get("modified", {}).items():
         path = Path(key)
-        if not path.exists():
+        if key in keep or not path.exists():
             continue
         current = path.read_text()
         path.write_text(original if current == record["written"].get(key) else remove_block(current))
         lines.append(f"Restored {path}")
     for key in record.get("created", []):
         path = Path(key)
-        if not path.exists():
+        if key in keep or not path.exists():
             continue
         current = path.read_text()
         if current == record["written"].get(key):
@@ -217,14 +220,28 @@ def undo(home: Path, *, service: bool) -> list[str]:
         else:
             path.write_text(remove_block(current))
             lines.append(f"Removed the dibs instructions from {path}, keeping your later edits")
+    kept_dirs = [d for d in record.get("dirs", []) if any(k.startswith(d + os.sep) for k in keep)]
     for key in reversed(record.get("dirs", [])):
+        if key in kept_dirs:
+            continue
         try:
             Path(key).rmdir()
         except OSError:
             pass  # not empty: something else lives there now
     if service:
         _run("systemctl", "--user", "daemon-reload")
-    _record_path(home).unlink(missing_ok=True)
+    remaining = {
+        "created": [k for k in record.get("created", []) if k in keep],
+        "dirs": kept_dirs,
+        "modified": {k: v for k, v in record.get("modified", {}).items() if k in keep},
+        "written": {k: v for k, v in record.get("written", {}).items() if k in keep},
+        "service": not service and record.get("service", False),
+        "linger_enabled": not service and record.get("linger_enabled", False),
+    }
+    if remaining["created"] or remaining["modified"] or remaining["service"] or remaining["linger_enabled"]:
+        _save_record(home, remaining)
+    else:
+        _record_path(home).unlink(missing_ok=True)
     if not lines:
         lines.append("Nothing to undo.")
     return lines

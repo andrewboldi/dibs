@@ -168,13 +168,14 @@ def test_failed_service_install_still_leaves_a_record(home, monkeypatch):
     assert not (home / ".claude" / "CLAUDE.md").exists()
 
 
-def test_service_install_and_undo(tmp_path, monkeypatch):
-    import json
+@pytest.fixture
+def fake_systemd(tmp_path, monkeypatch):
+    """Fake systemctl and loginctl that record their calls; every dibs path under tmp."""
     import pwd
 
     from dibs import launcher
 
-    (tmp_path / ".claude").mkdir()
+    (tmp_path / ".claude").mkdir(exist_ok=True)
     bin_dir, log = tmp_path / "bin", tmp_path / "calls.log"
     bin_dir.mkdir()
     for tool in ("systemctl", "loginctl"):
@@ -191,8 +192,14 @@ def test_service_install_and_undo(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "run"))
     monkeypatch.delenv("DIBS_HOME", raising=False)
     monkeypatch.setattr(launcher, "systemd_available", lambda env=None: True)
-    user = pwd.getpwuid(os.getuid()).pw_name
+    log.write_text("")
+    return log, pwd.getpwuid(os.getuid()).pw_name
 
+
+def test_service_install_and_undo(tmp_path, fake_systemd):
+    import json
+
+    log, user = fake_systemd
     agents.setup(tmp_path, path_env="", dry_run=False, service=True, dibs_exe=EXE)
     unit = tmp_path / ".config" / "systemd" / "user" / "dibs.service"
     assert unit.read_text() == agents.service_unit(EXE)
@@ -208,3 +215,22 @@ def test_service_install_and_undo(tmp_path, monkeypatch):
     assert "systemctl --user disable --now dibs.service" in calls
     assert f"loginctl disable-linger {user}" in calls
     assert not unit.exists() and not (tmp_path / ".claude" / "CLAUDE.md").exists()
+
+
+def test_undo_without_service_leaves_the_service_alone(tmp_path, fake_systemd):
+    # dibs setup --undo --no-service (issue #2): instructions go, the service and lingering stay,
+    # and a later full undo still knows about them.
+    log, user = fake_systemd
+    agents.setup(tmp_path, path_env="", dry_run=False, service=True, dibs_exe=EXE)
+    unit = tmp_path / ".config" / "systemd" / "user" / "dibs.service"
+    log.write_text("")
+    agents.undo(tmp_path, service=False)
+    calls = log.read_text().splitlines()
+    assert not any("disable" in call for call in calls)
+    assert unit.exists() and not (tmp_path / ".claude" / "CLAUDE.md").exists()
+
+    agents.undo(tmp_path, service=True)
+    calls = log.read_text().splitlines()
+    assert "systemctl --user disable --now dibs.service" in calls
+    assert f"loginctl disable-linger {user}" in calls
+    assert not unit.exists()
