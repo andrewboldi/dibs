@@ -168,3 +168,14 @@ def test_vram_to_ask_after_a_stop_is_the_peak_plus_headroom_rounded_up():
     assert vram_to_ask(int(4.4 * gib), 8 * gib) == "5G"
     assert vram_to_ask(int(0.3 * gib), 8 * gib) == "512M"
     assert vram_to_ask(7 * gib, 8 * gib) == "all"  # the peak plus headroom doesn't fit: the whole GPU
+
+
+def test_script_of_a_command():
+    # Issue #58: earlier runs of the same script with other arguments help size the next one.
+    from dibs.model import script_of
+
+    assert script_of(["python", "train.py", "--lr", "3e-4"]) == "train.py"
+    assert script_of(["bash", "-c", "THREADS=4 bash src/x/run_label.sh 0 data.pt"]) == "src/x/run_label.sh"
+    assert script_of([".venv/bin/python", "-m", "pkg.sweep", "--n", "3"]) == "-m pkg.sweep"
+    assert script_of(["sleep", "30"]) is None
+    assert script_of(["bash", "-c", "echo 'unbalanced"]) is None  # unparseable: no guess

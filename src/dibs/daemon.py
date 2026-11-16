@@ -33,6 +33,7 @@ from dibs.model import (
     next_owed,
     job_to_dict,
     resolve_request,
+    script_of,
     vram_to_ask,
 )
 from dibs.paths import Paths, ensure_dirs, get_paths
@@ -179,7 +180,13 @@ class Daemon:
         response = self.show(job.id)
         # What the same command used before, so the agent can size its next request from it.
         earlier = [j for j in self.store.earlier_runs(job.cwd, job.argv, limit=6) if j.started is not None]
+        match = "command"
+        script = script_of(job.argv)
+        if not earlier and script:  # none of this exact command: the same script with other arguments
+            earlier = [j for j in self.store.earlier_runs_of_script(job.cwd, script, limit=6) if j.started is not None]
+            match = "script"
         response["earlier"] = [job_to_dict(j) for j in earlier[:3]]
+        response["earlier_match"] = match
         return response
 
     def _owed(self, session: str, now: float) -> float:

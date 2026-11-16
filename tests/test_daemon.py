@@ -491,3 +491,23 @@ def test_the_job_after_a_boosted_one_lands_later_by_the_time_saved(make_daemon, 
     submit(d, tmp_path, [PY, "-c", "pass"], time_=300.0, session="s1", priority=10)
     second = submit(d, tmp_path, [PY, "-c", "pass"], time_=300.0, session="s1")
     assert job(d, second).tag == 1600.0 + 270.0  # its priority-5 place, plus the 270 s the first saved
+
+
+def test_submit_falls_back_to_earlier_runs_of_the_same_script(daemon, tmp_path):
+    (tmp_path / "train.py").write_text("import sys\n")
+    first = submit(daemon, tmp_path, [PY, "train.py", "--lr", "1"])
+    run_until(daemon, lambda: finished(daemon, first))
+    again = daemon.submit(req(tmp_path, [PY, "train.py", "--lr", "2"]))
+    assert [e["id"] for e in again["earlier"]] == [first] and again["earlier_match"] == "script"
+    same = daemon.submit(req(tmp_path, [PY, "train.py", "--lr", "1"]))
+    assert same["earlier_match"] == "command"
+
+
+def test_earlier_runs_of_the_script_say_so():
+    from dibs.render import render_earlier
+
+    run = {"id": 7, "state": "done", "started": 0.0, "ended": 60.0, "cpu_seconds": None, "peak_mem": None,
+           "peak_vram": None, "reason": None, "argv": ["python", "train.py", "--lr", "1"],
+           "request": {"cpus": 1, "mem": 1 << 30, "gpus": 0, "vram": 0, "time": 120.0}}  # fmt: skip
+    assert render_earlier([run], "script").startswith("Earlier runs of train.py here, with other arguments:")
+    assert render_earlier([run]).startswith("Earlier runs of this command here:")
