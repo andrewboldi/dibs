@@ -244,3 +244,33 @@ def test_lost_job_says_what_the_launcher_said(daemon, tmp_path, monkeypatch):
     assert job(daemon, job_id).reason == (
         "lost: its launcher exited without reporting (Failed to start transient scope unit: Unknown assignment)"
     )
+
+
+class _DaemonDies(BaseException):
+    """Stands in for the daemon dying (not an error schedule() would catch)."""
+
+
+def test_crash_while_launching_is_adopted_not_lost(make_daemon, tmp_path, monkeypatch):
+    # Issue #4: the job is saved as running before launch() returns its launcher's pid; a daemon
+    # that dies in between used to leave a live job that recover() then declared lost.
+    first = make_daemon()
+    real_launch = launcher.launch
+
+    def launch_then_die(job, paths, *, use_systemd):
+        real_launch(job, paths, use_systemd=use_systemd)
+        raise _DaemonDies
+
+    monkeypatch.setattr(launcher, "launch", launch_then_die)
+    try:
+        first.submit(req(tmp_path, ["sleep", "1.5"]))
+    except _DaemonDies:
+        pass
+    monkeypatch.setattr(launcher, "launch", real_launch)
+    job_id = 1
+    assert job(first, job_id).state == State.RUNNING and job(first, job_id).shim_pid is None
+    first.close()
+    second = make_daemon()
+    second.recover()
+    assert job(second, job_id).state == State.RUNNING and job(second, job_id).shim_pid
+    run_until(second, lambda: finished(second, job_id))
+    assert job(second, job_id).state == State.DONE
