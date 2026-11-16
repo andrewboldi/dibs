@@ -15,6 +15,7 @@ import shutil
 import signal
 import sys
 import time
+from collections import deque
 from collections.abc import Callable, Mapping
 
 from dibs import __version__, build_id, guard, launcher, procs
@@ -37,6 +38,7 @@ from dibs.store import Store
 from dibs.units import format_size
 
 KILL_AFTER = 10.0  # seconds between asking a job to stop (SIGTERM) and forcing it (SIGKILL)
+OUTSIDE_WINDOW = 120.0  # seconds: RAM in use outside dibs counts as its peak over this long
 RETENTION_EVERY = 3600.0
 RECENT = 86400.0  # how far back `queue --all` looks
 STOPS_SHOWN = 3600.0  # how far back guard stops are shown
@@ -71,10 +73,13 @@ class Daemon:
         *,
         use_systemd: bool,
         clock: Callable[[], float] = time.time,
+        meminfo: Callable[[], tuple[int, int] | None] = procs.meminfo,
     ):
         self.paths = paths
         self.config = config
         self.capacity = capacity
+        self._meminfo = meminfo
+        self._outside: deque[tuple[float, int, int]] = deque()  # (time, RAM in use outside dibs, total)
         self.backend = backend
         self.use_systemd = use_systemd
         self.clock = clock
@@ -349,8 +354,29 @@ class Daemon:
             [Running(j.id, j.request, tuple(j.cpu_ids), tuple(j.gpu_ids), j.started or now) for j in running],
             [Queued(j.id, j.request, j.tag, j.submitted) for j in queued],
             now,
+            outside_mem=self._outside_mem(now, running),
         )
         return current, running, queued
+
+    def _outside_mem(self, now: float, running: list[Job]) -> int:
+        """RAM in use outside dibs jobs that eats into what dibs hands out, as its peak over the last
+        OUTSIDE_WINDOW seconds, so a job doesn't start into RAM a busy program let go of for a moment.
+        A job whose memory dibs can't see counts as holding its whole reservation."""
+        if not self._outside or now - self._outside[-1][0] >= 1.0:
+            info = self._meminfo()
+            if info is not None:
+                total, used = info
+                jobs = 0
+                for job in running:
+                    held = self._memory_in_use(job)
+                    jobs += held if held is not None else job.request.mem
+                self._outside.append((now, max(0, used - jobs), total))
+        while self._outside and self._outside[0][0] < now - OUTSIDE_WINDOW:
+            self._outside.popleft()
+        if not self._outside:
+            return 0
+        total = self._outside[-1][2]
+        return max(0, max(outside for _, outside, _ in self._outside) - (total - self.capacity.mem))
 
     def schedule(self) -> None:
         """Start every queued job the plan says can start now."""
@@ -424,17 +450,21 @@ class Daemon:
 
     # Watching memory and the GPUs ----------------------------------------------------------------
 
+    def _memory_in_use(self, job: Job) -> int | None:
+        """What a running job holds (anon + shmem), read from its own scope; None if dibs can't see it."""
+        if not (job.unit and job.shim_pid):
+            return None
+        cg = procs.cgroup(job.shim_pid)
+        if not cg or not cg.endswith(f"/{job.unit}.scope"):
+            return None
+        return procs.memory_in_use(cg)
+
     def _watch_memory(self) -> None:
         """Keep each running job's peak of memory in use (anon + shmem), read from its own scope.
         memory.peak also counts file cache, so a job that wrote big files looked as if it had filled
         its reservation."""
         for job in self.store.jobs([State.RUNNING]):
-            if not (job.unit and job.shim_pid):
-                continue
-            cg = procs.cgroup(job.shim_pid)
-            if not cg or not cg.endswith(f"/{job.unit}.scope"):
-                continue
-            used = procs.memory_in_use(cg)
+            used = self._memory_in_use(job)
             if used is not None and (job.peak_mem is None or used > job.peak_mem):
                 job.peak_mem = used
                 self.store.update_job(job)
