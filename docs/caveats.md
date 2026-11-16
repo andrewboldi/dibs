@@ -32,7 +32,6 @@ What dibs doesn't do, or does only partly. Each item says what happens and what 
 - **Jobs' environments are stored.** To run a job with the submitter's virtualenv and settings,
   dibs keeps its environment, which can include API keys, in `~/.local/state/dibs/dibs.db`. Only
   you can read the file. Finished jobs are deleted after `keep_days` (14 days by default).
-- **A `dibs` command from another copy of dibs restarts the scheduler.** If its version differs
-  from the running scheduler's, it restarts it, assuming dibs was upgraded. Jobs keep running, but
-  mixing two installs (a development checkout and the installed one, say) causes needless restarts
-  ([#39](https://github.com/andrewboldi/dibs/issues/39)).
+- **A `dibs` command from another install can't use the running scheduler.** When the scheduler
+  runs another version of dibs and restarting it can't change that (the service runs the other
+  install), the command says so instead of working. Use the installed `dibs`.

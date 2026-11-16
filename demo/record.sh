@@ -25,16 +25,29 @@ chmod +x "$work/bin/dibs"
 ln -s "$(python3 -c 'import os, sys; print(os.path.realpath(sys.executable))')" "$work/bin/python"
 
 # Each "agent" works in its own project; the scripts just print and sleep.
-for project in chess-bot finetune llm-eval data-prep vision; do mkdir -p "$work/$project"; done
-printf 'import time\nfor e in range(7):\n    print(f"epoch {e}", flush=True); time.sleep(5)\n' > "$work/chess-bot/train.py"
-printf 'import time\nprint("finetuning", flush=True); time.sleep(15)\n' > "$work/finetune/finetune.py"
-printf 'import time\nprint("evaluating", flush=True); time.sleep(6)\n' > "$work/llm-eval/eval.py"
-printf 'import time\nprint("tokenizing", flush=True); time.sleep(5)\n' > "$work/data-prep/tokenize.py"
-printf 'import time\nprint("loading weights onto the GPU...", flush=True); time.sleep(60)\n' > "$work/vision/detect.py"
+for project in vision finetune evals detector; do mkdir -p "$work/$project"; done
+printf 'import time\nfor e in range(9):\n    print(f"epoch {e}", flush=True); time.sleep(4)\n' > "$work/vision/train.py"
+printf 'import time\nprint("finetuning", flush=True); time.sleep(30)\n' > "$work/finetune/finetune.py"
+printf 'import time\nprint("evaluating", flush=True); time.sleep(6)\n' > "$work/evals/eval.py"
+printf 'import time\nprint("loading weights onto the GPU...", flush=True); time.sleep(60)\n' > "$work/detector/detect.py"
+# Nothing else is using this demo machine's RAM, whatever the real one is doing.
+printf 'MemTotal: 16777216 kB\nMemAvailable: 16777216 kB\n' > "$work/meminfo"
 
 tmux -L dibs-rec -f /dev/null new-session -d -x 110 -y 32 \
   "asciinema rec --overwrite --cols 110 --rows 32 -c '$here/driver.sh $work' $work/demo.cast; tmux -L dibs-rec wait-for -S recorded"
 tmux -L dibs-rec wait-for recorded
+# End on the payoff: drop what was recorded from tmux's "[detached" line on.
+python3 - "$work/demo.cast" <<'PY'
+import json, sys
+path = sys.argv[1]
+lines = open(path).read().splitlines()
+kept = [lines[0]]
+for line in lines[1:]:
+    if "[detached" in json.loads(line)[2]:
+        break
+    kept.append(line)
+open(path, "w").write("\n".join(kept) + "\n")
+PY
 agg --theme monokai --font-size 15 --idle-time-limit 2 --last-frame-duration 4 "$work/demo.cast" "$repo/assets/demo.gif"
 cp "$work/demo.cast" "${DEMO_CAST:-/dev/null}" 2>/dev/null || true
 echo "wrote $repo/assets/demo.gif"
