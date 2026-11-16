@@ -133,12 +133,12 @@ def job_pids(job: Job) -> list[int]:
     if job.shim_pid is None or not procs.alive(job.shim_pid, job.shim_ticks):
         return []
     pids: list[int] = []
-    if job.unit:
-        cg = procs.cgroup(job.shim_pid)
+    cg = procs.cgroup(job.shim_pid) if job.unit else None
+    if cg and cg.endswith(f"/{job.unit}.scope"):  # only the job's own scope, never a shared cgroup
         try:
             with open(f"/sys/fs/cgroup{cg}/cgroup.procs") as f:
                 pids = [int(line) for line in f if line.strip()]
-        except (OSError, TypeError, ValueError):
+        except (OSError, ValueError):
             pids = []
     if not pids:
         pids = procs.descendants(job.shim_pid)
