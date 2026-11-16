@@ -397,8 +397,25 @@ class Daemon:
             result = launcher.read_exit(self.paths, job.id)
             if result is not None:
                 self._finish(job, result, now)
+            elif job.shim_pid is None and (found := self._find_launcher(job)):
+                # dibs died between saving the job as running and recording its launcher.
+                job.shim_pid, job.shim_ticks, job.unit = found
+                self.store.update_job(job)
             elif not (job.shim_pid and procs.alive(job.shim_pid, job.shim_ticks)):
                 self._lose(job, now, "lost: its process ended while dibs was not running")
+
+    def _find_launcher(self, job: Job) -> tuple[int, int | None, str | None] | None:
+        """The live launcher of a job whose pid was never recorded, found by its command line
+        (`python -m dibs.shim JOB_DIR`), with its systemd unit if it runs in one."""
+        job_dir = str(self.paths.job_dir(job.id))
+        unit = launcher.unit_name(self.paths.instance, job.id)
+        for name in os.listdir("/proc"):
+            if name.isdigit() and (procs.cmdline(int(name)) or [])[-3:] == ["-m", "dibs.shim", job_dir]:
+                pid = int(name)
+                if procs.alive(pid):
+                    in_unit = (procs.cgroup(pid) or "").endswith(f"/{unit}.scope")
+                    return pid, procs.start_ticks(pid), unit if in_unit else None
+        return None
 
     # Watching the GPUs ---------------------------------------------------------------------------
 
