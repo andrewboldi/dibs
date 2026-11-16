@@ -120,7 +120,9 @@ def enforce(verdicts: Sequence[Verdict]) -> list[dict]:
         if v.kind != "stop" or v.pid in done:
             continue
         done.add(v.pid)
-        argv = procs.cmdline(v.pid) or []
+        if not procs.alive(v.pid):
+            continue  # it exited before the guard got to it: nothing was stopped
+        argv = procs.cmdline(v.pid) or [name for name in [procs.exe_name(v.pid)] if name]
         env = procs.environ(v.pid) or {}
         message = stop_message(v.pid, argv, v.gpu_index, v.used, procs.rss(v.pid))
         procs.stop_with_message([v.pid], message)
