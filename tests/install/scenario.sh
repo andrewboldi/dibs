@@ -85,8 +85,7 @@ install || bad "second install"
 works
 install --uninstall --purge || bad "uninstall"
 [ "$(cat "$HOME/.bashrc")" = "$(printf '# my shell\nalias ll="ls -l"\n# added later by me')" ] && ok ".bashrc is theirs again, with their later edit" || { bad ".bashrc differs"; cat "$HOME/.bashrc"; }
-# (dibs leaves the blank line it put before its block when text follows the block: compare without blanks.)
-[ "$(grep -v '^$' "$HOME/.claude/CLAUDE.md")" = "$(printf '# my claude notes\nBe terse.\nAdded later by me.')" ] && ok "CLAUDE.md keeps both edits" || { bad "CLAUDE.md differs"; cat "$HOME/.claude/CLAUDE.md"; }
+[ "$(cat "$HOME/.claude/CLAUDE.md")" = "$(printf '# my claude notes\nBe terse.\nAdded later by me.')" ] && ok "CLAUDE.md keeps both edits" || { bad "CLAUDE.md differs"; cat "$HOME/.claude/CLAUDE.md"; }
 [ "$(cat "$HOME/.codex/AGENTS.md")" = "# my codex notes" ] && ok "AGENTS.md restored" || bad "AGENTS.md differs"
 ls "$HOME"/.bashrc.before-dibs >/dev/null 2>&1 && bad "backup left behind"
 rm -f "$HOME/.bashrc" "$HOME/.claude/CLAUDE.md" "$HOME/.codex/AGENTS.md"; rmdir "$HOME/.claude" "$HOME/.codex" 2>/dev/null

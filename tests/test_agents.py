@@ -271,3 +271,28 @@ def test_undo_without_systemctl_on_the_machine(home, monkeypatch):
     lines = agents.undo(home, service=True)
     assert lines
     assert not (home / ".config" / "dibs" / "setup.json").exists()
+
+
+def test_undo_leaves_no_blank_line_when_text_follows_the_block(home):
+    # Issue #41: the blank line setup put before its block stayed behind when text followed it.
+    path = home / ".claude" / "CLAUDE.md"
+    path.write_text("# mine\n")
+    setup(home)
+    path.write_text(path.read_text() + "Added later.\n")
+    agents.undo(home, service=False)
+    assert path.read_text() == "# mine\nAdded later.\n"
+
+
+def test_setup_says_the_guard_runs_only_when_something_runs_it(tmp_path):
+    # Issue #40: setup said "The guard is on" even where no service was installed (a container).
+    home, dibs_home = tmp_path / "home", tmp_path / "dibs"
+    home.mkdir()
+    dibs_home.mkdir()
+    env = {**os.environ, "HOME": str(home), "DIBS_HOME": str(dibs_home), "PATH": "/usr/bin:/bin"}
+    run = lambda *a: subprocess.run([sys.executable, "-m", "dibs", "setup", *a], env=env, capture_output=True, text=True)  # noqa: E731
+    out = run("--no-service").stdout
+    assert "The guard is on" not in out and "first dibs command" in out
+    unit = home / ".config" / "systemd" / "user" / "dibs.service"
+    unit.parent.mkdir(parents=True)
+    unit.write_text("[Service]\nExecStart=/opt/dibs/bin/dibs daemon run\n")
+    assert "The guard is on" in run("--no-service").stdout
