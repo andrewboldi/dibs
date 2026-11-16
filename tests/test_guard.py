@@ -299,3 +299,21 @@ def test_orphans_never_make_their_adopter_exempt(make_daemon):
             pid = _find_by_marker(marker)
             if pid:
                 os.kill(pid, 9)
+
+
+def test_another_dibs_instances_job_is_left_alone(world, spawned):
+    # Two dibs of one user (issue #3): each saw the other's jobs as GPU processes outside dibs.
+    d, backend = world()
+    p = spawned(SLEEPER, env={**os.environ, "DIBS_INSTANCE": "0ther1st", "DIBS_JOB_ID": "3"})
+    backend.procs = [GpuProcess(p.pid, 0, GiB)]
+    d.tick()
+    assert procs.alive(p.pid)
+    assert outside(d) == {p.pid: "another dibs's job"}
+
+
+def test_a_leftover_of_our_own_finished_job_is_still_stopped(world, spawned):
+    d, backend = world()
+    p = spawned(SLEEPER, env={**os.environ, "DIBS_INSTANCE": d.paths.instance, "DIBS_JOB_ID": "99"})
+    backend.procs = [GpuProcess(p.pid, 0, GiB)]
+    d.tick()
+    wait_for(lambda: not procs.alive(p.pid))
