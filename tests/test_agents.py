@@ -262,3 +262,12 @@ def test_setup_reads_agent_files_from_config(tmp_path):
     assert BEGIN in (home / "notes" / "agent.md").read_text()
     assert run("--undo", "--no-service").returncode == 0
     assert not (home / "notes").exists()
+
+
+def test_undo_without_systemctl_on_the_machine(home, monkeypatch):
+    # A container has no systemctl: undo used to die with FileNotFoundError after restoring files.
+    setup(home)
+    monkeypatch.setenv("PATH", str(home / "empty-bin"))
+    lines = agents.undo(home, service=True)
+    assert lines
+    assert not (home / ".config" / "dibs" / "setup.json").exists()

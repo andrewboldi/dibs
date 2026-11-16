@@ -1,0 +1,24 @@
+name: install
+on:
+  push:
+    paths: ["install.sh", "tests/install/**", ".github/workflows/install.yml", "src/**", "pyproject.toml"]
+  pull_request:
+    paths: ["install.sh", "tests/install/**", ".github/workflows/install.yml", "src/**", "pyproject.toml"]
+  workflow_dispatch:
+
+jobs:
+  container:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ["ubuntu:24.04", "debian:12", "fedora:41", "archlinux:latest"]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install in a fresh ${{ matrix.image }}, as root and as a sudo user
+        env:
+          LOGS: ${{ runner.temp }}/install-logs
+        run: bash tests/install/run.sh ${{ matrix.image }}
+      - name: Show the logs
+        if: always()
+        run: for f in "$RUNNER_TEMP"/install-logs/*.log; do echo "::group::$f"; cat "$f"; echo "::endgroup::"; done

@@ -242,3 +242,10 @@ def test_submit_shows_earlier_runs(dibs):
     dibs("run", *RES, "--", "true", check=0)
     out = dibs("submit", *RES, "--", "true", check=0).stdout
     assert "Earlier runs of this command here:" in out and "#1 done" in out
+
+
+def test_version_flag_prints_the_version(dibs):
+    from dibs import __version__
+
+    result = dibs("--version", check=0)
+    assert result.stdout.strip() == f"dibs {__version__}"

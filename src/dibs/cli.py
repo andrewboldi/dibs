@@ -12,6 +12,7 @@ import time
 import tty
 from pathlib import Path
 
+from dibs import __version__
 from dibs import client as dc
 from dibs import render
 from dibs.paths import Paths, get_paths
@@ -62,6 +63,7 @@ def build_parser() -> argparse.ArgumentParser:
         prog="dibs",
         description="A job queue for one machine: reserve CPUs, RAM and GPU memory, and run when it's your turn.",
     )
+    parser.add_argument("--version", action="version", version=f"dibs {__version__}")
     sub = parser.add_subparsers(dest="cmd", metavar="COMMAND")
     for name, about in (
         ("submit", "queue a job and print its id and when it's expected to start"),
