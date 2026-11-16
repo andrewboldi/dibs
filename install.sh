@@ -19,7 +19,7 @@
 #   curl -fsSL https://raw.githubusercontent.com/andrewboldi/dibs/main/install.sh | bash -s -- --uninstall
 #
 # What it added is recorded in ~/.local/share/dibs-install/record, and uninstall removes only that.
-# Options: --uninstall, --keep-data (with --uninstall: keep dibs's job history and config), --help.
+# Options: --uninstall, --purge (with --uninstall: also delete dibs's job history and config), --help.
 # Environment: DIBS_SOURCE=<folder or URL to install from; default is the GitHub source archive>.
 
 set -euo pipefail
@@ -203,7 +203,7 @@ prune_empty() {
 
 do_uninstall() {
   [ "$(uname -s)" = "Linux" ] || die "dibs runs on Linux only (this is $(uname -s))."
-  local keep_data="$1" UV dibs_bin="" removed=""
+  local purge="$1" UV dibs_bin="" removed=""
   UV="$(find_uv || true)"
   [ -x "$BIN_DIR/dibs" ] && dibs_bin="$BIN_DIR/dibs"
   [ -n "$dibs_bin" ] || dibs_bin="$(command -v dibs || true)"
@@ -240,10 +240,11 @@ do_uninstall() {
     removed="$removed uv"
   fi
 
-  if [ -z "$keep_data" ]; then
-    rm -rf "${XDG_STATE_HOME:-$HOME/.local/state}/dibs" "${XDG_CONFIG_HOME:-$HOME/.config}/dibs" \
-      "/tmp/dibs-$(id -u)" "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/dibs" 2>/dev/null || true
-    prune_empty "${XDG_STATE_HOME:-$HOME/.local/state}"; prune_empty "${XDG_CONFIG_HOME:-$HOME/.config}"
+  local state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/dibs" config_dir="${XDG_CONFIG_HOME:-$HOME/.config}/dibs"
+  rm -rf "/tmp/dibs-$(id -u)" "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/dibs" 2>/dev/null || true  # sockets only
+  if [ -n "$purge" ]; then
+    rm -rf "$state_dir" "$config_dir"
+    prune_empty "$(dirname "$state_dir")"; prune_empty "$(dirname "$config_dir")"
   fi
 
   local pkgs; pkgs="$(record_value packages)"
@@ -251,21 +252,28 @@ do_uninstall() {
   prune_empty "$BIN_DIR"; prune_empty "$(dirname "$RECORD_DIR")"
 
   say "Removed dibs${removed:+ and what the installer added:$removed}."
-  [ -n "$keep_data" ] || say "Its job history and config are gone too."
+  if [ -n "$purge" ]; then
+    say "Its job history and config are gone too."
+  elif [ -d "$state_dir" ] || [ -d "$config_dir" ]; then
+    say "Kept your job history and config:"
+    [ ! -d "$state_dir" ] || say "  $state_dir"
+    [ ! -d "$config_dir" ] || say "  $config_dir"
+    say "To delete them too: $UNINSTALL_CMD --purge"
+  fi
   [ -z "$pkgs" ] || say "The installer also installed $pkgs with your package manager; those are left in place."
 }
 
 main() {
-  local mode=install keep_data=""
+  local mode=install purge=""
   for arg in "$@"; do
     case "$arg" in
       --uninstall) mode=uninstall ;;
-      --keep-data) keep_data=1 ;;
+      --purge) purge=1 ;;
       -h|--help) sed -n '2,24p' "$0" 2>/dev/null | sed 's/^# \{0,1\}//' ; return 0 ;;
       *) die "unknown option $arg (try --help)." ;;
     esac
   done
-  if [ "$mode" = uninstall ]; then do_uninstall "$keep_data"; else do_install; fi
+  if [ "$mode" = uninstall ]; then do_uninstall "$purge"; else do_install; fi
 }
 
 if [ -z "${DIBS_INSTALL_LIB:-}" ]; then main "$@"; fi

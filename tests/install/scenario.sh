@@ -44,7 +44,23 @@ scenario "fresh"
 before="$(snapshot)"
 install || bad "install"
 works
-install --uninstall || bad "uninstall"
+install --uninstall --purge || bad "uninstall"
+uninstalled "$before"
+
+scenario "plain uninstall keeps job history and config; --purge removes them"
+before="$(snapshot)"
+install || bad "install"
+d submit --cpus 1 --mem 100M --time 1m -- echo kept-job-output >/dev/null 2>&1; sleep 3
+mkdir -p "$HOME/.config/dibs"; echo 'guard = "warn"' > "$HOME/.config/dibs/config.toml"
+history_before="$(find "$HOME/.local/state/dibs" -type f -name '*.db' 2>/dev/null | sort)"
+install --uninstall > "$HOME/uninstall.out" 2>&1 || bad "plain uninstall"
+check "state dir kept" test -n "$history_before" -a -e "$HOME/.local/state/dibs/dibs.db"
+check "job output kept" grep -rq kept-job-output "$HOME/.local/state/dibs/jobs"
+check "config kept" grep -q 'guard = "warn"' "$HOME/.config/dibs/config.toml"
+check "output says where the data is and how to purge" bash -c "grep -q '.local/state/dibs' '$HOME/uninstall.out' && grep -q -e '--purge' '$HOME/uninstall.out'"
+check "no uv or dibs left" bash -c '! command -v uv && [ ! -e "$HOME/.local/bin/dibs" ]'
+rm -f "$HOME/uninstall.out"
+install --uninstall --purge || bad "purge after plain uninstall"
 uninstalled "$before"
 
 scenario "already installed: a second run updates and changes nothing"
@@ -55,7 +71,7 @@ install || bad "second install"
 if [ "$(snapshot | grep -v -e /.cache/ -e /.local/share/uv/)" = "$mid" ]; then ok "second run changed nothing"; else bad "second run changed files"; diff <(echo "$mid") <(snapshot | grep -v -e /.cache/ -e /.local/share/uv/) | sed "s/^/      /"; fi
 grep -c '>>> dibs >>>' "$HOME/.bashrc" | grep -qx 1 && ok "one PATH block" || bad "PATH block count"
 works
-install --uninstall || bad "uninstall"
+install --uninstall --purge || bad "uninstall"
 uninstalled "$before"
 
 scenario "edited: user files with their own content, edited again after install"
@@ -67,7 +83,7 @@ echo '# added later by me' >> "$HOME/.bashrc"
 echo 'Added later by me.' >> "$HOME/.claude/CLAUDE.md"
 install || bad "second install"
 works
-install --uninstall || bad "uninstall"
+install --uninstall --purge || bad "uninstall"
 [ "$(cat "$HOME/.bashrc")" = "$(printf '# my shell\nalias ll="ls -l"\n# added later by me')" ] && ok ".bashrc is theirs again, with their later edit" || { bad ".bashrc differs"; cat "$HOME/.bashrc"; }
 # (dibs leaves the blank line it put before its block when text follows the block: compare without blanks.)
 [ "$(grep -v '^$' "$HOME/.claude/CLAUDE.md")" = "$(printf '# my claude notes\nBe terse.\nAdded later by me.')" ] && ok "CLAUDE.md keeps both edits" || { bad "CLAUDE.md differs"; cat "$HOME/.claude/CLAUDE.md"; }
@@ -83,7 +99,7 @@ d queue >/dev/null 2>&1; d daemon status >/dev/null 2>&1 && ok "daemon is runnin
 install || bad "update while running"
 works
 d daemon status >/dev/null 2>&1 && ok "daemon answers after the update" || bad "daemon down after update"
-install --uninstall || bad "uninstall while running"
+install --uninstall --purge || bad "uninstall while running"
 uninstalled "$before"
 
 [ "$fails" -eq 0 ] && { echo "ALL PASSED"; exit 0; }
