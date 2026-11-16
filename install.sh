@@ -120,9 +120,10 @@ install_dibs() {
   local was=""
   "$UV" tool list </dev/null 2>/dev/null | grep -q '^dibs ' && was=1
   if [ -n "$was" ]; then say "Updating dibs..."; else say "Installing dibs..."; fi
-  "$UV" tool install --force --reinstall --refresh --python ">=3.11" "$(source_spec)" </dev/null >/dev/null 2>"${TMPDIR:-/tmp}/dibs-install.$$.log" \
-    || { cat "${TMPDIR:-/tmp}/dibs-install.$$.log" >&2; rm -f "${TMPDIR:-/tmp}/dibs-install.$$.log"; die "uv couldn't install dibs (output above)."; }
-  rm -f "${TMPDIR:-/tmp}/dibs-install.$$.log"
+  local log; log="$(mktemp)"
+  "$UV" tool install --force --reinstall --refresh --python ">=3.11" "$(source_spec)" </dev/null >/dev/null 2>"$log" \
+    || { cat "$log" >&2; rm -f "$log"; die "uv couldn't install dibs (output above)."; }
+  rm -f "$log"
   [ -x "$BIN_DIR/dibs" ] || die "dibs installed but $BIN_DIR/dibs isn't there; check 'uv tool dir --bin'."
 }
 
@@ -216,22 +217,32 @@ do_uninstall() {
     "$UV" tool uninstall dibs </dev/null >/dev/null 2>&1 && removed="$removed dibs"
   fi
 
+  # If the installer brought uv but other tools have been installed with it since, uv (and the PATH
+  # line they're found through) belongs to the user now: keep both.
+  local uv_dir others=""
+  uv_dir="$(record_value uv_dir)"
+  if [ -n "$uv_dir" ] && [ -n "$UV" ]; then
+    others="$("$UV" tool list </dev/null 2>/dev/null | grep -E '^[^ -][^ ]* v[0-9]' | cut -d' ' -f1 | tr '\n' ' ' || true)"
+    others="${others% }"
+  fi
+
   local rc backup
   rc="$(record_value rc_file)"
   if [ -n "$rc" ]; then
-    strip_rc_block "$rc"
     backup="$(record_value rc_backup)"
     if [ -n "$backup" ] && [ -f "$backup" ]; then
-      rm -f "$backup"  # the stripped file is the original again; the copy has done its job
+      rm -f "$backup"  # the rc file is marked; the copy isn't needed to put it back
     fi
-    if [ -n "$(record_value rc_created)" ] && [ -f "$rc" ] && [ -z "$(tr -d '[:space:]' < "$rc")" ]; then
-      rm -f "$rc"
+    if [ -z "$others" ]; then
+      strip_rc_block "$rc"
+      if [ -n "$(record_value rc_created)" ] && [ -f "$rc" ] && [ -z "$(tr -d '[:space:]' < "$rc")" ]; then
+        rm -f "$rc"
+      fi
+      removed="$removed PATH-edit"
     fi
-    removed="$removed PATH-edit"
   fi
 
-  local uv_dir; uv_dir="$(record_value uv_dir)"
-  if [ -n "$uv_dir" ] && [ -n "$UV" ]; then
+  if [ -n "$uv_dir" ] && [ -n "$UV" ] && [ -z "$others" ]; then
     local d
     for d in "$("$UV" python dir 2>/dev/null || true)" "$("$UV" tool dir 2>/dev/null || true)" "$("$UV" cache dir 2>/dev/null || true)"; do
       if [ -n "$d" ] && [ -d "$d" ]; then rm -rf "$d"; prune_empty "$(dirname "$d")"; fi
@@ -252,6 +263,7 @@ do_uninstall() {
   prune_empty "$BIN_DIR"; prune_empty "$(dirname "$RECORD_DIR")"
 
   say "Removed dibs${removed:+ and what the installer added:$removed}."
+  [ -z "$others" ] || say "Kept uv and the PATH line in $rc: you've installed other tools with uv since ($others)."
   if [ -n "$purge" ]; then
     say "Its job history and config are gone too."
   elif [ -d "$state_dir" ] || [ -d "$config_dir" ]; then
@@ -263,13 +275,24 @@ do_uninstall() {
   [ -z "$pkgs" ] || say "The installer also installed $pkgs with your package manager; those are left in place."
 }
 
+usage() { # not read from $0: piped into bash, $0 is "bash"
+  cat <<'EOF'
+Install dibs, or update it:
+  curl -fsSL https://raw.githubusercontent.com/andrewboldi/dibs/main/install.sh | bash
+Options, after "bash -s --":
+  --uninstall          undo what the installer did; keeps dibs's job history and config
+  --uninstall --purge  also delete dibs's job history and config
+Environment: DIBS_SOURCE=<folder or URL to install from; the default is the GitHub source archive>
+EOF
+}
+
 main() {
   local mode=install purge=""
   for arg in "$@"; do
     case "$arg" in
       --uninstall) mode=uninstall ;;
       --purge) purge=1 ;;
-      -h|--help) sed -n '2,24p' "$0" 2>/dev/null | sed 's/^# \{0,1\}//' ; return 0 ;;
+      -h|--help) usage; return 0 ;;
       *) die "unknown option $arg (try --help)." ;;
     esac
   done

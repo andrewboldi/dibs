@@ -102,5 +102,24 @@ d daemon status >/dev/null 2>&1 && ok "daemon answers after the update" || bad "
 install --uninstall --purge || bad "uninstall while running"
 uninstalled "$before"
 
+scenario "help works when piped"
+install --help > "$HOME/help.out" 2>&1 || bad "--help"
+check "--help prints the options" grep -q -e '--uninstall --purge' "$HOME/help.out"
+rm -f "$HOME/help.out"
+
+# Last, since it leaves uv behind on purpose.
+scenario "uv adopted: another tool installed with uv keeps uv and the PATH line on uninstall"
+install || bad "install"
+mkdir -p /tmp/othertool/src/othertool
+printf '[build-system]\nrequires = ["hatchling"]\nbuild-backend = "hatchling.build"\n[project]\nname = "othertool"\nversion = "1.0"\n[project.scripts]\nothertool = "othertool:main"\n[tool.hatch.build.targets.wheel]\npackages = ["src/othertool"]\n' > /tmp/othertool/pyproject.toml
+printf 'def main():\n    print("other")\n' > /tmp/othertool/src/othertool/__init__.py
+"$BIN/uv" tool install /tmp/othertool >/dev/null 2>&1 || bad "install another tool with uv"
+install --uninstall --purge > "$HOME/uninstall.out" 2>&1 || bad "uninstall"
+check "uv kept" test -x "$BIN/uv"
+check "the other tool still runs in a new shell" env -i HOME="$HOME" PATH=/usr/bin:/bin SHELL=/bin/bash bash -ic othertool
+check "output says uv was kept and why" grep -q "Kept uv.*othertool" "$HOME/uninstall.out"
+check "no dibs left" bash -c '[ ! -e "$HOME/.local/bin/dibs" ] && ! env PATH="$HOME/.local/bin:$PATH" uv tool list 2>/dev/null | grep -q "^dibs "'
+check "no PATH backup left" bash -c '! ls "$HOME"/.bashrc.before-dibs'
+
 [ "$fails" -eq 0 ] && { echo "ALL PASSED"; exit 0; }
 echo "$fails FAILED"; exit 1
