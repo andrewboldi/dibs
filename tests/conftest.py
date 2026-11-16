@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from dibs import launcher, paths
+from dibs import launcher, paths, procs
 from dibs.daemon import Daemon
 from dibs.gpu import GpuProcess
 from dibs.machine import Config, detect_cpus
@@ -83,10 +83,11 @@ def stop_everything(daemon):
 def make_daemon(tmp_path):
     made = []
 
-    def _make(config=Config(), cap=None, backend=None, clock=time.time, meminfo=lambda: None):
+    def _make(config=Config(), cap=None, backend=None, clock=time.time, meminfo=lambda: None, slept=procs.slept):
         paths = get_paths({"DIBS_HOME": str(tmp_path / "home"), "HOME": str(tmp_path)})
         d = Daemon(
-            paths, config, cap or capacity(), backend or FakeBackend(), use_systemd=False, clock=clock, meminfo=meminfo
+            paths, config, cap or capacity(), backend or FakeBackend(), use_systemd=False, clock=clock, meminfo=meminfo,
+            slept=slept,
         )
         made.append(d)
         return d

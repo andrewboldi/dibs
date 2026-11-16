@@ -80,6 +80,8 @@ class Job:
     peak_mem: int | None = None
     peak_shmem: int | None = None  # the shared memory in peak_mem: files in /dev/shm or a RAM-backed /tmp, and the like
     cpu_seconds: float | None = None  # CPU time the job used, from its scope
+    sleep_at_start: float | None = None  # the machine's time asleep since boot (procs.slept) when the job started
+    asleep: float = 0.0  # how long the machine slept while the job ran (set when it ends); run times leave it out
     priority: int = 5  # 1-10; see compute_tag
     plain_tag: float | None = None  # its place at priority 5 with nothing owed; the session's next jobs line up behind it
 
