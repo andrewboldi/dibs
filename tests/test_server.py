@@ -41,12 +41,25 @@ def wait_for(predicate, timeout=10.0):
     raise AssertionError("timed out")
 
 
+def answers(sock_path) -> bool:
+    """Whether a daemon is listening there: its socket file appears a moment before it listens."""
+    try:
+        return bool(call(sock_path, "ping").get("ok"))
+    except OSError:
+        return False
+
+
+def serve_in_thread(d):
+    thread = threading.Thread(target=lambda: asyncio.run(d.serve()), daemon=True)
+    thread.start()
+    wait_for(lambda: answers(d.paths.socket))
+    return thread
+
+
 @pytest.fixture
 def server(make_daemon):
     d = make_daemon()
-    thread = threading.Thread(target=lambda: asyncio.run(d.serve()), daemon=True)
-    thread.start()
-    wait_for(lambda: d.paths.socket.exists())
+    thread = serve_in_thread(d)
     yield d, lambda op, **kw: call(d.paths.socket, op, **kw)
     try:
         call(d.paths.socket, "shutdown")
@@ -166,7 +179,7 @@ def test_run_daemon_end_to_end(dibs_env):
     paths = get_paths(dibs_env)
     p = _start_daemon_process(dibs_env)
     try:
-        wait_for(lambda: paths.socket.exists())
+        wait_for(lambda: answers(paths.socket))
         info = call(paths.socket, "info")
         assert info["gpu_backend"] == "nvidia-smi"
         assert info["capacity"]["gpus"] == [
@@ -209,3 +222,26 @@ def test_daemon_log_rotates_while_running(tmp_path, monkeypatch):
         for handler in dmod.log.handlers:
             handler.close()
         dmod.log.handlers.clear()
+
+
+def test_waiting_for_the_daemon_outlasts_the_gap_before_it_listens(make_daemon, monkeypatch):
+    # Issue #45: asyncio creates the socket file at bind(), a moment before listen(), and a request
+    # in between is refused. Hold that gap open: waiting for the daemon must outlast it.
+    real = asyncio.start_unix_server
+
+    async def slow_to_listen(client, path, **kw):
+        early = socket.socket(socket.AF_UNIX)
+        early.bind(path)  # the file exists; nothing listens yet
+        await asyncio.sleep(0.5)
+        early.close()
+        os.unlink(path)
+        return await real(client, path=path, **kw)
+
+    monkeypatch.setattr(asyncio, "start_unix_server", slow_to_listen)
+    d = make_daemon()
+    thread = serve_in_thread(d)
+    try:
+        assert call(d.paths.socket, "ping")["ok"]
+    finally:
+        call(d.paths.socket, "shutdown")
+        thread.join(5)
