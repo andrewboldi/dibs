@@ -27,8 +27,10 @@ from dibs.model import (
     Job,
     RequestError,
     State,
+    DEFAULT_PRIORITY,
     compute_tag,
     default_name,
+    next_owed,
     job_to_dict,
     resolve_request,
 )
@@ -38,6 +40,7 @@ from dibs.store import Store
 from dibs.units import format_size
 
 KILL_AFTER = 10.0  # seconds between asking a job to stop (SIGTERM) and forcing it (SIGKILL)
+OWED_FOR = 86400.0  # seconds: what a session owes (or is owed) for its priorities lapses after a day
 OUTSIDE_WINDOW = 120.0  # seconds: RAM in use outside dibs counts as its peak over this long
 RETENTION_EVERY = 3600.0
 RECENT = 86400.0  # how far back `queue --all` looks
@@ -135,6 +138,11 @@ class Daemon:
         except RequestError as e:
             return _rejected(str(e))
 
+        priority = req.get("priority")
+        priority = DEFAULT_PRIORITY if priority is None else priority
+        if isinstance(priority, bool) or not isinstance(priority, int) or not 1 <= priority <= 10:
+            return _rejected("priority must be a whole number from 1 to 10")
+
         now = self.clock()
         session = req.get("session") or "unknown"
         backlog = [j.tag for j in self.store.jobs([State.QUEUED]) if j.session == session]
@@ -148,11 +156,13 @@ class Daemon:
             session=session,
             session_label=req.get("session_label") or session[:4],
             submitted=now,
-            tag=compute_tag(now, request.time, backlog),
+            tag=compute_tag(now, request.time, backlog, priority, self._owed(session, now)),
+            priority=priority,
             state=State.QUEUED,
             output=output or "",
         )
         self.store.add_job(job)
+        self.store.set_meta(f"owed:{session}", json.dumps({"owed": next_owed(request.time, priority), "time": now}))
         self.paths.job_dir(job.id).mkdir(mode=0o700, parents=True, exist_ok=True)
         if not job.output:
             job.output = str(self.paths.job_dir(job.id) / "output.log")
@@ -163,6 +173,11 @@ class Daemon:
         earlier = [j for j in self.store.earlier_runs(job.cwd, job.argv, limit=6) if j.started is not None]
         response["earlier"] = [job_to_dict(j) for j in earlier[:3]]
         return response
+
+    def _owed(self, session: str, now: float) -> float:
+        """What the session's previous job left it (see model.next_owed), if it was within OWED_FOR."""
+        entry = json.loads(self.store.get_meta(f"owed:{session}") or "{}")
+        return entry.get("owed", 0.0) if now - entry.get("time", -math.inf) <= OWED_FOR else 0.0
 
     def cancel(self, ids: list[int]) -> dict:
         now = self.clock()
@@ -638,6 +653,8 @@ class Daemon:
             shutil.rmtree(self.paths.job_dir(job.id), ignore_errors=True)
         self.store.delete_jobs(j.id for j in old)
         self.store.delete_events_before(cutoff)
+        lapsed = [k for k, v in self.store.meta_items("owed:") if now - json.loads(v).get("time", 0) > OWED_FOR]
+        self.store.delete_meta(lapsed)
         self._last_retention = now
 
     def _capacity(self) -> dict:

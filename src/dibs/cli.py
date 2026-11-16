@@ -42,6 +42,12 @@ def _cpus(text: str):
     return value
 
 
+def _priority(text: str) -> int:
+    if not text.isdigit() or not 1 <= int(text) <= 10:
+        raise argparse.ArgumentTypeError(f"{text!r}: give a whole number from 1 to 10")
+    return int(text)
+
+
 def _size(text: str):
     if text == "all":
         return "all"
@@ -79,6 +85,10 @@ def build_parser() -> argparse.ArgumentParser:
         s.add_argument(
             "-t", "--time", type=_duration, required=True,
             help="how long you expect it to take, like 20m or 1h30m (only orders the queue; never enforced)",
+        )  # fmt: skip
+        s.add_argument(
+            "-p", "--priority", type=_priority, default=5,
+            help="1-10 (default 5): higher goes ahead sooner, and your session's next job pays the time back",
         )  # fmt: skip
         s.add_argument("-n", "--name", help="a label for the job (default: the script or program name)")
         s.add_argument("-o", "--output", help="write the job's output to this file instead of dibs's log")
@@ -139,6 +149,7 @@ def _submit_request(args, command: list[str]) -> dict:
         "session": session,
         "session_label": label,
         "name": args.name,
+        "priority": args.priority,
         "output": os.path.abspath(args.output) if args.output else None,
         "request": {"cpus": args.cpus, "mem": args.mem, "vram": args.vram, "gpus": args.gpus, "time": args.time},
     }

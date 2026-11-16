@@ -46,6 +46,10 @@ when those resources are free, so jobs never crash each other by running out of 
 - `--time DURATION`: your honest estimate, like 90s, 20m or 1h30m. It only decides the order:
   shorter jobs go first, and a job that has waited as long as its own estimate can't be passed by
   newer ones. Nothing is ever stopped for running longer than its estimate.
+- `--priority N`: 1 to 10, default 5. A higher priority makes the job count as shorter in line, so
+  it goes ahead sooner; your session's next job pays that time back. Keep 5 unless a person is
+  waiting on this job right now (then 8-10), or nobody is waiting at all (then lower, which earns
+  your next job a head start).
 - `all` works for --cpus, --mem and --vram when a job needs the whole machine or a whole GPU.
 - `--name LABEL` to label it, `-o FILE` to write its output somewhere you choose.
 - The command goes after `--`, exactly as you would run it. It runs in your current folder with

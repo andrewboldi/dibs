@@ -180,7 +180,7 @@ def render_queue(snapshot: dict, *, color: bool) -> str:
                 str(job["id"]),
                 job["state"],
                 job["session_label"],
-                job["name"],
+                job["name"] + (f" (p{job['priority']})" if job.get("priority", 5) != 5 else ""),
                 str(req["cpus"]),
                 format_size(req["mem"]),
                 _vram_cell(job),
@@ -215,6 +215,7 @@ def render_show(job: dict, now: float) -> str:
         ("command", shlex.join(job["argv"])),
         ("folder", _home(job["cwd"])),
         ("session", job["session_label"]),
+        *([("priority", str(job["priority"]))] if job.get("priority", 5) != 5 else []),
         ("asks for", asks_for(job["request"])),
     ]
     if state == "queued":

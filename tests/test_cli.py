@@ -249,3 +249,12 @@ def test_version_flag_prints_the_version(dibs):
 
     result = dibs("--version", check=0)
     assert result.stdout.strip() == f"dibs {__version__}"
+
+
+def test_priority_flag(dibs):
+    assert dibs("submit", *RES, "--priority", "11", "--", "true").returncode == 2
+    dibs("submit", *RES, "--priority", "8", "--", "sleep", "30", check=0)
+    shown = dibs("show", "1", check=0).stdout
+    assert "priority" in shown and "8" in shown
+    assert "(p8)" in dibs("queue", check=0).stdout
+    dibs("cancel", "1")
