@@ -74,6 +74,16 @@ def format_size(n: int) -> str:
     return str(n)
 
 
+def format_size_against(n: int, other: int) -> str:
+    """format_size(n) for a figure set against `other`: what's free or available against what a job
+    asked for, or what it used against what it reserved. When rounding would print the two the same
+    though they differ, n in whole MiB, rounded away from `other`: "needs 2G VRAM (2044M free)"."""
+    text = format_size(n)
+    if n == other or text != format_size(other):
+        return text
+    return f"{n // MiB}M" if n < other else f"{-(-n // MiB)}M"
+
+
 def format_duration(seconds: float) -> str:
     """A compact duration: 45s, 8m, 1h30m, 2d3h. Below a day, minutes are rounded down."""
     s = int(round(seconds))

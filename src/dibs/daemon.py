@@ -39,7 +39,7 @@ from dibs.model import (
 from dibs.paths import Paths, ensure_dirs, get_paths
 from dibs.planner import Plan, Queued, Running, plan
 from dibs.store import Store
-from dibs.units import format_size
+from dibs.units import format_size, format_size_against
 
 KILL_AFTER = 10.0  # seconds between asking a job to stop (SIGTERM) and forcing it (SIGKILL)
 OWED_FOR = 86400.0  # seconds: what a session owes (or is owed) for its priorities lapses after a day
@@ -565,8 +565,8 @@ class Daemon:
                 total = next((g.vram for g in self.capacity.gpus if g.index == gpu), None)
                 ask = vram_to_ask(max(used, job.peak_vram or 0), total)
                 job.stop_reason = (
-                    f"stopped: used {format_size(used)} VRAM on GPU {gpu}, reserved {format_size(reserved)}; "
-                    f"resubmit with --vram {ask}"
+                    f"stopped: used {format_size_against(used, reserved)} VRAM on GPU {gpu}, "
+                    f"reserved {format_size(reserved)}; resubmit with --vram {ask}"
                 )
                 job.stop_requested = now
                 changed = True

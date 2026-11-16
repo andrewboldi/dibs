@@ -11,7 +11,7 @@ from dibs.gpu import GpuProcess
 from dibs.machine import Config
 from dibs.model import Gpu, State
 from dibs.render import render_queue
-from dibs.units import GiB
+from dibs.units import GiB, MiB
 
 PY = sys.executable
 SLEEPER = [PY, "-c", "import time; time.sleep(60)"]
@@ -193,7 +193,15 @@ def test_guard_since_survives_restart(make_daemon):
     assert make_daemon().guard_since > since  # switched off and on again: a new start
 
 
-def test_vram_overuse_stops_job(world, tmp_path):
+@pytest.mark.parametrize(
+    "used,reason",
+    [
+        (7 * GiB, "stopped: used 7G VRAM on GPU 0, reserved 6G; resubmit with --vram all"),
+        # 1 MiB over: rounded to 6G, the figure would hide the overage
+        (6 * GiB + MiB, "stopped: used 6145M VRAM on GPU 0, reserved 6G; resubmit with --vram 7G"),
+    ],
+)
+def test_vram_overuse_stops_job(world, tmp_path, used, reason):
     d, backend = world()
     resp = d.submit(
         {
@@ -207,11 +215,11 @@ def test_vram_overuse_stops_job(world, tmp_path):
     job_id = resp["job"]["id"]
     job = d.store.get_job(job_id)
     pid = wait_for(lambda: next((p for p in launcher.job_pids(job) if (procs.cmdline(p) or [""])[0] == PY), None))
-    backend.procs = [GpuProcess(pid, 0, 7 * GiB)]
+    backend.procs = [GpuProcess(pid, 0, used)]
     run_until(d, lambda: d.store.get_job(job_id).state == State.FAILED)
     j = d.store.get_job(job_id)
-    assert j.reason == "stopped: used 7G VRAM on GPU 0, reserved 6G; resubmit with --vram all"
-    assert j.peak_vram == 7 * GiB
+    assert j.reason == reason
+    assert j.peak_vram == used
 
 
 def test_stop_message_text():

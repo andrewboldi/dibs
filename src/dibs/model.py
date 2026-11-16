@@ -8,7 +8,7 @@ from dataclasses import asdict, dataclass, field
 from enum import StrEnum
 from typing import Any
 
-from dibs.units import GiB, format_size
+from dibs.units import GiB, format_size, format_size_against
 
 
 @dataclass(frozen=True)
@@ -132,7 +132,7 @@ def fits_machine(req: Request, cap: Capacity) -> str | None:
     if req.cpus > len(cap.cpus):
         return f"asks for {req.cpus} CPUs, but dibs manages {len(cap.cpus)}"
     if req.mem > cap.mem:
-        return f"asks for {format_size(req.mem)} RAM, but dibs manages {format_size(cap.mem)}"
+        return f"asks for {format_size(req.mem)} RAM, but dibs manages {format_size_against(cap.mem, req.mem)}"
     if req.gpus == 0:
         return None
     if not cap.gpus:
@@ -145,7 +145,7 @@ def fits_machine(req: Request, cap: Capacity) -> str | None:
     if req.gpus == 1:
         return (
             f"asks for {format_size(req.vram)} VRAM, but the largest GPU dibs manages has "
-            f"{format_size(cap.max_vram)}"
+            f"{format_size_against(cap.max_vram, req.vram)}"
         )
     return (
         f"asks for {req.gpus} GPUs with {format_size(req.vram)} VRAM each, "
