@@ -51,10 +51,14 @@ def _rejected(message: str) -> dict:
 
 
 def _command_exists(argv0: str, env: dict, cwd: str) -> bool:
+    """Whether the job will find its command, looking where it will: relative paths and relative
+    PATH entries (bin, .) count from the job's folder, not the daemon's."""
     if "/" in argv0:
         path = argv0 if os.path.isabs(argv0) else os.path.join(cwd, argv0)
         return os.path.isfile(path) and os.access(path, os.X_OK)
-    return shutil.which(argv0, path=env.get("PATH", os.defpath)) is not None
+    entries = env.get("PATH", os.defpath).split(os.pathsep)
+    search = os.pathsep.join(e if os.path.isabs(e) else os.path.join(cwd, e or ".") for e in entries)
+    return shutil.which(argv0, path=search) is not None
 
 
 class Daemon:
