@@ -156,3 +156,15 @@ def test_what_a_job_leaves_its_sessions_next_job():
     assert next_owed(600.0, 5) == 0.0
     assert next_owed(600.0, 1) == -1800.0  # the time it gave up, credited
     assert next_owed(7200.0, 1) == -3600.0  # at most an hour of credit
+
+
+def test_vram_to_ask_after_a_stop_is_the_peak_plus_headroom_rounded_up():
+    # Issue #59: an agent stopped at 2.2G of 2G resubmitted with 2G and was stopped again.
+    from dibs.model import vram_to_ask
+
+    gib = 1 << 30
+    assert vram_to_ask(int(2.2 * gib), 8 * gib) == "2.5G"
+    assert vram_to_ask(int(1.8 * gib), 8 * gib) == "2G"
+    assert vram_to_ask(int(4.4 * gib), 8 * gib) == "5G"
+    assert vram_to_ask(int(0.3 * gib), 8 * gib) == "512M"
+    assert vram_to_ask(7 * gib, 8 * gib) == "all"  # the peak plus headroom doesn't fit: the whole GPU

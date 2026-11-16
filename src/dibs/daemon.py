@@ -33,6 +33,7 @@ from dibs.model import (
     next_owed,
     job_to_dict,
     resolve_request,
+    vram_to_ask,
 )
 from dibs.paths import Paths, ensure_dirs, get_paths
 from dibs.planner import Plan, Queued, Running, plan
@@ -554,8 +555,11 @@ class Daemon:
             if over and job.stop_reason is None:
                 gpu, used = over[0]
                 reserved = job.request.vram if gpu in job.gpu_ids else 0
+                total = next((g.vram for g in self.capacity.gpus if g.index == gpu), None)
+                ask = vram_to_ask(max(used, job.peak_vram or 0), total)
                 job.stop_reason = (
-                    f"stopped: used {format_size(used)} VRAM on GPU {gpu}, reserved {format_size(reserved)}"
+                    f"stopped: used {format_size(used)} VRAM on GPU {gpu}, reserved {format_size(reserved)}; "
+                    f"resubmit with --vram {ask}"
                 )
                 job.stop_requested = now
                 changed = True

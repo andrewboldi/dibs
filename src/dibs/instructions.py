@@ -64,7 +64,8 @@ when those resources are free, so jobs never crash each other by running out of 
 - `dibs show ID` lists a job's peak VRAM and RAM, and `dibs submit` shows what earlier runs of the
   same command in the same folder used. Size the next run from those: the peaks plus a little
   headroom (going over VRAM stops the job), and the CPUs it kept busy.
-- A job stopped for going over its reservation has a reason saying so: resubmit with more.
+- A job stopped for going over its VRAM reservation has a reason saying so, ending with the --vram
+  to resubmit with: use that, not the same request again.
 
 ## Waiting and checking
 

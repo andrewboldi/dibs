@@ -210,7 +210,7 @@ def test_vram_overuse_stops_job(world, tmp_path):
     backend.procs = [GpuProcess(pid, 0, 7 * GiB)]
     run_until(d, lambda: d.store.get_job(job_id).state == State.FAILED)
     j = d.store.get_job(job_id)
-    assert j.reason == "stopped: used 7G VRAM on GPU 0, reserved 6G"
+    assert j.reason == "stopped: used 7G VRAM on GPU 0, reserved 6G; resubmit with --vram all"
     assert j.peak_vram == 7 * GiB
 
 

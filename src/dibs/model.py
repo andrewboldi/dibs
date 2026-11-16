@@ -7,7 +7,7 @@ from dataclasses import asdict, dataclass, field
 from enum import StrEnum
 from typing import Any
 
-from dibs.units import format_size
+from dibs.units import GiB, format_size
 
 
 @dataclass(frozen=True)
@@ -108,6 +108,14 @@ def compute_tag(
     num, den = PRIORITY_SHARE[priority]
     start = max(submitted, max(session_queued_tags, default=-math.inf))
     return max(submitted, start + owed + estimate * num / den)
+
+
+def vram_to_ask(peak: int, gpu_vram: int | None) -> str:
+    """What --vram to ask for after a job was stopped at this peak: 10% headroom, rounded up to half a
+    gigabyte, or "all" when that's more than the GPU has."""
+    half = GiB // 2
+    ask = math.ceil(peak * 1.1 / half) * half
+    return "all" if gpu_vram is not None and ask >= gpu_vram else format_size(ask)
 
 
 def next_owed(estimate: float, priority: int) -> float:
