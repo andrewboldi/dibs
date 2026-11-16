@@ -1,0 +1,1 @@
+{"id":"int-a8a34515","kind":"field_change","created_at":"2026-11-16T06:24:51.787009918Z","actor":"Andrew Boldi","issue_id":"dibs-k0t","extra":{"field":"status","new_value":"closed","old_value":"open","reason":"Fixed in PR #10: socket falls back to /run/user/UID; tests isolated from the real runtime folder"}}
