@@ -378,8 +378,71 @@ def test_ram_in_use_by_jobs_is_not_counted_as_outside(make_daemon, tmp_path, mon
     monkeypatch.setattr(procs, "cgroup", lambda pid: "/app.slice/dibs-test-job-1.scope" if pid == j.shim_pid else real_cgroup(pid))
     used[0] = 7 * GiB  # the job now holds 5G
     d.tick()
-    # 7G in use, 5G of it the running job's: 2G outside. 16G - 6G reserved - 2G leaves room for 7G.
+    # 7G in use, 5G of it the running job's: at most 2G outside. 16G - 6G reserved - 2G leaves room for 7G.
     second = submit(d, tmp_path, [PY, "-c", "pass"], mem=7 * GiB)
+    d.tick()
+    assert job(d, second).state != State.QUEUED, json.dumps(d.show(second)["job"])
+
+
+def _job_holding(d, tmp_path, monkeypatch, mem):
+    """A running job whose scope dibs reads its memory from, and a file that ends the job once it exists."""
+    go = tmp_path / "go"
+    job_id = submit(d, tmp_path, [PY, "-c", f"import os, time\nwhile not os.path.exists({str(go)!r}): time.sleep(0.02)"],
+                    mem=mem)
+    run_until(d, lambda: job(d, job_id).shim_pid)
+    j = job(d, job_id)
+    j.unit = "dibs-test-job-1"
+    d.store.update_job(j)
+    scope = tmp_path / "cgroup" / "app.slice" / "dibs-test-job-1.scope"
+    scope.mkdir(parents=True)
+    monkeypatch.setattr(procs, "CGROUP_ROOT", str(tmp_path / "cgroup"))
+    real_cgroup = procs.cgroup
+    monkeypatch.setattr(procs, "cgroup", lambda pid: "/app.slice/dibs-test-job-1.scope" if pid == j.shim_pid else real_cgroup(pid))
+    return job_id, scope / "memory.stat", go
+
+
+def test_ram_a_running_job_is_letting_go_of_is_not_counted_as_outside(make_daemon, tmp_path, monkeypatch):
+    # Issue #72: a job holding about 20G was killed at its RAM limit, and for the next two minutes the
+    # waiting jobs' reasons said 19.6G was in use outside dibs while the machine had 9G in use. One
+    # sample had caught the machine still holding memory the job no longer did, and the peak kept it.
+    now, used = [time.time()], [2 * GiB]
+    d = make_daemon(clock=lambda: now[0], meminfo=lambda: (16 * GiB, used[0]))
+    first, stat, go = _job_holding(d, tmp_path, monkeypatch, 8 * GiB)
+    stat.write_text(f"anon {6 * GiB}\nshmem 0\n")
+    used[0] = 8 * GiB  # 6G of it the job's, 2G outside dibs
+    now[0] += 1
+    d.tick()
+    stat.write_text(f"anon {1 * GiB}\nshmem 0\n")  # the job lets go of 5G
+    now[0] += 1
+    d.tick()  # while the machine still counts it as in use
+    used[0] = 3 * GiB
+    now[0] += 1
+    d.tick()
+    # 2G outside dibs at most. 16G - 8G reserved - 2G leaves room for 6G.
+    second = submit(d, tmp_path, [PY, "-c", "pass"], mem=6 * GiB)
+    d.tick()
+    assert job(d, second).state != State.QUEUED, json.dumps(d.show(second)["job"])
+    go.touch()
+
+
+def test_ram_a_finished_job_is_letting_go_of_is_not_counted_as_outside(make_daemon, tmp_path, monkeypatch):
+    # Issue #72, the other order: dibs has seen the job end while the machine still holds its memory.
+    now, used = [time.time()], [2 * GiB]
+    d = make_daemon(clock=lambda: now[0], meminfo=lambda: (16 * GiB, used[0]))
+    first, stat, go = _job_holding(d, tmp_path, monkeypatch, 8 * GiB)
+    stat.write_text(f"anon {6 * GiB}\nshmem 0\n")
+    used[0] = 8 * GiB  # 6G of it the job's, 2G outside dibs
+    now[0] += 1
+    d.tick()
+    go.touch()
+    run_until(d, lambda: finished(d, first))
+    now[0] += 1
+    d.tick()  # the job has ended, and the machine still counts its 6G as in use
+    used[0] = 2 * GiB
+    now[0] += 1
+    d.tick()
+    # 2G outside dibs. 16G - 2G leaves room for 10G.
+    second = submit(d, tmp_path, [PY, "-c", "pass"], mem=10 * GiB)
     d.tick()
     assert job(d, second).state != State.QUEUED, json.dumps(d.show(second)["job"])
 
