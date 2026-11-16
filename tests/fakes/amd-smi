@@ -1,0 +1,78 @@
+#!/usr/bin/env python3
+"""A stand-in for amd-smi, for tests. It prints the JSON the real `amd-smi ... --json` prints,
+built from ROCm/amdsmi's amdsmi_cli (see the comment above the parsers in src/dibs/gpu.py).
+
+Reads the GPUs from the JSON file named by $DIBS_FAKE_GPU_FILE, the same file the fake nvidia-smi
+reads: {"gpus": [{"index": 0, "uuid": "...", "name": "...", "memory_mib": 8192}],
+        "processes": [{"pid": 123, "gpu_uuid": "...", "used_mib": 3100}],
+        "flavor": "units" | "plain" | "gpu_data"}
+"units" is the 6.x/7.x shape ({"value": N, "unit": "MB"}), "plain" bare numbers, "gpu_data" the
+{"gpu_data": [...]} wrapper. "no_static_size" leaves the size out of `static`, as a failed vram read does.
+"""
+import json
+import os
+import sys
+
+args = sys.argv[1:]
+try:
+    with open(os.environ["DIBS_FAKE_GPU_FILE"]) as f:
+        data = json.load(f)
+except (KeyError, OSError, ValueError):
+    print("ERROR: Unable to initialize amdsmi", file=sys.stderr)
+    sys.exit(1)
+
+gpus = data.get("gpus", [])
+flavor = data.get("flavor", "units")
+if not gpus or "--json" not in args:
+    print("ERROR: no AMD GPUs found" if not gpus else "fake amd-smi: only --json is supported", file=sys.stderr)
+    sys.exit(1)
+
+
+def quantity(value, unit):
+    return value if flavor == "plain" else {"value": value, "unit": unit}
+
+
+def emit(items):
+    print(json.dumps({"gpu_data": items} if flavor == "gpu_data" else items, indent=4))
+
+
+bdf = lambda g: f"0000:{0x03 + g['index']:02x}:00.0"
+command = next((a for a in args if not a.startswith("-")), None)
+if command == "list":
+    emit([{"gpu": g["index"], "bdf": bdf(g), "uuid": g["uuid"], "kfd_id": 100 + g["index"],
+           "node_id": 1 + g["index"], "partition_id": 0} for g in gpus])
+elif command == "static":
+    items = []
+    for g in gpus:
+        item = {"gpu": g["index"], "asic": {"market_name": g["name"], "vendor_id": "0x1002"}}
+        item["vram"] = {"type": "HBM", "vendor": "SAMSUNG", "size": quantity(g["memory_mib"], "MB")}
+        if flavor == "no_static_size":
+            item["vram"]["size"] = "N/A"
+        items.append(item)
+    emit(items)
+elif command == "metric":
+    emit([{"gpu": g["index"], "mem_usage": {"total_vram": quantity(g["memory_mib"], "MB"),
+                                            "used_vram": quantity(0, "MB")}} for g in gpus])
+elif command == "process":
+    by_uuid = {g["uuid"]: g["index"] for g in gpus}
+    items = []
+    for g in gpus:
+        procs = [p for p in data.get("processes", []) if by_uuid.get(p["gpu_uuid"]) == g["index"]]
+        if not procs:
+            items.append({"gpu": g["index"], "process_list": [{"process_info": "No running processes detected"}]})
+            continue
+        listed = []
+        for p in procs:
+            used = None if p.get("used_mib") is None else p["used_mib"] * 1024 * 1024
+            vram = "N/A" if used is None else quantity(used, "B")
+            listed.append({"process_info": {
+                "name": "python3", "pid": p["pid"],
+                "mem_usage": "N/A" if used is None else quantity(used + 4096, "B"),
+                "memory_usage": {"gtt_mem": quantity(0, "B"), "cpu_mem": quantity(4096, "B"), "vram_mem": vram},
+                "usage": {"gfx": quantity(0, "ns"), "enc": quantity(0, "ns")},
+                "cu_occupancy": quantity(0, "%") if flavor != "plain" else 0}})
+        items.append({"gpu": g["index"], "process_list": listed})
+    emit(items)
+else:
+    print(f"fake amd-smi: unsupported arguments {args}", file=sys.stderr)
+    sys.exit(2)

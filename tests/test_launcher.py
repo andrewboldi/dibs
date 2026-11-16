@@ -271,3 +271,23 @@ def test_cpu_time_is_reported(paths):
     result = wait_exit(paths, job)
     assert result["exit_code"] == 0
     assert 0.4 <= result["cpu_seconds"] < 5
+
+
+def test_job_env_for_amd_uses_rocr_visible_devices(paths):
+    job = make_job(paths, ["true"], gpu_ids=(1, 3), env={"HIP_VISIBLE_DEVICES": "0", "CUDA_VISIBLE_DEVICES": "0"})
+    env = launcher.job_env(job, "abcd1234", "amd")
+    assert env["ROCR_VISIBLE_DEVICES"] == "1,3"
+    assert "HIP_VISIBLE_DEVICES" not in env and "CUDA_VISIBLE_DEVICES" not in env
+    assert env["DIBS_GPUS"] == "1,3"
+
+
+def test_job_env_for_amd_without_gpus_hides_them_all(paths):
+    job = make_job(paths, ["true"], gpu_ids=())
+    assert launcher.job_env(job, "abcd1234", "amd")["ROCR_VISIBLE_DEVICES"] == "-1"
+
+
+def test_job_env_for_nvidia_leaves_rocm_variables_alone(paths):
+    job = make_job(paths, ["true"], gpu_ids=(0,))
+    env = launcher.job_env(job, "abcd1234")
+    assert env["CUDA_VISIBLE_DEVICES"] == "0"
+    assert "ROCR_VISIBLE_DEVICES" not in env
