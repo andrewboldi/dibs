@@ -13,11 +13,12 @@ from pathlib import Path
 from dibs.model import TERMINAL, Job, State, job_from_dict, job_to_dict
 
 _SCHEMA = """
-CREATE TABLE IF NOT EXISTS jobs (id INTEGER PRIMARY KEY AUTOINCREMENT, state TEXT NOT NULL, data TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS jobs (id INTEGER PRIMARY KEY AUTOINCREMENT, state TEXT NOT NULL, data TEXT NOT NULL, ended REAL);
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL, time REAL NOT NULL, data TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS jobs_state ON jobs (state);
 """
+_TERMINAL = tuple(str(s) for s in TERMINAL)
 
 
 class Store:
@@ -29,6 +30,18 @@ class Store:
         self._db.execute("PRAGMA journal_mode=WAL")
         with self._db:
             self._db.executescript(_SCHEMA)
+            self._add_ended_column()
+
+    def _add_ended_column(self) -> None:
+        """Databases from before the ended column get it, filled in from each job's data."""
+        columns = {row[1] for row in self._db.execute("PRAGMA table_info(jobs)")}
+        if "ended" not in columns:
+            self._db.execute("ALTER TABLE jobs ADD COLUMN ended REAL")
+            rows = self._db.execute("SELECT id, data FROM jobs").fetchall()
+            self._db.executemany(
+                "UPDATE jobs SET ended = ? WHERE id = ?", [(json.loads(data).get("ended"), i) for i, data in rows]
+            )
+        self._db.execute("CREATE INDEX IF NOT EXISTS jobs_ended ON jobs (ended)")
 
     def close(self) -> None:
         self._db.close()
@@ -38,16 +51,16 @@ class Store:
             cur = self._db.execute("INSERT INTO jobs (state, data) VALUES (?, '')", (str(job.state),))
             job.id = cur.lastrowid
             self._db.execute(
-                "UPDATE jobs SET data = ? WHERE id = ?",
-                (json.dumps(job_to_dict(job, include_env=True)), job.id),
+                "UPDATE jobs SET data = ?, ended = ? WHERE id = ?",
+                (json.dumps(job_to_dict(job, include_env=True)), job.ended, job.id),
             )
         return job.id
 
     def update_job(self, job: Job) -> None:
         with self._db:
             self._db.execute(
-                "UPDATE jobs SET state = ?, data = ? WHERE id = ?",
-                (str(job.state), json.dumps(job_to_dict(job, include_env=True)), job.id),
+                "UPDATE jobs SET state = ?, data = ?, ended = ? WHERE id = ?",
+                (str(job.state), json.dumps(job_to_dict(job, include_env=True)), job.ended, job.id),
             )
 
     def get_job(self, job_id: int) -> Job | None:
@@ -65,8 +78,21 @@ class Store:
             ).fetchall()
         return [job_from_dict(json.loads(r[0])) for r in rows]
 
+    def _finished(self, condition: str, t: float) -> list[Job]:
+        marks = ",".join("?" * len(_TERMINAL))
+        rows = self._db.execute(
+            f"SELECT data FROM jobs WHERE state IN ({marks}) AND ended {condition} ? ORDER BY id",
+            (*_TERMINAL, t),
+        ).fetchall()
+        return [job_from_dict(json.loads(r[0])) for r in rows]
+
     def finished_before(self, t: float) -> list[Job]:
-        return [j for j in self.jobs(TERMINAL) if j.ended is not None and j.ended < t]
+        """Finished jobs that ended before t (found by the ended column, not by decoding every job)."""
+        return self._finished("<", t)
+
+    def finished_since(self, t: float) -> list[Job]:
+        """Finished jobs that ended at or after t."""
+        return self._finished(">=", t)
 
     def delete_jobs(self, ids: Iterable[int]) -> None:
         with self._db:

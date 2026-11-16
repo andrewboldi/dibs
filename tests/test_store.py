@@ -99,3 +99,47 @@ def test_store_survives_reopen(tmp_path):
     again = Store(tmp_path / "dibs.db")
     assert again.get_job(1) == job and again.get_meta("k") == "v"
     again.close()
+
+
+def test_finished_jobs_are_found_in_sql_not_by_decoding_them_all(tmp_path, monkeypatch):
+    # Issue #6: queue --all and the hourly cleanup decoded every finished job (environment and
+    # all) just to look at when it ended.
+    from dibs import store as store_module
+
+    s = Store(tmp_path / "dibs.db")
+    for i in range(50):
+        s.add_job(make_job(state=State.DONE, ended=100.0 + i))
+    s.add_job(make_job(state=State.DONE, ended=10_000.0))
+    s.add_job(make_job(state=State.RUNNING))
+    decoded = []
+    real = store_module.job_from_dict
+    monkeypatch.setattr(store_module, "job_from_dict", lambda d: decoded.append(d["id"]) or real(d))
+    assert [j.id for j in s.finished_since(5_000.0)] == [51]
+    assert decoded == [51]
+    decoded.clear()
+    assert [j.id for j in s.finished_before(102.0)] == [1, 2]
+    assert decoded == [1, 2]
+    s.close()
+
+
+def test_a_database_from_before_the_ended_column_keeps_working(tmp_path):
+    import json
+    import sqlite3
+
+    from dibs.model import job_to_dict
+
+    path = tmp_path / "dibs.db"
+    old = sqlite3.connect(path)
+    old.executescript(
+        "CREATE TABLE jobs (id INTEGER PRIMARY KEY AUTOINCREMENT, state TEXT NOT NULL, data TEXT NOT NULL);"
+        "CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);"
+        "CREATE TABLE events (id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL, time REAL NOT NULL, data TEXT NOT NULL);"
+    )
+    job = make_job(id=1, state=State.DONE, ended=50.0)
+    old.execute("INSERT INTO jobs (id, state, data) VALUES (1, 'done', ?)", (json.dumps(job_to_dict(job, include_env=True)),))
+    old.commit()
+    old.close()
+    s = Store(path)
+    assert [j.id for j in s.finished_before(60.0)] == [1]
+    assert s.get_job(1) == job
+    s.close()

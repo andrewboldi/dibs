@@ -189,7 +189,7 @@ class Daemon:
         jobs = sorted(running, key=lambda j: (j.started or 0, j.id))
         jobs += sorted(queued, key=lambda j: position.get(j.id, math.inf))
         if include_finished:
-            recent = [j for j in self.store.jobs(TERMINAL) if (j.ended or 0) >= now - RECENT]
+            recent = self.store.finished_since(now - RECENT)
             jobs += sorted(recent, key=lambda j: (j.ended or 0, j.id))
         if session is not None:
             jobs = [j for j in jobs if j.session == session]
