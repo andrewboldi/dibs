@@ -1,3 +1,4 @@
+import json
 import os
 import shutil
 import subprocess
@@ -7,6 +8,7 @@ import time
 from conftest import FakeBackend, run_until
 
 from dibs import launcher, procs
+from dibs.daemon import OUTSIDE_WINDOW
 from dibs.model import State
 from dibs.units import GiB
 
@@ -342,3 +344,41 @@ def test_memory_stat_parsing():
     stat = procs.memory_stat("anon 2048\nfile 4096\nshmem 1024\nbogus x\n")
     assert stat == {"anon": 2048, "file": 4096, "shmem": 1024}
     assert procs.memory_stat(None) == {}
+
+
+def test_ram_used_outside_dibs_is_held_back_for_a_few_minutes(make_daemon, tmp_path):
+    # Issue #30: the daemon measures the RAM in use outside its jobs and plans with its peak over the
+    # last few minutes, so a job doesn't start into RAM a busy program let go of for a moment.
+    now, used = [time.time()], [9 * GiB]
+    d = make_daemon(clock=lambda: now[0], meminfo=lambda: (16 * GiB, used[0]))
+    job_id = submit(d, tmp_path, [PY, "-c", "pass"], mem=8 * GiB)
+    d.tick()
+    assert job(d, job_id).state == State.QUEUED
+    assert "9G in use outside dibs" in json.dumps(d.show(job_id)["job"])
+    used[0] = 2 * GiB
+    d.tick()
+    assert job(d, job_id).state == State.QUEUED  # still the peak of the last few minutes
+    now[0] += OUTSIDE_WINDOW + 1
+    run_until(d, lambda: finished(d, job_id))
+
+
+def test_ram_in_use_by_jobs_is_not_counted_as_outside(make_daemon, tmp_path, monkeypatch):
+    used = [2 * GiB]  # in use outside dibs
+    d = make_daemon(meminfo=lambda: (16 * GiB, used[0]))
+    first = submit(d, tmp_path, [PY, "-c", "import time; time.sleep(5)"], mem=6 * GiB)
+    run_until(d, lambda: job(d, first).shim_pid)
+    j = job(d, first)
+    j.unit = "dibs-test-job-1"
+    d.store.update_job(j)
+    scope = tmp_path / "cgroup" / "app.slice" / "dibs-test-job-1.scope"
+    scope.mkdir(parents=True)
+    (scope / "memory.stat").write_text(f"anon {5 * GiB}\nfile {3 * GiB}\nshmem 0\n")
+    monkeypatch.setattr(procs, "CGROUP_ROOT", str(tmp_path / "cgroup"))
+    real_cgroup = procs.cgroup
+    monkeypatch.setattr(procs, "cgroup", lambda pid: "/app.slice/dibs-test-job-1.scope" if pid == j.shim_pid else real_cgroup(pid))
+    used[0] = 7 * GiB  # the job now holds 5G
+    d.tick()
+    # 7G in use, 5G of it the running job's: 2G outside. 16G - 6G reserved - 2G leaves room for 7G.
+    second = submit(d, tmp_path, [PY, "-c", "pass"], mem=7 * GiB)
+    d.tick()
+    assert job(d, second).state != State.QUEUED, json.dumps(d.show(second)["job"])

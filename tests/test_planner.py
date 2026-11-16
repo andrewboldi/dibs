@@ -212,3 +212,27 @@ def test_plan_is_fast():
     started = time.perf_counter()
     plan(capacity, run, queue, NOW)
     assert time.perf_counter() - started < 0.5
+
+
+def test_ram_used_outside_dibs_is_not_handed_out():
+    # Issue #30: dibs treated all of the machine's RAM as its own, so reservations could add up to
+    # more RAM than exists while other programs were using it.
+    jobs = [queued(1, req(mem=12 * GiB))]
+    assert [s.job_id for s in plan(cap(mem=16 * GiB), [], jobs, NOW).starts] == [1]
+    p = plan(cap(mem=16 * GiB), [], jobs, NOW, outside_mem=6 * GiB)
+    assert p.starts == [] and p.predictions[1].start is None
+    assert p.predictions[1].reason == "needs 12G RAM (10G free, 6G in use outside dibs)"
+
+
+def test_a_job_waiting_for_ram_used_outside_dibs_doesnt_hold_up_the_line():
+    jobs = [queued(1, req(mem=12 * GiB), tag=1.0), queued(2, req(mem=4 * GiB), tag=2.0)]
+    p = plan(cap(mem=16 * GiB), [], jobs, NOW, outside_mem=6 * GiB)
+    assert [s.job_id for s in p.starts] == [2]
+    assert p.predictions[1].start is None and "6G in use outside dibs" in p.predictions[1].reason
+
+
+def test_ram_used_outside_dibs_never_makes_a_job_unfit_for_the_machine():
+    p = plan(cap(mem=16 * GiB), [running(1, req(mem=8 * GiB), [0])], [queued(2, req(mem=14 * GiB))], NOW,
+             outside_mem=12 * GiB)
+    reason = p.predictions[2].reason
+    assert "can't fit this machine" not in reason and "12G in use outside dibs" in reason

@@ -55,6 +55,7 @@ def dibs_env(tmp_path):
         DIBS_NO_SYSTEMD="1",
         DIBS_GPU_BACKEND="smi",
         DIBS_FAKE_GPU_FILE=str(gpu_file),
+        DIBS_MEMINFO=f"{FAKES}/meminfo",  # nothing in use outside dibs, whatever this machine is doing
         PATH=f"{FAKES}:{os.environ['PATH']}",
     )
     env.pop("CLAUDE_CODE_SESSION_ID", None)
@@ -82,9 +83,11 @@ def stop_everything(daemon):
 def make_daemon(tmp_path):
     made = []
 
-    def _make(config=Config(), cap=None, backend=None, clock=time.time):
+    def _make(config=Config(), cap=None, backend=None, clock=time.time, meminfo=lambda: None):
         paths = get_paths({"DIBS_HOME": str(tmp_path / "home"), "HOME": str(tmp_path)})
-        d = Daemon(paths, config, cap or capacity(), backend or FakeBackend(), use_systemd=False, clock=clock)
+        d = Daemon(
+            paths, config, cap or capacity(), backend or FakeBackend(), use_systemd=False, clock=clock, meminfo=meminfo
+        )
         made.append(d)
         return d
 

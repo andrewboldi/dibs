@@ -130,6 +130,20 @@ def rss(pid: int) -> int | None:
 CGROUP_ROOT = "/sys/fs/cgroup"  # where cgroup v2 is mounted
 
 
+def meminfo() -> tuple[int, int] | None:
+    """The machine's RAM in bytes: (total, in use), in use being MemTotal - MemAvailable (file cache
+    the kernel can drop counts as available). DIBS_MEMINFO points tests at a stand-in file."""
+    fields = {}
+    for line in (_read(os.environ.get("DIBS_MEMINFO") or "/proc/meminfo") or "").splitlines():
+        key, _, rest = line.partition(":")
+        value = rest.split()
+        if value and value[0].isdigit():
+            fields[key] = int(value[0]) * 1024
+    if "MemTotal" not in fields or "MemAvailable" not in fields:
+        return None
+    return fields["MemTotal"], fields["MemTotal"] - fields["MemAvailable"]
+
+
 def memory_stat(text: str | None) -> dict[str, int]:
     """A cgroup's memory.stat, as numbers."""
     stat = {}

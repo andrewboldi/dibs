@@ -131,13 +131,18 @@ def _plural(n: int, word: str) -> str:
     return f"{n} {word}" if n == 1 else f"{n} {word}s"
 
 
-def plan(capacity: Capacity, running: Sequence[Running], queued: Sequence[Queued], now: float) -> Plan:
+def plan(
+    capacity: Capacity, running: Sequence[Running], queued: Sequence[Queued], now: float, outside_mem: int = 0
+) -> Plan:
+    """outside_mem is RAM in use by programs outside dibs: it isn't handed out, and a job that can't fit
+    beside it waits, without a predicted start, until those programs free some."""
     gpu_pos = {g.index: pos for pos, g in enumerate(capacity.gpus)}
     cpu_set = set(capacity.cpus)
 
     busy_cpus = {c for r in running for c in r.cpu_ids if c in cpu_set}
     free_vram = [g.vram for g in capacity.gpus]
-    free_mem = capacity.mem
+    usable_mem = capacity.mem - outside_mem
+    free_mem = usable_mem
     for r in running:
         free_mem -= r.request.mem
         for g in r.gpu_ids:
@@ -156,7 +161,7 @@ def plan(capacity: Capacity, running: Sequence[Running], queued: Sequence[Queued
     placed: dict[int, tuple[float, float, tuple[int, ...]]] = {}
     starts: list[Start] = []
     for q in order:
-        if fits_machine(q.request, capacity):
+        if fits_machine(q.request, capacity) or q.request.mem > usable_mem:
             continue
         start, positions = profile.earliest(q.request)
         end = start + q.request.time
@@ -178,22 +183,27 @@ def plan(capacity: Capacity, running: Sequence[Running], queued: Sequence[Queued
                 q.job_id, position, None, None, (), f"can't fit this machine: {problem}"
             )
             continue
+        if q.job_id not in placed:  # waits for programs outside dibs to free RAM
+            reason = _reason(q, order, placed, now, now_cpus, now_mem, now_vram, outside_mem)
+            predictions[q.job_id] = Prediction(q.job_id, position, None, None, (), reason)
+            continue
         start, end, gpu_ids = placed[q.job_id]
         reason = ""
         if start > now:
-            reason = _reason(q, order, placed, now, now_cpus, now_mem, now_vram)
+            reason = _reason(q, order, placed, now, now_cpus, now_mem, now_vram, outside_mem)
         predictions[q.job_id] = Prediction(q.job_id, position, start, end, gpu_ids, reason)
 
     return Plan(starts, predictions, running_ends)
 
 
-def _reason(q, order, placed, now, free_cpus, free_mem, free_vram) -> str:
+def _reason(q, order, placed, now, free_cpus, free_mem, free_vram, outside_mem=0) -> str:
     req = q.request
     short = []
     if req.cpus > free_cpus:
         short.append(f"{_plural(req.cpus, 'CPU')} ({max(free_cpus, 0)} free)")
     if req.mem > free_mem:
-        short.append(f"{format_size(req.mem)} RAM ({format_size(max(free_mem, 0))} free)")
+        outside = f", {format_size(outside_mem)} in use outside dibs" if outside_mem else ""
+        short.append(f"{format_size(req.mem)} RAM ({format_size(max(free_mem, 0))} free{outside})")
     if req.gpus:
         roomy = sum(1 for free in free_vram if free >= req.vram)
         if roomy < req.gpus:
