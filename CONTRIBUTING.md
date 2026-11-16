@@ -53,6 +53,31 @@ To add one just for yourself, without a pull request, list its instructions file
 agent_files = ["~/.cursor/rules/dibs.mdc"]
 ```
 
+## Add a GPU backend
+
+A backend is one class in `src/dibs/gpu.py`. `list_gpus()` says what's there; `processes()` says
+which processes use which GPU and how much memory, or `None` if the driver can't tell (that turns
+the VRAM watch and the guard off). `vendor` decides which variable hides other GPUs from a job.
+
+```python
+class ExampleBackend:
+    name = "example-smi"  # what dibs info shows
+    vendor = "nvidia"  # "nvidia": CUDA_VISIBLE_DEVICES; "amd": ROCR_VISIBLE_DEVICES
+
+    def list_gpus(self) -> list[Gpu]:
+        # One Gpu(index, uuid, name, vram in bytes) per device, numbered as jobs will see them.
+        return [Gpu(0, "GPU-0", "Example GPU", 8 << 30)]
+
+    def processes(self) -> list[GpuProcess] | None:
+        # Every compute process: GpuProcess(pid, gpu index, VRAM in bytes or None).
+        return [GpuProcess(1234, 0, 2 << 30)]
+```
+
+Then choose it in `open_backend`, both by `DIBS_GPU_BACKEND` and in the auto-detection order, and
+test it against a stand-in for the vendor's tool in `tests/fakes/`, as `tests/fakes/amd-smi` does.
+List only compute processes: the guard stops what `processes()` returns, so a desktop's graphics
+clients must never be in it.
+
 ## Run the tests
 
 ```bash
