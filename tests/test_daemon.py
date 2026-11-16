@@ -274,3 +274,21 @@ def test_crash_while_launching_is_adopted_not_lost(make_daemon, tmp_path, monkey
     assert job(second, job_id).state == State.RUNNING and job(second, job_id).shim_pid
     run_until(second, lambda: finished(second, job_id))
     assert job(second, job_id).state == State.DONE
+
+
+def test_relative_path_entries_are_looked_up_from_the_jobs_folder(daemon, tmp_path):
+    # Issue #7: the check that a command exists resolved PATH entries like "bin" from the
+    # daemon's folder, while the job runs (and finds its command) from its own.
+    project = tmp_path / "proj"
+    (project / "bin").mkdir(parents=True)
+    tool = project / "bin" / "mytool"
+    tool.write_text("#!/bin/sh\necho found-it\n")
+    tool.chmod(0o755)
+    request = req(project, ["mytool"])
+    request["env"] = {**request["env"], "PATH": "bin:/usr/bin:/bin"}
+    resp = daemon.submit(request)
+    assert resp["ok"], resp
+    job_id = resp["job"]["id"]
+    run_until(daemon, lambda: finished(daemon, job_id))
+    assert job(daemon, job_id).state == State.DONE
+    assert "found-it" in open(job(daemon, job_id).output).read()
