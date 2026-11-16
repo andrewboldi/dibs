@@ -232,7 +232,7 @@ def test_vram_watch_off_when_driver_is_blind(make_daemon):
 
 
 def test_lost_job_says_what_the_launcher_said(daemon, tmp_path, monkeypatch):
-    def broken_launch(job, paths, *, use_systemd):
+    def broken_launch(job, paths, **kwargs):
         job_dir = paths.job_dir(job.id)
         job_dir.mkdir(parents=True, exist_ok=True)
         (job_dir / "shim.log").write_text("Failed to start transient scope unit: Unknown assignment\n")
@@ -258,8 +258,8 @@ def test_crash_while_launching_is_adopted_not_lost(make_daemon, tmp_path, monkey
     first = make_daemon()
     real_launch = launcher.launch
 
-    def launch_then_die(job, paths, *, use_systemd):
-        real_launch(job, paths, use_systemd=use_systemd)
+    def launch_then_die(job, paths, **kwargs):
+        real_launch(job, paths, **kwargs)
         raise _DaemonDies
 
     monkeypatch.setattr(launcher, "launch", launch_then_die)
@@ -412,3 +412,14 @@ def test_earlier_runs_render_what_they_used():
         "  #41 done after 19m (estimated 40m): 2.9 of 6 CPUs, RAM 2.8G of 6G, VRAM 4.1G of 5G"
     )
     assert render_earlier([]) == ""
+
+
+def test_job_on_an_amd_machine_sees_only_its_gpus_through_rocr(make_daemon, tmp_path):
+    class AmdBackend(FakeBackend):
+        vendor = "amd"
+
+    amd_daemon = make_daemon(backend=AmdBackend())
+    script = "import os; print('ROCR=' + os.environ['ROCR_VISIBLE_DEVICES'], 'CUDA' in str(os.environ.keys()))"
+    job_id = submit(amd_daemon, tmp_path, [PY, "-c", script], vram=1 * GiB)
+    run_until(amd_daemon, lambda: finished(amd_daemon, job_id))
+    assert "ROCR=0 False" in open(job(amd_daemon, job_id).output).read()

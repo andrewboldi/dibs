@@ -56,7 +56,7 @@ Success looks like:
 - Looking at live free VRAM/RAM from processes dibs didn't start. Capacity is the machine's
   detected totals (optionally narrowed by config), and dibs counts only its own reservations.
 - Job dependencies, job arrays, user-set priorities.
-- GPUs other than NVIDIA. Windows. Multiple Unix users sharing one dibs.
+- GPUs other than NVIDIA and AMD (AMD is in 8.4). Windows. Multiple Unix users sharing one dibs.
 - Publishing to PyPI (the name `dibs` is taken there by an unrelated project).
 - Guarding CPU and RAM use outside dibs. Nothing reliably tells a heavy job from an agent's normal
   builds and test suites, so agents are told to queue heavy CPU/RAM work but aren't stopped.
@@ -143,9 +143,9 @@ At daemon start, dibs detects:
 - **CPUs**: the set of logical CPUs this process may run on (`os.sched_getaffinity(0)`; falls back
   to `range(os.cpu_count())`). dibs hands out specific CPU ids from this set.
 - **RAM**: `MemTotal` from `/proc/meminfo` (macOS: `sysctl hw.memsize`).
-- **GPUs**: `nvidia-smi --query-gpu=index,uuid,name,memory.total --format=csv,noheader,nounits`.
-  Each GPU is its own pool of VRAM (MiB). If `nvidia-smi` is missing or fails, the machine has
-  zero GPUs.
+- **GPUs**: `nvidia-smi --query-gpu=index,uuid,name,memory.total --format=csv,noheader,nounits`
+  (or NVML), else `amd-smi` (8.4). Each GPU is its own pool of VRAM (MiB). If neither is there or
+  they fail, the machine has zero GPUs.
 
 Capacity is stored as named pools, never as "the GPU": `cpus` (a set of ids), `mem` (bytes), and
 one VRAM pool per GPU (keyed by index, carrying uuid and name). Multi-GPU placement falls out of
@@ -311,6 +311,7 @@ The job's environment is the captured one plus:
 |---|---|
 | `CUDA_VISIBLE_DEVICES` | assigned GPU indices, comma-separated; empty string for jobs without GPUs, so they can't touch a GPU |
 | `CUDA_DEVICE_ORDER` | `PCI_BUS_ID`, so indices match `nvidia-smi` |
+| `ROCR_VISIBLE_DEVICES` | AMD machines only, instead of the two CUDA variables (8.4) |
 | `OMP_NUM_THREADS`, `MKL_NUM_THREADS`, `OPENBLAS_NUM_THREADS`, `NUMEXPR_NUM_THREADS`, `VECLIB_MAXIMUM_THREADS` | the CPU count, unless the captured environment already sets them (prevents PyTorch/NumPy from oversubscribing the pinned cores) |
 | `PYTHONUNBUFFERED` | `1` unless already set, so output reaches the log as it happens (verified: without it, a Python job's prints are lost if it's killed) |
 | `DIBS_JOB_ID`, `DIBS_CPUS`, `DIBS_MEM`, `DIBS_VRAM`, `DIBS_GPUS` | the job's id and what it was granted (bytes for sizes), so job code can size itself, e.g. `torch.cuda.set_per_process_memory_fraction` |
@@ -333,6 +334,34 @@ signal, stopped for exceeding a reservation, or couldn't be started); `queued`/`
 
 Cancel and over-limit stops send SIGTERM to every process of the job, then SIGKILL after 10
 seconds.
+
+### 8.4 AMD GPUs
+
+A machine's GPUs are all one vendor's; dibs doesn't mix NVIDIA and AMD. `DIBS_GPU_BACKEND=amd`
+(or `amd-smi`) picks the AMD backend, and without the variable it is chosen last, after NVML and
+nvidia-smi, if `amd-smi` is on the `PATH`. It runs the `amd-smi` command line (`list`, `static
+--asic --vram`, `metric --mem-usage` as a fallback for the size, and `process`, all with `--json`)
+and never imports the `amdsmi` Python package, so dibs stays standard-library only. The parsers
+accept the shapes ROCm 6.2 to 7.2 print: `{"value": N, "unit": "MB"}` objects, bare numbers and
+`"N MB"` strings, per-GPU lists and `{"gpu_data": [...]}` wrappers (sources are cited in
+`src/dibs/gpu.py`). Per-process VRAM is `memory_usage.vram_mem` of `amd-smi process`, falling back to
+the process's whole `mem_usage`; it feeds the VRAM watch and the guard as NVIDIA's does.
+
+A job's GPUs are set through `ROCR_VISIBLE_DEVICES`, the variable ROCm's documentation recommends
+on Linux for GPU isolation (the HSA runtime applies it, so HIP, OpenCL and everything above it
+honour it). A GPU's index is amd-smi's GPU id, which is the index `ROCR_VISIBLE_DEVICES` takes. A job
+with no GPU gets `-1`, an invalid index, which ROCm reads as no devices. dibs does not also set
+`HIP_VISIBLE_DEVICES`: it counts within what `ROCR_VISIBLE_DEVICES` leaves visible, so the same ids
+there would hide GPU 1 from a job granted only GPU 1. It removes `HIP_VISIBLE_DEVICES`,
+`CUDA_VISIBLE_DEVICES` and `GPU_DEVICE_ORDINAL` from the submitter's environment for the same reason.
+
+What was tested: everything above, against a fake `amd-smi` (`tests/fakes/amd-smi`) whose output
+was built from the amd-smi source (`amdsmi_cli`), plus the parsers on each shape, the launch
+environment, and a job started under a daemon with an AMD backend. What was not: no real AMD GPU, no
+real `amd-smi`, no ROCm job was run. Unverified on hardware: that amd-smi's GPU ids always equal the
+HSA indices `ROCR_VISIBLE_DEVICES` uses (`amd-smi list -e` shows `HSA_ID` to check), that `-1`
+hides every GPU, that `amd-smi process` lists only compute processes (a desktop's graphics clients
+might show up and be stopped by the guard), and the exact output of releases outside 6.2 to 7.2.
 
 ## 9. Holding jobs to their reservations
 

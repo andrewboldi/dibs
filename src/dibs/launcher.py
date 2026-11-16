@@ -66,11 +66,21 @@ def unit_name(instance: str, job_id: int) -> str:
     return f"dibs-{instance}-job-{job_id}"
 
 
-def job_env(job: Job, instance: str) -> dict[str, str]:
-    """The submitter's environment, plus what the job was granted."""
+def job_env(job: Job, instance: str, vendor: str = "nvidia") -> dict[str, str]:
+    """The submitter's environment, plus what the job was granted. `vendor` is the machine's GPU
+    vendor: NVIDIA jobs get CUDA_VISIBLE_DEVICES, AMD jobs ROCR_VISIBLE_DEVICES (ROCm's recommended
+    variable on Linux; it hides GPUs from the HSA runtime, under HIP, OpenCL and everything else)."""
     env = dict(job.env)
-    env["CUDA_VISIBLE_DEVICES"] = ",".join(str(g) for g in job.gpu_ids)
-    env["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+    if vendor == "amd":
+        # HIP_VISIBLE_DEVICES and CUDA_VISIBLE_DEVICES count within what ROCR leaves visible, so a
+        # value the submitter had set would hide the granted GPU (or reveal none); drop them.
+        for var in ("HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES", "GPU_DEVICE_ORDINAL"):
+            env.pop(var, None)
+        # "-1" is an invalid index, which ROCm reads as "no GPUs"; an empty value isn't documented.
+        env["ROCR_VISIBLE_DEVICES"] = ",".join(str(g) for g in job.gpu_ids) or "-1"
+    else:
+        env["CUDA_VISIBLE_DEVICES"] = ",".join(str(g) for g in job.gpu_ids)
+        env["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
     for var in THREAD_VARS:
         env.setdefault(var, str(job.request.cpus))
     env.setdefault("PYTHONUNBUFFERED", "1")
@@ -91,7 +101,7 @@ def _write_private(path: Path, text: str) -> None:
     os.replace(tmp, path)
 
 
-def launch(job: Job, paths: Paths, *, use_systemd: bool) -> tuple[int, int | None, str | None]:
+def launch(job: Job, paths: Paths, *, use_systemd: bool, vendor: str = "nvidia") -> tuple[int, int | None, str | None]:
     """Start the job's shim, detached. Returns (shim pid, its start ticks, systemd unit or None)."""
     job_dir = paths.job_dir(job.id)
     job_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -100,7 +110,7 @@ def launch(job: Job, paths: Paths, *, use_systemd: bool) -> tuple[int, int | Non
         "job_id": job.id,
         "argv": job.argv,
         "cwd": job.cwd,
-        "env": job_env(job, paths.instance),
+        "env": job_env(job, paths.instance, vendor),
         "cpu_ids": job.cpu_ids,
         "output": job.output,
         "mem": job.request.mem,

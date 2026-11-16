@@ -394,7 +394,7 @@ class Daemon:
             self.store.update_job(job)
             try:
                 job.shim_pid, job.shim_ticks, job.unit = launcher.launch(
-                    job, self.paths, use_systemd=self.use_systemd
+                    job, self.paths, use_systemd=self.use_systemd, vendor=getattr(self.backend, "vendor", "nvidia")
                 )
             except Exception as e:  # anything that stops the launch fails this job, not the daemon
                 job.state, job.ended, job.exit_code = State.FAILED, now, 127

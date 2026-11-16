@@ -84,7 +84,9 @@ when those resources are free, so jobs never crash each other by running out of 
 - Never run GPU work outside dibs, and never stop the dibs daemon or edit its config to get
   around it: the other agents rely on it.
 - Inside a job, DIBS_CPUS, DIBS_MEM and DIBS_VRAM (bytes) say what it was given, and
-  CUDA_VISIBLE_DEVICES shows only its GPUs.
+  CUDA_VISIBLE_DEVICES shows only its GPUs. On a machine with AMD GPUs it is
+  ROCR_VISIBLE_DEVICES instead (the GPU ids are amd-smi's), and HIP_VISIBLE_DEVICES and
+  CUDA_VISIBLE_DEVICES are removed from the job's environment: don't set them yourself.
 """
 
 SKILL = (
