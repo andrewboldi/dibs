@@ -1,6 +1,8 @@
 import json
 import os
+import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -76,8 +78,7 @@ def test_nvml_backend_reads_real_gpu():
 
 # --- AMD: amd-smi ---------------------------------------------------------------------------------
 
-import subprocess  # noqa: E402
-
+from dibs import gpu, launcher  # noqa: E402
 from dibs.gpu import (  # noqa: E402
     AmdSmiBackend,
     parse_amd_list,
@@ -123,11 +124,90 @@ def test_amd_backend_lists_gpus_in_every_output_shape(tmp_path, flavor):
     ]
 
 
+@pytest.fixture
+def kfd(tmp_path, monkeypatch):
+    """A file standing in for /dev/kfd, and a way to start children that hold it open (or not)."""
+    device = tmp_path / "kfd"
+    device.write_text("")
+    monkeypatch.setattr("dibs.gpu.KFD_DEVICE", str(device))
+    children = []
+
+    def spawn(holds):
+        code = "import sys, time\n" + (f"f = open({str(device)!r})\n" if holds else "") + "print('up', flush=True); time.sleep(60)"
+        child = subprocess.Popen([sys.executable, "-c", code], stdout=subprocess.PIPE, text=True)
+        child.stdout.readline()  # the fd is open once it says so
+        children.append(child)
+        return child.pid
+
+    yield spawn
+    for child in children:
+        child.kill()
+        child.wait()
+
+
 @pytest.mark.parametrize("flavor", ["units", "plain", "gpu_data"])
-def test_amd_backend_processes_in_every_output_shape(tmp_path, flavor):
-    backend = AmdSmiBackend(env=amd_env(tmp_path, flavor))
+def test_amd_backend_processes_in_every_output_shape(tmp_path, flavor, kfd):
+    pid_a, pid_b = kfd(True), kfd(True)
+    env = amd_env(
+        tmp_path,
+        flavor,
+        [{"pid": pid_a, "gpu_uuid": "amd-uuid-1", "used_mib": 3100}, {"pid": pid_b, "gpu_uuid": "amd-uuid-0", "used_mib": None}],
+    )
+    backend = AmdSmiBackend(env=env)
     backend.list_gpus()
-    assert backend.processes() == [GpuProcess(124, 0, None), GpuProcess(123, 1, 3100 * MiB)]
+    assert backend.processes() == [GpuProcess(pid_b, 0, None), GpuProcess(pid_a, 1, 3100 * MiB)]
+
+
+def test_amd_backend_drops_graphics_clients_that_amd_smi_lists(tmp_path, kfd):
+    compute, graphics = kfd(True), kfd(False)
+    env = amd_env(
+        tmp_path,
+        processes=[
+            {"pid": compute, "gpu_uuid": "amd-uuid-0", "used_mib": 100},
+            {"pid": graphics, "gpu_uuid": "amd-uuid-0", "used_mib": 200},
+        ],
+    )
+    backend = AmdSmiBackend(env=env)
+    backend.list_gpus()
+    assert backend.processes() == [GpuProcess(compute, 0, 100 * MiB)]
+
+
+def test_amd_backend_drops_processes_it_cannot_inspect(tmp_path, kfd):
+    env = amd_env(tmp_path, processes=[{"pid": pid, "gpu_uuid": "amd-uuid-0", "used_mib": 100} for pid in (1, 2**22 + 12345)])
+    backend = AmdSmiBackend(env=env)
+    backend.list_gpus()
+    assert backend.processes() == []  # pid 1 (fds unreadable to us) and a pid that is gone
+
+
+def test_vram_watch_sees_a_jobs_kfd_process(tmp_path, kfd, make_daemon):
+    from conftest import capacity
+
+    env = amd_env(tmp_path)
+    backend = AmdSmiBackend(env=env)
+    gpus = backend.list_gpus()
+    d = make_daemon(cap=capacity(gpus=gpus), backend=backend)
+    code = f"import time; f = open({str(tmp_path / 'kfd')!r}); time.sleep(60)"
+    resp = d.submit(
+        {
+            "argv": [sys.executable, "-c", code],
+            "cwd": str(tmp_path),
+            "env": dict(os.environ),
+            "session": "s",
+            "request": {"cpus": 1, "mem": GiB, "vram": 6 * GiB, "gpus": None, "time": 60},
+        }
+    )
+    job = d.store.get_job(resp["job"]["id"])
+    deadline = time.time() + 10
+    pid = None
+    while time.time() < deadline and pid is None:
+        pid = next((p for p in launcher.job_pids(job) if gpu._holds_kfd(p)), None)
+        time.sleep(0.02)
+    assert pid, "job never opened the stand-in kfd"
+    data = json.loads(open(env["DIBS_FAKE_GPU_FILE"]).read())
+    data["processes"] = [{"pid": pid, "gpu_uuid": gpus[0].uuid, "used_mib": 5000}]
+    open(env["DIBS_FAKE_GPU_FILE"], "w").write(json.dumps(data))
+    d.tick()
+    assert d.store.get_job(job.id).peak_vram == 5000 * MiB
 
 
 def test_amd_backend_with_no_processes(tmp_path):

@@ -345,7 +345,11 @@ and never imports the `amdsmi` Python package, so dibs stays standard-library on
 accept the shapes ROCm 6.2 to 7.2 print: `{"value": N, "unit": "MB"}` objects, bare numbers and
 `"N MB"` strings, per-GPU lists and `{"gpu_data": [...]}` wrappers (sources are cited in
 `src/dibs/gpu.py`). Per-process VRAM is `memory_usage.vram_mem` of `amd-smi process`, falling back to
-the process's whole `mem_usage`; it feeds the VRAM watch and the guard as NVIDIA's does.
+the process's whole `mem_usage`; it feeds the VRAM watch and the guard as NVIDIA's does. `amd-smi process` is not limited to compute
+(it can list a compositor or a browser drawing with the GPU), and the guard stops what it is shown,
+so the backend keeps only processes that hold `/dev/kfd` open, which every ROCm compute process does
+and graphics-only clients don't. A process whose `/proc/PID/fd` can't be read (another user's) is
+left out, as the guard spares other users' processes anyway; a job's own processes are always readable.
 
 A job's GPUs are set through `ROCR_VISIBLE_DEVICES`, the variable ROCm's documentation recommends
 on Linux for GPU isolation (the HSA runtime applies it, so HIP, OpenCL and everything above it
@@ -360,8 +364,8 @@ was built from the amd-smi source (`amdsmi_cli`), plus the parsers on each shape
 environment, and a job started under a daemon with an AMD backend. What was not: no real AMD GPU, no
 real `amd-smi`, no ROCm job was run. Unverified on hardware: that amd-smi's GPU ids always equal the
 HSA indices `ROCR_VISIBLE_DEVICES` uses (`amd-smi list -e` shows `HSA_ID` to check), that `-1`
-hides every GPU, that `amd-smi process` lists only compute processes (a desktop's graphics clients
-might show up and be stopped by the guard), and the exact output of releases outside 6.2 to 7.2.
+hides every GPU, that every ROCm compute process holds `/dev/kfd` open (graphics clients are excluded by this
+check, so a job using the GPU in some way that doesn't would go unwatched), and the exact output of releases outside 6.2 to 7.2.
 
 ## 9. Holding jobs to their reservations
 

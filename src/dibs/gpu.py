@@ -200,6 +200,9 @@ class SmiBackend:
 #
 # Units: {"value", "unit"} objects, bare numbers (in the field's native unit) and "123 MB" strings
 # all parse. Anything unreadable becomes None, never a guess.
+#
+# amd-smi's process list is not limited to compute: a compositor or browser using the GPU for
+# graphics is listed too. `processes()` therefore keeps only processes holding /dev/kfd open.
 
 _UNITS = {"": 1, "B": 1, "KB": 1 << 10, "KIB": 1 << 10, "MB": MiB, "MIB": MiB, "GB": 1 << 30, "GIB": 1 << 30,
           "TB": 1 << 40, "TIB": 1 << 40}
@@ -320,6 +323,27 @@ def _json_in(text: str):
     return None
 
 
+# Every ROCm compute process opens the KFD device; graphics-only clients (the compositor, browsers)
+# don't. amd-smi lists both, and the guard stops what it sees, so only KFD holders are compute.
+KFD_DEVICE = "/dev/kfd"
+
+
+def _holds_kfd(pid: int) -> bool:
+    """Whether the process has KFD_DEVICE open. A process whose fds can't be read (another user's)
+    doesn't count: the guard leaves other users' processes alone anyway."""
+    try:
+        fds = os.listdir(f"/proc/{pid}/fd")
+    except OSError:
+        return False
+    for fd in fds:
+        try:
+            if os.readlink(f"/proc/{pid}/fd/{fd}") == KFD_DEVICE:
+                return True
+        except OSError:
+            continue
+    return False
+
+
 class AmdSmiBackend:
     """AMD GPUs through the amd-smi command line. A GPU's index is amd-smi's own GPU id, which is
     also the index ROCR_VISIBLE_DEVICES takes (both count GPUs in the order the driver found them)."""
@@ -369,7 +393,7 @@ class AmdSmiBackend:
         found = parse_amd_processes(payload)
         if self._known:
             found = [p for p in found if p.gpu_index in self._known]
-        return found
+        return [p for p in found if _holds_kfd(p.pid)]
 
 
 def open_backend(env: Mapping[str, str] = os.environ) -> GpuBackend:
