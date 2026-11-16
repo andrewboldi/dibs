@@ -10,6 +10,7 @@ import os
 import pwd
 import shutil
 import subprocess
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -40,6 +41,13 @@ def targets(home: Path, path_env: str) -> list[Target]:
         detected = (home / folder).exists() or shutil.which(binary, path=path_env or os.defpath) is not None
         found.append(Target(name, home / folder / filename, detected))
     return found
+
+
+def _home_path(home: Path, name: str) -> Path:
+    """A path from the config: "~/x" and relative paths are under home."""
+    if name == "~" or name.startswith("~/"):
+        return home / name[2:]
+    return home / name if not os.path.isabs(name) else Path(name)
 
 
 def put_block(text: str, block: str) -> str:
@@ -154,10 +162,15 @@ def _install_service(home: Path, dibs_exe: str, record: dict, lines: list[str]) 
         lines.append("Lingering: on, so dibs keeps running for agents in tmux after you log out.")
 
 
-def setup(home: Path, *, path_env: str, dry_run: bool, service: bool, dibs_exe: str) -> list[str]:
+def setup(
+    home: Path, *, path_env: str, dry_run: bool, service: bool, dibs_exe: str, agent_files: Sequence[str] = ()
+) -> list[str]:
+    """agent_files: more instructions files to write into, from the agent_files config setting
+    ("~/" is the home folder), for agent CLIs dibs doesn't know."""
     record = _load_record(home)
     lines = []
     found = [t for t in targets(home, path_env) if t.detected]
+    found += [Target("agent_files", _home_path(home, f), True) for f in agent_files]
     if not found:
         lines.append("No agent CLIs found (Claude Code, Codex, opencode, pi, Gemini CLI).")
     for target in found:

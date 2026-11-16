@@ -39,6 +39,20 @@ For each change:
 3. Open a pull request that says `Fixes #N` in its description. A check fails pull requests that
    don't name their issue.
 
+## Add an agent CLI
+
+`dibs setup` writes the dibs instructions into each agent CLI's own instructions file. To support
+another CLI for everyone, add a line to `AGENTS` in `src/dibs/agents.py`: the CLI's name, its config
+folder under the home folder, the instructions file in that folder, and its binary (setup detects an
+agent by either one). Add a test in `tests/test_agents.py`.
+
+To add one just for yourself, without a pull request, list its instructions file in
+`~/.config/dibs/config.toml`, then run `dibs setup` again. `dibs setup --undo` takes it back out.
+
+```toml
+agent_files = ["~/.cursor/rules/dibs.mdc"]
+```
+
 ## Run the tests
 
 ```bash

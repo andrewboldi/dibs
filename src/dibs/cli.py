@@ -325,9 +325,21 @@ def cmd_setup(args, paths: Paths, _) -> int:
     if args.undo:
         print("\n".join(agents.undo(home, service=not args.no_service)))
         return 0
+    from dibs.machine import ConfigError, load_config
+
+    try:
+        agent_files = load_config(paths.config_file).agent_files
+    except ConfigError as e:
+        print(f"dibs: {e}", file=sys.stderr)
+        return 1
     exe = shutil.which("dibs") or f"{sys.executable} -m dibs"
     lines = agents.setup(
-        home, path_env=os.environ.get("PATH", ""), dry_run=args.dry_run, service=not args.no_service, dibs_exe=exe
+        home,
+        path_env=os.environ.get("PATH", ""),
+        dry_run=args.dry_run,
+        service=not args.no_service,
+        dibs_exe=exe,
+        agent_files=agent_files,
     )
     print("\n".join(lines))
     if not args.dry_run:

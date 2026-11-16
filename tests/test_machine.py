@@ -92,3 +92,11 @@ def test_detect_mem_matches_meminfo():
     with open("/proc/meminfo") as f:
         kib = int(next(line for line in f if line.startswith("MemTotal:")).split()[1])
     assert detect_mem() == kib * 1024
+
+
+def test_load_config_agent_files(tmp_path):
+    # Issue #26: instructions files of agent CLIs dibs doesn't know, for dibs setup to write into.
+    path = write(tmp_path, 'agent_files = ["~/.cursor/rules/dibs.mdc", "/opt/agent/RULES.md"]\n')
+    assert load_config(path).agent_files == ("~/.cursor/rules/dibs.mdc", "/opt/agent/RULES.md")
+    with pytest.raises(ConfigError, match="agent_files"):
+        load_config(write(tmp_path, 'agent_files = "~/x.md"\n'))
