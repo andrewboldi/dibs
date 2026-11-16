@@ -5,7 +5,7 @@ import pytest
 
 from dibs.model import Capacity, Gpu, Request
 from dibs.planner import Queued, Running, Start, expected_end, plan
-from dibs.units import GiB
+from dibs.units import GiB, MiB, parse_size
 
 NOW = 10_000.0
 
@@ -106,6 +106,21 @@ def test_vram_packing():
     p = plan(cap(), [], jobs, NOW)
     assert [s.job_id for s in p.starts] == [1, 2]
     assert p.predictions[3].reason == "needs 3G VRAM (2G free)"
+
+
+def test_reason_shows_a_shortfall_that_rounding_would_hide():
+    # An "8G" GPU reports 8188 MiB: next to a 6G job, a 2G job is 4 MiB short.
+    held = running(1, req(cpus=1, gpus=1, vram=6 * GiB, time=600), (0,), gpu_ids=(0,))
+    p = plan(cap(gpus=(8188 * MiB,)), [held], [queued(2, req(gpus=1, vram=2 * GiB))], NOW)
+    assert p.starts == []
+    assert p.predictions[2].reason == "needs 2G VRAM (2044M free)"
+
+
+def test_reason_shows_a_ram_shortfall_that_rounding_would_hide():
+    typed = parse_size("1.1G")
+    held = running(1, req(cpus=1, mem=32 * GiB - int(1.08 * GiB), time=600), (0,))
+    p = plan(cap(), [held], [queued(2, req(cpus=1, mem=typed))], NOW)
+    assert p.predictions[2].reason == "needs 1.1G RAM (1105M free)"
 
 
 def test_best_fit_gpu():

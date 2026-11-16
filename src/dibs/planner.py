@@ -15,7 +15,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 
 from dibs.model import Capacity, Request, fits_machine
-from dibs.units import format_size
+from dibs.units import format_size, format_size_against
 
 OVERRUN_MIN = 60.0
 OVERRUN_FRACTION = 0.10
@@ -203,7 +203,8 @@ def _reason(q, order, placed, now, free_cpus, free_mem, free_vram, outside_mem=0
         short.append(f"{_plural(req.cpus, 'CPU')} ({max(free_cpus, 0)} free)")
     if req.mem > free_mem:
         outside = f", {format_size(outside_mem)} in use outside dibs" if outside_mem else ""
-        short.append(f"{format_size(req.mem)} RAM ({format_size(max(free_mem, 0))} free{outside})")
+        left = format_size_against(max(free_mem, 0), req.mem)
+        short.append(f"{format_size(req.mem)} RAM ({left} free{outside})")
     if req.gpus:
         roomy = sum(1 for free in free_vram if free >= req.vram)
         if roomy < req.gpus:
@@ -211,7 +212,7 @@ def _reason(q, order, placed, now, free_cpus, free_mem, free_vram, outside_mem=0
             if req.gpus > 1:
                 short.append(f"{req.gpus} GPUs with {vram} VRAM free ({roomy} {'has' if roomy == 1 else 'have'} it)")
             else:
-                most = format_size(max(max(free_vram, default=0), 0))
+                most = format_size_against(max(max(free_vram, default=0), 0), req.vram)
                 where = f"{most} free" if len(free_vram) == 1 else f"at most {most} free on one GPU"
                 short.append(f"{vram} VRAM ({where})")
     if short:

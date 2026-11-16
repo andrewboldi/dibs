@@ -13,10 +13,12 @@ from dibs.model import (
     job_to_dict,
     resolve_request,
 )
-from dibs.units import GiB
+from dibs.units import GiB, MiB
 
 CAP = Capacity(cpus=tuple(range(24)), mem=30 * GiB, gpus=(Gpu(0, "GPU-a", "A", 8 * GiB),))
 NO_GPU = Capacity(cpus=tuple(range(24)), mem=30 * GiB, gpus=())
+NEAR_8G = Capacity(cpus=tuple(range(24)), mem=30 * GiB, gpus=(Gpu(0, "GPU-a", "A", 8188 * MiB),))
+NEAR_30G = Capacity(cpus=tuple(range(24)), mem=30 * GiB - MiB, gpus=())
 
 
 def raw(**kw):
@@ -73,6 +75,8 @@ def test_resolve_no_gpu():
     "request_fields,cap,message",
     [
         ({"vram": 12 * GiB}, CAP, "asks for 12G VRAM, but the largest GPU dibs manages has 8G"),
+        ({"vram": 8 * GiB}, NEAR_8G, "asks for 8G VRAM, but the largest GPU dibs manages has 8188M"),
+        ({"mem": 30 * GiB}, NEAR_30G, "asks for 30G RAM, but dibs manages 30719M"),
         ({"cpus": 32}, CAP, "asks for 32 CPUs, but dibs manages 24"),
         ({"mem": 64 * GiB}, CAP, "asks for 64G RAM, but dibs manages 30G"),
         ({"gpus": 2}, CAP, "--gpus needs --vram"),

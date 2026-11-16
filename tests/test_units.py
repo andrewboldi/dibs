@@ -6,6 +6,7 @@ from dibs.units import (
     UnitError,
     format_duration,
     format_size,
+    format_size_against,
     parse_duration,
     parse_size,
     suggest_size,
@@ -74,6 +75,23 @@ def test_parse_duration_rejects(bad):
 )
 def test_format_size(n, expected):
     assert format_size(n) == expected
+
+
+@pytest.mark.parametrize(
+    "n,other,expected",
+    [
+        (2044 * MiB, 2 * GiB, "2044M"),  # 2 GiB asked, 4 MiB short: not "2G"
+        (8188 * MiB, 8 * GiB, "8188M"),  # an "8G" GPU that has 4 MiB less than 8G
+        (3073 * MiB, 3 * GiB, "3073M"),  # used 1 MiB over a 3G reservation: not "3G"
+        (3 * GiB + MiB // 2, 3 * GiB, "3073M"),  # over by half a MiB: rounded away, up
+        (int(1.08 * GiB), parse_size("1.1G"), "1105M"),  # a typed 1.1G keeps its own figure
+        (1 * GiB, 2 * GiB, "1G"),  # already reads differently: as format_size
+        (2 * GiB, 2 * GiB, "2G"),  # the same amount: nothing to tell apart
+        (0, 512 * MiB, "0"),
+    ],
+)
+def test_format_size_against(n, other, expected):
+    assert format_size_against(n, other) == expected
 
 
 @pytest.mark.parametrize(
