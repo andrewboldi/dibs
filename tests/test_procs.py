@@ -193,3 +193,47 @@ def test_stopping_a_job_in_an_interactive_shell_reads_cleanly():
         shell.wait()
         shell.stdin.close()
         shell.stdout.close()
+
+
+def _survivors(marker):
+    found = []
+    for name in os.listdir("/proc"):
+        if name.isdigit() and procs.cmdline(int(name)) == ["sleep", marker] and procs.alive(int(name)):
+            found.append(int(name))
+    return found
+
+
+def test_children_forked_at_the_moment_of_the_stop_are_stopped_too(spawn, monkeypatch):
+    # Issue #8: once a parent is killed its children are re-parented, so a child forked between
+    # the look for children and the kill used to escape. The fork is placed exactly in that window.
+    import signal
+
+    marker = "31.4159"
+    code = (
+        "import signal, subprocess, time; "
+        f"signal.signal(signal.SIGUSR1, lambda *a: subprocess.Popen(['sleep', '{marker}'])); "
+        "time.sleep(60)"
+    )
+    parent = spawn([PY, "-c", code], start_new_session=True)  # no terminal, like an agent's command
+    wait_for(lambda: procs.cmdline(parent.pid) and procs.cmdline(parent.pid)[0] == PY)
+    time.sleep(0.2)  # let it install the handler
+    real_children_map = procs.children_map
+    looked = []
+
+    def fork_right_after_the_first_look():
+        snapshot = real_children_map()
+        if not looked:
+            looked.append(True)
+            os.kill(parent.pid, signal.SIGUSR1)
+            wait_for(lambda: _survivors(marker))
+        return snapshot
+
+    monkeypatch.setattr(procs, "children_map", fork_right_after_the_first_look)
+    try:
+        procs.stop_with_message([parent.pid], None)
+        parent.wait(timeout=5)
+        time.sleep(0.3)
+        assert _survivors(marker) == []
+    finally:
+        for pid in _survivors(marker):
+            os.kill(pid, 9)

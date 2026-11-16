@@ -41,6 +41,12 @@ def state(pid: int) -> str | None:
     return fields[0] if fields else None
 
 
+def tty(pid: int) -> int | None:
+    """The process's controlling terminal (0 for none)."""
+    fields = _stat_fields(pid)
+    return int(fields[4]) if fields else None
+
+
 def parent(pid: int) -> int | None:
     fields = _stat_fields(pid)
     return int(fields[1]) if fields else None
@@ -168,12 +174,23 @@ def stop_with_message(pids: Sequence[int], text: str | None) -> None:
     """Kill these processes and everything they started, leaving text in their output.
 
     The text goes to a terminal before the kill, so it reads before the shell's next prompt, and
-    to log files and pipes after it, so a dying process can't write over it. Nothing is paused
-    first: SIGSTOP would make an interactive shell report the job as "Stopped".
+    to log files and pipes after it, so a dying process can't write over it.
+
+    Processes without a terminal (an agent's commands, background jobs) are frozen first: frozen
+    processes can't fork, so the tree that gets killed is complete. Processes on a terminal aren't,
+    since an interactive shell would report a frozen job as "Stopped" before the message.
     """
     targets = set(pids)
     cmap = children_map()
     targets |= {d for pid in pids for d in descendants(pid, cmap)}
+    if not any(tty(pid) for pid in targets):
+        frozen: set[int] = set()
+        while targets - frozen:
+            for pid in targets - frozen:
+                _signal(pid, signal.SIGSTOP)
+                frozen.add(pid)
+            cmap = children_map()
+            targets |= {d for pid in frozen for d in descendants(pid, cmap)}
     fds = _open_outputs(sorted(targets)) if text else []
     message = ("\n" + (text or "").rstrip("\n") + "\n").encode()
     ttys = {fd for fd in fds if os.isatty(fd)}
