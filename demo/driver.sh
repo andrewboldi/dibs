@@ -3,6 +3,7 @@
 work=$1
 unset TMUX TMUX_PANE CLAUDE_CODE_SESSION_ID DIBS_SESSION
 export DIBS_HOME=$work/home DIBS_GPU_BACKEND=smi DIBS_FAKE_GPU_FILE=$work/gpus.json DIBS_NO_SYSTEMD=1
+export DIBS_MEMINFO=$work/meminfo
 export PATH="$work/bin:$(cd "$(dirname "$0")/.." && pwd)/tests/fakes:$PATH"
 T() { tmux -L dibs-demo -f "$work/tmux.conf" "$@"; }
 
@@ -19,7 +20,7 @@ PROMPT_COMMAND='export DIBS_SESSION=$(printf %s "$PWD" | md5sum | cut -c1-8)'
 RC
 
 dibs daemon start >/dev/null
-T new-session -d -s demo -x 110 -y 32 -c "$work/chess-bot" "bash --noprofile --rcfile $work/bashrc -i"
+T new-session -d -s demo -x 110 -y 32 -c "$work/vision" "bash --noprofile --rcfile $work/bashrc -i"
 T split-window -v -b -l 20 -t demo "dibs top"
 T select-pane -t demo:0.1
 
@@ -31,27 +32,27 @@ say() {  # type into the agents' pane like a person, then press Enter
 }
 
 director() {
+  sleep 1.5
+  # 1. A training job takes the GPU; a long fine-tune that needs all of it queues behind.
+  say "dibs submit --cpus 4 --mem 8G --vram 6G --time 30s -- python train.py"
+  sleep 1.5
+  say "cd ../finetune"  # its own line: the session follows the folder when the prompt comes back
+  say "dibs submit --cpus 4 --mem 8G --vram all --time 1m -- python finetune.py"
   sleep 2
-  say "dibs submit --cpus 4 --mem 8G --vram 6G --time 35s -- python train.py"
+  # 2. A short eval that also needs the whole GPU goes ahead of the fine-tune.
+  say "cd ../evals"
+  say "dibs submit --cpus 2 --mem 4G --vram all --time 10s -- python eval.py"
   sleep 2.5
-  say "cd ../finetune"
-  say "dibs submit --cpus 8 --mem 12G --vram all --time 45s -- python finetune.py"
-  sleep 3.5
-  say "cd ../llm-eval"
-  say "dibs submit --cpus 2 --mem 4G --vram all --time 8s -- python eval.py"
-  sleep 3.5
-  say "cd ../data-prep"
-  say "dibs submit --cpus 4 --mem 4G --time 6s -- python tokenize.py"
-  sleep 3.5
-  say "clear"
-  say "cd ../vision"
+  # 3. A script started without dibs is stopped within a second, with a note on how to queue it.
+  say "clear"  # separate commands: tmux's send-keys reads a lone ";" as its own command separator
+  say "cd ../detector"
   say "python detect.py"
   sleep 1.5
   shell=$(T display-message -p -t demo:0.1 '#{pane_pid}')
   pid=$(pgrep -P "$shell" -f detect.py | head -1)
   # The stray process "allocates" 3.1G on the GPU; the guard sees it on its next look.
-  printf '{"gpus": [{"index": 0, "uuid": "GPU-demo-0", "name": "NVIDIA RTX 4060 Laptop GPU", "memory_mib": 8192}], "processes": [{"pid": %s, "gpu_uuid": "GPU-demo-0", "used_mib": 3174}]}\n' "$pid" > "$work/gpus.json"
-  sleep 17
+  printf '{"gpus": [{"index": 0, "uuid": "GPU-demo-0", "name": "NVIDIA GeForce RTX 3070", "memory_mib": 8192}], "processes": [{"pid": %s, "gpu_uuid": "GPU-demo-0", "used_mib": 3174}]}\n' "$pid" > "$work/gpus.json"
+  sleep 6
   T detach-client
 }
 
