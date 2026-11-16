@@ -44,8 +44,8 @@ when those resources are free, so jobs never crash each other by running out of 
   can't see any GPU. A job that uses more VRAM than it reserved is stopped.
 - `--gpus N`: more than one GPU (each with --vram).
 - `--time DURATION`: your honest estimate, like 90s, 20m or 1h30m. It only decides the order:
-  shorter jobs go first, and a job that has waited as long as its own estimate can't be passed by
-  newer ones. Nothing is ever stopped for running longer than its estimate.
+  shorter jobs go first, and once a job's place in line comes due (at the default priority, after
+  waiting its estimate) newer jobs can't pass it. Nothing is ever stopped for running longer than its estimate.
 - `--priority N`: 1 to 10, default 5. A higher priority makes the job count as shorter in line, so
   it goes ahead sooner; your session's next job pays that time back. Keep 5 unless a person is
   waiting on this job right now (then 8-10), or nobody is waiting at all (then lower, which earns

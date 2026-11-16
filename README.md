@@ -38,8 +38,8 @@ Code, Codex, opencode, pi and Gemini CLI how to use it.
   instructions, and a GPU process started outside the queue is stopped within about a second, with
   a note in its output saying how to resubmit it.
 - **Short jobs first, never killed at the estimate.** The estimate only orders the queue: a
-  one-minute job goes ahead of a ten-minute one, a job that has waited its own estimate can't be
-  passed, and nothing is stopped for running long.
+  one-minute job goes ahead of a ten-minute one, nobody waits forever, and nothing is stopped for
+  running long.
 - **Priority with a price.** `--priority 10` gets a job ahead now; the agent's next job pays the
   time back, so always picking 10 gains nothing after the first job.
 - **The rest of the machine counts.** RAM that browsers, editors and the agents themselves use isn't

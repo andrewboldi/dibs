@@ -436,7 +436,7 @@ def test_priority_goes_ahead_and_the_sessions_next_job_pays_it_back(make_daemon,
     after = submit(d, tmp_path, [PY, "-c", "pass"], time_=300.0, session="s1")
     assert job(d, urgent).tag == 1000.0 + 120.0  # a tenth of its 20 minutes
     assert job(d, other).tag == 1000.0 + 300.0  # so the urgent job goes ahead of a shorter one
-    assert job(d, after).tag == 1000.0 + 1200.0 + 300.0  # exactly where it would be without priority
+    assert job(d, after).tag == 1000.0 + 1200.0 + 300.0 + 1080.0  # its place without priority, plus the time saved
     assert job(d, urgent).priority == 10 and job(d, after).priority == 5
 
 
@@ -472,3 +472,22 @@ def test_cleanup_forgets_what_sessions_owed_more_than_a_day_ago(daemon):
     daemon.store.set_meta("owed:new", json.dumps({"owed": 600.0, "time": now - 60}))
     daemon._retention(now)
     assert daemon.store.get_meta("owed:old") is None and daemon.store.get_meta("owed:new") is not None
+
+
+def test_a_batch_of_high_priority_jobs_pays_back_after_the_first(make_daemon, tmp_path):
+    # Issue #56: the session's jobs lined up behind the previous job's boosted tag, so a batch of
+    # priority-10 jobs kept every boost. They must line up behind each job's priority-5 place.
+    now = [1000.0]
+    d = make_daemon(clock=lambda: now[0], cap=capacity(cpus=[0]))
+    submit(d, tmp_path, [PY, "-c", "import time; time.sleep(30)"], session="blocker")
+    batch = [submit(d, tmp_path, [PY, "-c", "pass"], time_=300.0, session="s1", priority=10) for _ in range(3)]
+    assert [job(d, j).tag for j in batch] == [1030.0, 1600.0, 1900.0]  # priority 5: 1300, 1600, 1900
+
+
+def test_the_job_after_a_boosted_one_lands_later_by_the_time_saved(make_daemon, tmp_path):
+    now = [1000.0]
+    d = make_daemon(clock=lambda: now[0], cap=capacity(cpus=[0]))
+    submit(d, tmp_path, [PY, "-c", "import time; time.sleep(30)"], session="blocker")
+    submit(d, tmp_path, [PY, "-c", "pass"], time_=300.0, session="s1", priority=10)
+    second = submit(d, tmp_path, [PY, "-c", "pass"], time_=300.0, session="s1")
+    assert job(d, second).tag == 1600.0 + 270.0  # its priority-5 place, plus the 270 s the first saved
