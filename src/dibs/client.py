@@ -1,5 +1,6 @@
 """Talking to the daemon, and starting it when nobody has yet."""
 
+import contextlib
 import fcntl
 import json
 import os
@@ -72,6 +73,32 @@ def _service_installed(paths: Paths, env: Mapping[str, str]) -> bool:
     """Whether `dibs setup` installed the systemd user service that runs this dibs."""
     unit = Path(env.get("HOME") or Path.home()) / ".config/systemd/user/dibs.service"
     return not paths.home_mode and unit.exists()
+
+
+def _restart_brings_this_build(paths: Paths, env: Mapping[str, str], own_exe: str | None = None) -> bool:
+    """Whether restarting the daemon can bring up this command's own code. Not when the systemd
+    service runs another install of dibs (a development checkout's dibs against the installed
+    service, say): the daemon would come back as the same other build."""
+    if not _service_installed(paths, env):
+        return True  # start_daemon starts this very interpreter
+    unit = Path(env.get("HOME") or Path.home()) / ".config/systemd/user/dibs.service"
+    for line in unit.read_text().splitlines():
+        if line.startswith("ExecStart="):
+            service_exe = line.split("=", 1)[1].split()[0]
+            return os.path.realpath(service_exe) == os.path.realpath(own_exe or sys.argv[0])
+    return True
+
+
+@contextlib.contextmanager
+def _restart_lock(paths: Paths):
+    """One upgrade restart at a time: the commands that saw the old daemon queue up here."""
+    ensure_dirs(paths)
+    fd = os.open(paths.state_dir / "restart.lock", os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)
 
 
 def start_daemon(paths: Paths, env: Mapping[str, str] = os.environ) -> None:
@@ -154,17 +181,22 @@ class Client:
     def call(self, op: str, *, io_timeout: float | None = 60.0, **fields) -> dict:
         payload = {"op": op, "build": build_id(), **fields}
         response = self._send(payload, io_timeout)
-        if response.get("code") == "build_mismatch":
+        if response.get("code") == "build_mismatch" and _restart_brings_this_build(self.paths, self.env):
             # The daemon runs other code (dibs was upgraded): restarting it is safe, jobs keep running.
-            stop_daemon(self.paths)
-            response = self._send(payload, io_timeout)
+            # Other commands may have seen the old daemon too; restart once, under a lock, and only if
+            # it still runs other code by then.
+            with _restart_lock(self.paths):
+                response = self._send(payload, io_timeout)
+                if response.get("code") == "build_mismatch":
+                    stop_daemon(self.paths)
+                    response = self._send(payload, io_timeout)
         if response.get("code") == "build_mismatch":
             # Still: what starts the daemon (the systemd service) runs another install of dibs.
             raise DibsError(
                 f"this dibs ({build_id()}) and the dibs daemon ({response.get('build')}) are different "
-                "versions, and restarting the daemon brought back the same one: the service runs "
-                "another install. Use that install's dibs, or reinstall so they match, then run "
-                "dibs daemon restart",
+                "versions, and the service that runs the daemon runs another install of dibs, so "
+                "restarting it can't fix that. Use that install's dibs, or reinstall so they match, "
+                "then run dibs daemon restart",
                 "build_mismatch",
             )
         if not response.get("ok"):

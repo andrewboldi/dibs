@@ -77,3 +77,32 @@ def test_a_version_clash_a_restart_cant_fix_names_both_builds(tmp_path):
         assert "0.0.9+old" in str(err.value) and build_id() in str(err.value)
     finally:
         stop_daemon(paths, env=env)
+
+
+def test_no_restart_when_the_service_runs_another_install(tmp_path):
+    # Issue #39: a dibs from a development checkout restarted the installed service's daemon, which
+    # came back as the same installed build: a pointless restart for every command.
+    from dibs import client
+
+    home = tmp_path / "home"
+    unit = home / ".config" / "systemd" / "user" / "dibs.service"
+    unit.parent.mkdir(parents=True)
+    unit.write_text("[Service]\nExecStart=/opt/installed/bin/dibs daemon run\nRestart=always\n")
+    env = {"HOME": str(home), "XDG_RUNTIME_DIR": str(tmp_path / "run")}
+    paths = get_paths(env)
+    assert not client._restart_brings_this_build(paths, env, own_exe="/checkout/.venv/bin/dibs")
+    assert client._restart_brings_this_build(paths, env, own_exe="/opt/installed/bin/dibs")
+
+
+def test_a_daemon_another_command_already_restarted_isnt_restarted_again(tmp_path, monkeypatch):
+    # After an upgrade, several agents' commands saw the old daemon at once and each restarted it,
+    # the later ones restarting the already-upgraded daemon: two or three restarts per upgrade.
+    from dibs import client
+
+    paths = get_paths({"DIBS_HOME": str(tmp_path / "h"), "HOME": str(tmp_path)})
+    replies = [{"ok": False, "code": "build_mismatch", "build": "old"}, {"ok": True}]
+    monkeypatch.setattr(client.Client, "_send", lambda self, payload, io_timeout: replies.pop(0))
+    stops = []
+    monkeypatch.setattr(client, "stop_daemon", lambda *a, **k: stops.append(1) or True)
+    assert client.Client(paths).call("queue")["ok"]
+    assert stops == []  # the second look, under the restart lock, found the new build running
