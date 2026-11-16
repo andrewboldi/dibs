@@ -292,3 +292,53 @@ def test_relative_path_entries_are_looked_up_from_the_jobs_folder(daemon, tmp_pa
     run_until(daemon, lambda: finished(daemon, job_id))
     assert job(daemon, job_id).state == State.DONE
     assert "found-it" in open(job(daemon, job_id).output).read()
+
+
+def test_peak_ram_is_memory_in_use_not_file_cache(daemon, tmp_path, monkeypatch):
+    # Issue #32: memory.peak counts page cache, so a job that wrote big scratch files looked like it
+    # had filled its reservation ("RAM 13G of 13G"). dibs keeps the peak of anon + shmem instead.
+    job_id = submit(daemon, tmp_path, [PY, "-c", "import time; time.sleep(3)"])
+    run_until(daemon, lambda: job(daemon, job_id).shim_pid)
+    daemon.tick()
+    assert job(daemon, job_id).peak_mem is None  # no scope of its own: nothing to read
+    j = job(daemon, job_id)
+    j.unit = "dibs-test-job-1"
+    daemon.store.update_job(j)
+    scope = tmp_path / "cgroup" / "app.slice" / "dibs-test-job-1.scope"
+    scope.mkdir(parents=True)
+    monkeypatch.setattr(procs, "CGROUP_ROOT", str(tmp_path / "cgroup"))
+    real_cgroup = procs.cgroup
+    monkeypatch.setattr(procs, "cgroup", lambda pid: "/app.slice/dibs-test-job-1.scope" if pid == j.shim_pid else real_cgroup(pid))
+
+    def peak_after(anon, shmem, file):
+        (scope / "memory.stat").write_text(f"anon {anon}\nfile {file}\nkernel 4096\nshmem {shmem}\n")
+        daemon.tick()
+        return job(daemon, job_id).peak_mem
+
+    assert peak_after(2 * GiB, 1 * GiB, 9 * GiB) == 3 * GiB
+    assert peak_after(1 * GiB, 0, 12 * GiB) == 3 * GiB  # less in use, more cache: the peak stays
+    assert peak_after(4 * GiB, 0, 0) == 4 * GiB
+    # The launcher reports memory.peak, cache and all; the sampled peak wins.
+    real_read_exit = launcher.read_exit
+    monkeypatch.setattr(launcher, "read_exit", lambda paths, i: (r := real_read_exit(paths, i)) and {**r, "peak_mem": 13 * GiB})
+    run_until(daemon, lambda: finished(daemon, job_id))
+    assert job(daemon, job_id).peak_mem == 4 * GiB
+
+
+def test_peak_ram_falls_back_to_the_launchers_figure_and_says_what_it_counts(daemon, tmp_path, monkeypatch):
+    from dibs.model import job_to_dict
+    from dibs.render import render_show
+
+    real_read_exit = launcher.read_exit
+    monkeypatch.setattr(launcher, "read_exit", lambda paths, i: (r := real_read_exit(paths, i)) and {**r, "peak_mem": 2 * GiB})
+    job_id = submit(daemon, tmp_path, [PY, "-c", "pass"])
+    run_until(daemon, lambda: finished(daemon, job_id))
+    assert job(daemon, job_id).peak_mem == 2 * GiB  # never sampled: the launcher's figure stands
+    text = render_show(job_to_dict(job(daemon, job_id)), time.time())
+    assert "RAM 2G of 1G (not counting file cache)" in text
+
+
+def test_memory_stat_parsing():
+    stat = procs.memory_stat("anon 2048\nfile 4096\nshmem 1024\nbogus x\n")
+    assert stat == {"anon": 2048, "file": 4096, "shmem": 1024}
+    assert procs.memory_stat(None) == {}
