@@ -188,7 +188,7 @@ def test_service_install_and_undo(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
-    monkeypatch.delenv("XDG_RUNTIME_DIR", raising=False)
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "run"))
     monkeypatch.delenv("DIBS_HOME", raising=False)
     monkeypatch.setattr(launcher, "systemd_available", lambda env=None: True)
     user = pwd.getpwuid(os.getuid()).pw_name

@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from dibs import launcher
+from dibs import launcher, paths
 from dibs.daemon import Daemon
 from dibs.gpu import GpuProcess
 from dibs.machine import Config, detect_cpus
@@ -16,6 +16,13 @@ from dibs.units import GiB
 
 FAKES = Path(__file__).parent / "fakes"
 FAKE_GPU = Gpu(0, "GPU-fake-0", "Fake GPU", 8 * GiB)
+
+
+@pytest.fixture(autouse=True)
+def _never_the_real_runtime_folder(monkeypatch, tmp_path_factory):
+    """Without XDG_RUNTIME_DIR, dibs falls back to /run/user/UID, where a real dibs may listen.
+    Tests that unset it to stay isolated must land in a folder of their own instead."""
+    monkeypatch.setattr(paths, "SYSTEM_RUNTIME_ROOT", tmp_path_factory.getbasetemp() / "no-run-user")
 
 
 class FakeBackend:
