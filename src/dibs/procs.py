@@ -127,6 +127,26 @@ def rss(pid: int) -> int | None:
     return int(statm.split()[1]) * os.sysconf("SC_PAGE_SIZE") if statm else None
 
 
+CGROUP_ROOT = "/sys/fs/cgroup"  # where cgroup v2 is mounted
+
+
+def memory_stat(text: str | None) -> dict[str, int]:
+    """A cgroup's memory.stat, as numbers."""
+    stat = {}
+    for line in (text or "").splitlines():
+        key, _, value = line.partition(" ")
+        if value.strip().isdigit():
+            stat[key] = int(value)
+    return stat
+
+
+def memory_in_use(cgroup_path: str) -> int | None:
+    """What a cgroup's processes hold (anon + shmem), leaving out the file cache that memory.current
+    and memory.peak also count: the kernel drops that cache when memory runs short."""
+    stat = memory_stat(_read(f"{CGROUP_ROOT}{cgroup_path}/memory.stat"))
+    return stat["anon"] + stat.get("shmem", 0) if "anon" in stat else None
+
+
 def cgroup(pid: int) -> str | None:
     for line in (_read(f"/proc/{pid}/cgroup") or "").splitlines():
         if line.startswith("0::"):

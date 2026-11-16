@@ -128,7 +128,9 @@ def main(argv: list[str]) -> int:
             if key == "oom_kill" and count.strip() not in ("", "0"):
                 oom_killed = True
         peak = _cgroup_file("memory.peak")
-        peak_mem = int(peak) if peak and peak.strip().isdigit() else None
+        if peak and peak.strip().isdigit():
+            # memory.peak counts file cache; take off what's still cached, like the daemon's samples
+            peak_mem = max(0, int(peak) - procs.memory_stat(_cgroup_file("memory.stat")).get("file", 0))
     _stop_leftovers(in_scope)
     _write_exit(
         job_dir,

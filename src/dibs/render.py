@@ -221,7 +221,7 @@ def render_show(job: dict, now: float) -> str:
     if job.get("peak_vram") is not None and job["request"]["vram"]:
         peaks.append(f"VRAM {format_size(job['peak_vram'])} of {format_size(job['request']['vram'])}")
     if job.get("peak_mem") is not None:
-        peaks.append(f"RAM {format_size(job['peak_mem'])} of {format_size(job['request']['mem'])}")
+        peaks.append(f"RAM {format_size(job['peak_mem'])} of {format_size(job['request']['mem'])} (not counting file cache)")
     if peaks:
         rows.append(("peak", ", ".join(peaks)))
     rows.append(("output", _home(job["output"])))

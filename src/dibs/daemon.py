@@ -389,6 +389,7 @@ class Daemon:
                 self._finish(job, result, now)
             else:
                 self._push_stop(job, now)
+        self._watch_memory()
         self._watch_gpus(now)
         self.schedule()
         if now - self._last_retention >= RETENTION_EVERY:
@@ -421,7 +422,22 @@ class Daemon:
                     return pid, procs.start_ticks(pid), unit if in_unit else None
         return None
 
-    # Watching the GPUs ---------------------------------------------------------------------------
+    # Watching memory and the GPUs ----------------------------------------------------------------
+
+    def _watch_memory(self) -> None:
+        """Keep each running job's peak of memory in use (anon + shmem), read from its own scope.
+        memory.peak also counts file cache, so a job that wrote big files looked as if it had filled
+        its reservation."""
+        for job in self.store.jobs([State.RUNNING]):
+            if not (job.unit and job.shim_pid):
+                continue
+            cg = procs.cgroup(job.shim_pid)
+            if not cg or not cg.endswith(f"/{job.unit}.scope"):
+                continue
+            used = procs.memory_in_use(cg)
+            if used is not None and (job.peak_mem is None or used > job.peak_mem):
+                job.peak_mem = used
+                self.store.update_job(job)
 
     def _job_of(self, pid: int, shims: dict[int, int], units: dict[str, int]) -> int | None:
         """The running job a process belongs to: by its systemd scope, else by its shim ancestor."""
@@ -542,7 +558,8 @@ class Daemon:
     def _finish(self, job: Job, result: dict, now: float) -> None:
         job.exit_code = result.get("exit_code")
         job.ended = result.get("ended") or now
-        job.peak_mem = result.get("peak_mem")
+        if job.peak_mem is None:  # never sampled while it ran: the launcher's figure is all there is
+            job.peak_mem = result.get("peak_mem")
         if job.cancel_requested is not None:
             job.state = State.CANCELLED
         elif job.exit_code == 0 and job.stop_reason is None:
