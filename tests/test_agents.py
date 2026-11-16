@@ -133,6 +133,12 @@ def test_agent_help_covers_the_essentials():
         assert phrase in AGENT_HELP, phrase
 
 
+def test_agent_help_says_files_in_a_folder_kept_in_ram_count_as_ram():
+    # Issue #74: most RAM kills were scratch files in a /tmp kept in RAM.
+    for phrase in ("/dev/shm", "findmnt /tmp", "TMPDIR", "until deleted"):
+        assert phrase in AGENT_HELP, phrase
+
+
 def test_agent_help_cli(tmp_path):
     result = subprocess.run([sys.executable, "-m", "dibs", "agent-help"], capture_output=True, text=True,
                             env={**os.environ, "DIBS_HOME": str(tmp_path)}, timeout=60)  # fmt: skip

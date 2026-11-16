@@ -59,7 +59,10 @@ when those resources are free, so jobs never crash each other by running out of 
 
 - VRAM: model weights + activations + optimizer state + about 0.5G of CUDA context per process,
   rounded up. If unsure, start with a small run and look at its peak.
-- RAM: the job's peak, including every data-loader worker.
+- RAM: the job's peak, including every data-loader worker, and the files it writes to a folder
+  kept in RAM: /dev/shm, and /tmp where it is a tmpfs (`findmnt /tmp` says). Those files stay in
+  RAM until deleted, even after the job ends: put big scratch files on disk (most tools follow
+  TMPDIR), and delete what a job leaves behind.
 - CPUs: the threads or worker processes it actually uses.
 - `dibs show ID` lists a job's peak VRAM and RAM, and `dibs submit` shows what earlier runs of the
   same command in the same folder used. Size the next run from those: the peaks plus a little

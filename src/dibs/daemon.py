@@ -58,6 +58,15 @@ def _rejected(message: str) -> dict:
     return {"ok": False, "code": "rejected", "error": message}
 
 
+def _shared_part(job: Job) -> str:
+    """For a job killed at its RAM limit: how much of its peak was shared memory, when that was at
+    least a quarter of its reservation. Files a job writes to a folder kept in RAM count as its RAM,
+    which agents don't expect (#74)."""
+    if job.peak_shmem is None or job.peak_shmem < job.request.mem / 4:
+        return ""
+    return f" ({format_size(job.peak_shmem)} of it was files in /dev/shm or a RAM-backed /tmp, or other shared memory)"
+
+
 def _command_exists(argv0: str, env: dict, cwd: str) -> bool:
     """Whether the job will find its command, looking where it will: relative paths and relative
     PATH entries (bin, .) count from the job's folder, not the daemon's."""
@@ -408,7 +417,7 @@ class Daemon:
                 jobs = 0
                 for job in running:
                     held = self._memory_in_use(job)
-                    jobs += held if held is not None else job.request.mem
+                    jobs += held[0] if held is not None else job.request.mem
                 self._jobs_held.append((now, jobs))
                 while self._jobs_held[0][0] < now - JOBS_RAM_WINDOW:
                     self._jobs_held.popleft()
@@ -493,8 +502,9 @@ class Daemon:
 
     # Watching memory and the GPUs ----------------------------------------------------------------
 
-    def _memory_in_use(self, job: Job) -> int | None:
-        """What a running job holds (anon + shmem), read from its own scope; None if dibs can't see it."""
+    def _memory_in_use(self, job: Job) -> tuple[int, int] | None:
+        """What a running job holds (anon + shmem) and the shmem part of it, read from its own scope;
+        None if dibs can't see it."""
         if not (job.unit and job.shim_pid):
             return None
         cg = procs.cgroup(job.shim_pid)
@@ -507,9 +517,9 @@ class Daemon:
         memory.peak also counts file cache, so a job that wrote big files looked as if it had filled
         its reservation."""
         for job in self.store.jobs([State.RUNNING]):
-            used = self._memory_in_use(job)
-            if used is not None and (job.peak_mem is None or used > job.peak_mem):
-                job.peak_mem = used
+            held = self._memory_in_use(job)
+            if held is not None and (job.peak_mem is None or held[0] > job.peak_mem):
+                job.peak_mem, job.peak_shmem = held
                 self.store.update_job(job)
 
     def _job_of(self, pid: int, shims: dict[int, int], units: dict[str, int]) -> int | None:
@@ -648,7 +658,7 @@ class Daemon:
         elif job.cancel_requested is not None:
             job.reason = "cancelled"
         elif result.get("oom_killed"):
-            job.reason = f"killed: went over its {format_size(job.request.mem)} RAM reservation"
+            job.reason = f"killed: went over its {format_size(job.request.mem)} RAM reservation" + _shared_part(job)
         else:
             job.reason = result.get("reason")
         self.store.update_job(job)
