@@ -258,3 +258,74 @@ def test_priority_flag(dibs):
     assert "priority" in shown and "8" in shown
     assert "(p8)" in dibs("queue", check=0).stdout
     dibs("cancel", "1")
+
+
+def _upgraded_under(monkeypatch, tmp_path):
+    """Every request finds dibs upgraded under this command; execve is recorded, not done."""
+    from dibs import cli
+    from dibs import client as dc
+
+    monkeypatch.setenv("DIBS_HOME", str(tmp_path / "home"))
+    monkeypatch.delenv("DIBS_RERUN", raising=False)
+
+    def call(self, op, **fields):
+        raise dc.DibsError("dibs was upgraded while this command ran", "upgraded")
+
+    monkeypatch.setattr(dc.Client, "call", call)
+    execs = []
+
+    def execve(path, args, env):
+        execs.append((path, args, env.get("DIBS_RERUN")))
+        raise SystemExit(0)
+
+    monkeypatch.setattr(cli.os, "execve", execve)
+    return cli, execs
+
+
+@pytest.mark.parametrize("argv", [["wait", "5"], ["queue"], ["show", "5"], ["info"], ["top"]])
+def test_a_repeatable_command_runs_again_on_the_upgraded_code(argv, monkeypatch, tmp_path):
+    # Issue #68: a dibs wait that found dibs upgraded under it exited at once, before its job ended,
+    # so an agent's `dibs wait N; next step` ran the next step early.
+    cli, execs = _upgraded_under(monkeypatch, tmp_path)
+    with pytest.raises(SystemExit):
+        cli.main(argv)
+    assert execs == [(PY, [PY, sys.argv[0], *argv], "1")]  # the same dibs, started the same way
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [["cancel", "5"], ["submit", *RES, "--", "true"], ["run", *RES, "--", "true"], ["logs", "5", "-f"]],
+)
+def test_a_command_that_would_do_something_twice_isnt_run_again(argv, monkeypatch, tmp_path, capsys):
+    cli, execs = _upgraded_under(monkeypatch, tmp_path)
+    assert cli.main(argv) == 1
+    assert execs == []
+    assert "dibs was upgraded while this command ran" in capsys.readouterr().err
+
+
+def test_a_command_runs_again_only_once(monkeypatch, tmp_path, capsys):
+    cli, execs = _upgraded_under(monkeypatch, tmp_path)
+    monkeypatch.setenv("DIBS_RERUN", "1")
+    assert cli.main(["wait", "5"]) == 1
+    assert execs == []
+
+
+def test_a_wait_dibs_was_upgraded_under_runs_again_until_its_job_ends(dibs, tmp_path):
+    # Issue #68 end to end: a dibs wait running code older than the files on disk runs itself again
+    # on the new code, leaves the daemon alone, and returns when the job ends, with its exit code.
+    dibs("submit", *RES, "--", "sh", "-c", "sleep 2; exit 3", check=0)
+    before = dibs("daemon", "status", check=0).stdout
+    started_before_upgrade = tmp_path / "old_dibs.py"
+    started_before_upgrade.write_text(
+        "import os, sys\n"
+        "import dibs\n"
+        "if not os.environ.get('DIBS_RERUN'):\n"
+        "    dibs._build = '0.1.0+startedwith'  # the code this command started with\n"
+        "from dibs.cli import main\n"
+        "sys.exit(main())\n"
+    )
+    result = subprocess.run([PY, str(started_before_upgrade), "wait", "1"], env=dibs.env, cwd=tmp_path,
+                            capture_output=True, text=True, timeout=60)  # fmt: skip
+    assert result.returncode == 3, (result.stdout, result.stderr)
+    after = dibs("daemon", "status", check=0).stdout
+    assert re.search(r"pid (\d+)", before).group(1) == re.search(r"pid (\d+)", after).group(1)

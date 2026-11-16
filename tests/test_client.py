@@ -116,6 +116,7 @@ def test_a_command_started_before_an_upgrade_doesnt_restart_the_upgraded_daemon(
         f"dibs was upgraded while this command ran: the daemon runs {upgraded}, this command still "
         "runs the code it started with (0.1.0+startedwith). Run the command again"
     )
+    assert err.value.code == "upgraded"
 
 
 def test_a_daemon_another_command_already_restarted_isnt_restarted_again(tmp_path, monkeypatch):

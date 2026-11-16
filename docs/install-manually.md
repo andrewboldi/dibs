@@ -35,7 +35,8 @@ time. dibs runs on Linux.
    ```
 
 **Update:** run step 2 again with `--force --reinstall`. The next `dibs` command restarts the
-scheduler on the new version, and running jobs keep running.
+scheduler on the new version, and running jobs keep running. A `dibs wait`, `queue`, `show`, `info` or
+`top` that is running from before the update starts again on the new version.
 
 **Uninstall:**
 
