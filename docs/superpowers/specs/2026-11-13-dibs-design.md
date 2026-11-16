@@ -456,10 +456,10 @@ Job 12 (train) queued: 2nd in line, expected to start ~14:32 (in 8m).
 
 $ dibs queue
  JOB STATE    SESSION         NAME   CPU RAM  VRAM   EST  WHEN
-   9 running  chess-bot·6098  train    8 16G  6G@0   30m  ends ~14:31 (in 7m)
+   9 running  vision·3f2a     train    8 16G  6G@0   30m  ends ~14:31 (in 7m)
   11 running  api·a1b2        lint     2  2G  -       2m  over estimate by 1m
   12 queued   web·77f0        eval     4  8G  6G      5m  starts ~14:31 (in 7m): needs 6G VRAM, 2G free
-  10 queued   chess-bot·6098  sweep    8 16G  6G      2h  starts ~14:36 (in 12m)
+  10 queued   vision·3f2a     sweep    8 16G  6G      2h  starts ~14:36 (in 12m)
 ```
 
 `dibs top` shows capacity bars (CPUs, RAM, each GPU's VRAM), running jobs, and the queue as a
@@ -470,7 +470,7 @@ timeline of the plan, refreshing every second.
 - A job's session is `CLAUDE_CODE_SESSION_ID` when set (Claude Code exports it to every command),
   else `DIBS_SESSION` if set, else the submitting terminal's session id (`os.getsid`).
 - Display label: the project folder's name (git root of the submit directory, or the directory)
-  plus the first four characters of the session id, e.g. `chess-bot·6098`.
+  plus the first four characters of the session id, e.g. `vision·3f2a`.
 - `--mine` filters to the current session.
 - Jobs are never cancelled because their session ended. (The user's tmux-restore brings sessions
   back after reboots with the same session id and a new pid, and a waiting job may still be wanted.)
