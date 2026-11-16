@@ -94,6 +94,30 @@ def test_no_restart_when_the_service_runs_another_install(tmp_path):
     assert client._restart_brings_this_build(paths, env, own_exe="/opt/installed/bin/dibs")
 
 
+def test_a_command_started_before_an_upgrade_doesnt_restart_the_upgraded_daemon(tmp_path, monkeypatch):
+    # Issue #66: a `dibs wait` still running the old code when dibs was upgraded in place saw the new
+    # daemon as another build and restarted it. It came back as the same new build, and the command
+    # failed saying the service runs another install.
+    import dibs
+    from dibs import client
+
+    monkeypatch.delenv("DIBS_BUILD_OVERRIDE", raising=False)
+    upgraded = dibs.build_id()
+    monkeypatch.setattr(dibs, "_build", "0.1.0+startedwith")  # the code the command started with
+    paths = get_paths({"DIBS_HOME": str(tmp_path / "h"), "HOME": str(tmp_path)})
+    reply = {"ok": False, "code": "build_mismatch", "build": upgraded}
+    monkeypatch.setattr(client.Client, "_send", lambda self, payload, io_timeout: reply)
+    stops = []
+    monkeypatch.setattr(client, "stop_daemon", lambda *a, **k: stops.append(1) or True)
+    with pytest.raises(DibsError) as err:
+        client.Client(paths).call("queue")
+    assert stops == []  # a restart would bring up the upgraded code again, not this command's
+    assert str(err.value) == (
+        f"dibs was upgraded while this command ran: the daemon runs {upgraded}, this command still "
+        "runs the code it started with (0.1.0+startedwith). Run the command again"
+    )
+
+
 def test_a_daemon_another_command_already_restarted_isnt_restarted_again(tmp_path, monkeypatch):
     # After an upgrade, several agents' commands saw the old daemon at once and each restarted it,
     # the later ones restarting the already-upgraded daemon: two or three restarts per upgrade.

@@ -11,7 +11,7 @@ import time
 from collections.abc import Mapping
 from pathlib import Path
 
-from dibs import build_id, launcher
+from dibs import build_id, installed_build, launcher
 from dibs.paths import Paths, ensure_dirs
 
 START_TIMEOUT = 15.0
@@ -78,7 +78,10 @@ def _service_installed(paths: Paths, env: Mapping[str, str]) -> bool:
 def _restart_brings_this_build(paths: Paths, env: Mapping[str, str], own_exe: str | None = None) -> bool:
     """Whether restarting the daemon can bring up this command's own code. Not when the systemd
     service runs another install of dibs (a development checkout's dibs against the installed
-    service, say): the daemon would come back as the same other build."""
+    service, say): the daemon would come back as the same other build. Nor when dibs was upgraded
+    while this command ran: the daemon would come back as the new code, not this command's."""
+    if installed_build() != build_id():
+        return False
     if not _service_installed(paths, env):
         return True  # start_daemon starts this very interpreter
     unit = Path(env.get("HOME") or Path.home()) / ".config/systemd/user/dibs.service"
@@ -190,6 +193,12 @@ class Client:
                 if response.get("code") == "build_mismatch":
                     stop_daemon(self.paths)
                     response = self._send(payload, io_timeout)
+        if response.get("code") == "build_mismatch" and installed_build() != build_id():
+            raise DibsError(
+                f"dibs was upgraded while this command ran: the daemon runs {response.get('build')}, "
+                f"this command still runs the code it started with ({build_id()}). Run the command again",
+                "build_mismatch",
+            )
         if response.get("code") == "build_mismatch":
             # Still: what starts the daemon (the systemd service) runs another install of dibs.
             raise DibsError(
