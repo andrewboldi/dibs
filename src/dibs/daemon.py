@@ -44,6 +44,7 @@ from dibs.units import format_size, format_size_against
 KILL_AFTER = 10.0  # seconds between asking a job to stop (SIGTERM) and forcing it (SIGKILL)
 OWED_FOR = 86400.0  # seconds: what a session owes (or is owed) for its priorities lapses after a day
 OUTSIDE_WINDOW = 120.0  # seconds: RAM in use outside dibs counts as its peak over this long
+JOBS_RAM_WINDOW = 10.0  # seconds: RAM dibs jobs hold counts as its peak over this long, when taken off the in-use total
 RETENTION_EVERY = 3600.0
 RECENT = 86400.0  # how far back `queue --all` looks
 STOPS_SHOWN = 3600.0  # how far back guard stops are shown
@@ -85,6 +86,7 @@ class Daemon:
         self.capacity = capacity
         self._meminfo = meminfo
         self._outside: deque[tuple[float, int, int]] = deque()  # (time, RAM in use outside dibs, total)
+        self._jobs_held: deque[tuple[float, int]] = deque()  # (time, RAM dibs jobs held)
         self.backend = backend
         self.use_systemd = use_systemd
         self.clock = clock
@@ -395,7 +397,10 @@ class Daemon:
     def _outside_mem(self, now: float, running: list[Job]) -> int:
         """RAM in use outside dibs jobs that eats into what dibs hands out, as its peak over the last
         OUTSIDE_WINDOW seconds, so a job doesn't start into RAM a busy program let go of for a moment.
-        A job whose memory dibs can't see counts as holding its whole reservation."""
+        A job whose memory dibs can't see counts as holding its whole reservation. What the jobs hold
+        is taken off as its peak over the last JOBS_RAM_WINDOW seconds: the machine can still count
+        memory a job let go of, or a job that just ended, as in use for a moment, and one sample
+        taken then would otherwise count it as outside dibs for the whole OUTSIDE_WINDOW (#72)."""
         if not self._outside or now - self._outside[-1][0] >= 1.0:
             info = self._meminfo()
             if info is not None:
@@ -404,6 +409,10 @@ class Daemon:
                 for job in running:
                     held = self._memory_in_use(job)
                     jobs += held if held is not None else job.request.mem
+                self._jobs_held.append((now, jobs))
+                while self._jobs_held[0][0] < now - JOBS_RAM_WINDOW:
+                    self._jobs_held.popleft()
+                jobs = max(held for _, held in self._jobs_held)
                 self._outside.append((now, max(0, used - jobs), total))
         while self._outside and self._outside[0][0] < now - OUTSIDE_WINDOW:
             self._outside.popleft()
