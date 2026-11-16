@@ -590,9 +590,13 @@ never touched.
 6. Record the stop (time, pid, command, GPU, VRAM, the session marker if the environment has one)
    so `queue` and `top` can show it.
 
-(An earlier version froze the processes with SIGSTOP before writing. The demo showed why not: an
-interactive shell reports a stopped foreground job as "Stopped" and returns to its prompt before
-the message. Covered by `test_stopping_a_job_in_an_interactive_shell_reads_cleanly`.)
+Processes with no controlling terminal (an agent's commands, background and nohup'd jobs) are
+frozen with SIGSTOP before step 2, looking again for children until the frozen tree is complete:
+frozen processes can't fork, and a child forked between the look and the kill would otherwise be
+re-parented and escape (issue #8, `test_children_forked_at_the_moment_of_the_stop_are_stopped_too`).
+Processes on a terminal aren't frozen: an interactive shell reports a stopped job as "Stopped" and
+returns to its prompt before the message, as the demo showed
+(`test_stopping_a_job_in_an_interactive_shell_reads_cleanly`).
 
 The message, filled from what the guard saw (`/proc/<pid>/cmdline`, VRAM rounded up, RAM rounded
 up from the process's resident memory). CPUs and time can't be observed, so they stay for the
