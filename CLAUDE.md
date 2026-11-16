@@ -64,6 +64,10 @@ and use `DIBS_GPU_BACKEND=smi` with `tests/fakes` first on `PATH` (or `guard = "
 that folder's `config.toml`). A daemon that can see the real GPU with the guard on stops other
 agents' GPU processes. Never run `dibs setup` against the real `$HOME` in a test.
 
+When an agent runs the suite, run it in a throwaway scope, so a broken test can't reach the agent's
+own processes (one once killed the agent's terminal through a shared cgroup, #33):
+`systemd-run --user --scope --quiet --collect -- uv run pytest -q`.
+
 ## Architecture Overview
 
 - `src/dibs/planner.py`: the pure planner (priority tags, conservative backfill, predictions).

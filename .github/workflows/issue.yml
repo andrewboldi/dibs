@@ -1,0 +1,20 @@
+name: issue
+
+on:
+  pull_request:
+    types: [opened, edited, reopened, synchronize]
+
+permissions:
+  contents: read
+
+jobs:
+  linked:
+    runs-on: ubuntu-latest
+    steps:
+      - name: The pull request names the issue it closes
+        run: |
+          body=$(jq -r '.pull_request.body // ""' "$GITHUB_EVENT_PATH")
+          if ! printf '%s' "$body" | grep -qiE '\b(close[sd]?|fix(e[sd])?|resolve[sd]?) +#[0-9]+'; then
+            echo "::error::Say which issue this pull request closes, e.g. 'Fixes #12' (see CONTRIBUTING.md)."
+            exit 1
+          fi

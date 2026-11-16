@@ -4,7 +4,7 @@
       {
         "hooks": [
           {
-            "command": "bd prime",
+            "command": "command -v bd >/dev/null 2>&1 && bd prime || echo 'This repo tracks its work with beads (bd), which contributors need: install it (brew install beads, or see https://github.com/gastownhall/beads) and follow CONTRIBUTING.md.'",
             "type": "command"
           }
         ],
@@ -15,7 +15,7 @@
       {
         "hooks": [
           {
-            "command": "bd prime",
+            "command": "command -v bd >/dev/null 2>&1 && bd prime || echo 'This repo tracks its work with beads (bd), which contributors need: install it (brew install beads, or see https://github.com/gastownhall/beads) and follow CONTRIBUTING.md.'",
             "type": "command"
           }
         ],
