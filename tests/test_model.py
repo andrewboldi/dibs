@@ -135,3 +135,24 @@ def test_resolve_rejects_non_finite_time(time):
     with pytest.raises(RequestError) as err:
         resolve_request(raw(time=time), CAP)
     assert "--time" in str(err.value)
+
+
+def test_priority_changes_how_long_a_job_counts_in_line():
+    # Issue #47: a higher priority counts as a shorter job, a lower one as a longer job.
+    assert compute_tag(100.0, 600.0, []) == 700.0  # 5, the default: as before
+    assert compute_tag(100.0, 600.0, [], priority=10) == 160.0  # a tenth of its estimate
+    assert compute_tag(100.0, 600.0, [], priority=1) == 2500.0  # four times it
+
+
+def test_owed_time_is_added_and_credit_never_puts_a_job_before_its_submit_time():
+    assert compute_tag(100.0, 600.0, [], owed=540.0) == 1240.0
+    assert compute_tag(100.0, 60.0, [], owed=-3600.0) == 100.0  # no earlier than it was submitted
+
+
+def test_what_a_job_leaves_its_sessions_next_job():
+    from dibs.model import next_owed
+
+    assert next_owed(600.0, 10) == 540.0  # the time it saved, paid back by the next job
+    assert next_owed(600.0, 5) == 0.0
+    assert next_owed(600.0, 1) == -1800.0  # the time it gave up, credited
+    assert next_owed(7200.0, 1) == -3600.0  # at most an hour of credit

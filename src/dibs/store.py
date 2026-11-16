@@ -131,6 +131,13 @@ class Store:
         row = self._db.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
         return row[0] if row else None
 
+    def meta_items(self, prefix: str) -> list[tuple[str, str]]:
+        return self._db.execute("SELECT key, value FROM meta WHERE key LIKE ? || '%'", (prefix,)).fetchall()
+
+    def delete_meta(self, keys: Iterable[str]) -> None:
+        with self._db:
+            self._db.executemany("DELETE FROM meta WHERE key = ?", [(k,) for k in keys])
+
     def set_meta(self, key: str, value: str) -> None:
         with self._db:
             self._db.execute(

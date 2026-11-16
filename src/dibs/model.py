@@ -78,15 +78,42 @@ class Job:
     peak_vram: int | None = None
     peak_mem: int | None = None
     cpu_seconds: float | None = None  # CPU time the job used, from its scope
+    priority: int = 5  # 1-10; see compute_tag
 
 
 class RequestError(ValueError):
     """A request dibs refuses, with a message that says why."""
 
 
-def compute_tag(submitted: float, estimate: float, session_queued_tags: Iterable[float]) -> float:
-    """A job's place in line (lower goes first): it lines up behind its own session's queued jobs."""
-    return max(submitted, max(session_queued_tags, default=-math.inf)) + estimate
+DEFAULT_PRIORITY = 5
+# How much of its estimate a job counts as in line, by priority, as an exact fraction.
+PRIORITY_SHARE = {1: (4, 1), 2: (3, 1), 3: (2, 1), 4: (3, 2), 5: (1, 1),
+                  6: (7, 10), 7: (1, 2), 8: (7, 20), 9: (1, 5), 10: (1, 10)}  # fmt: skip
+CREDIT_MAX = 3600.0  # seconds: a session's head start from lower-priority jobs is capped at an hour
+
+
+def compute_tag(
+    submitted: float,
+    estimate: float,
+    session_queued_tags: Iterable[float],
+    priority: int = DEFAULT_PRIORITY,
+    owed: float = 0.0,
+) -> float:
+    """A job's place in line (lower goes first). It lines up behind its own session's queued jobs,
+    plus what its session owes (minus its credit), plus its estimate scaled by its priority: at 10 a
+    tenth of it, at 1 four times it. Never earlier than its submit time, so no job goes ahead of one
+    that has waited as long as its own estimate."""
+    num, den = PRIORITY_SHARE[priority]
+    start = max(submitted, max(session_queued_tags, default=-math.inf))
+    return max(submitted, start + owed + estimate * num / den)
+
+
+def next_owed(estimate: float, priority: int) -> float:
+    """What a job leaves its session's next job: the time its priority saved it, to be paid back, or
+    the time it gave up, credited (at most CREDIT_MAX). A free priority would have every agent pick
+    10; this way a high priority moves your own work around and can't take others' share."""
+    num, den = PRIORITY_SHARE[priority]
+    return max(-CREDIT_MAX, estimate * (den - num) / den)
 
 
 def fits_machine(req: Request, cap: Capacity) -> str | None:

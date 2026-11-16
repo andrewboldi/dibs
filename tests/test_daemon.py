@@ -5,7 +5,7 @@ import subprocess
 import sys
 import time
 
-from conftest import FakeBackend, run_until
+from conftest import FakeBackend, capacity, run_until
 
 from dibs import launcher, procs
 from dibs.daemon import OUTSIDE_WINDOW
@@ -423,3 +423,52 @@ def test_job_on_an_amd_machine_sees_only_its_gpus_through_rocr(make_daemon, tmp_
     job_id = submit(amd_daemon, tmp_path, [PY, "-c", script], vram=1 * GiB)
     run_until(amd_daemon, lambda: finished(amd_daemon, job_id))
     assert "ROCR=0 False" in open(job(amd_daemon, job_id).output).read()
+
+
+def test_priority_goes_ahead_and_the_sessions_next_job_pays_it_back(make_daemon, tmp_path):
+    # Issue #47: a free priority would have every agent pick 10. So a job's priority moves it in
+    # line, and its session's next job pays back the time it saved.
+    now = [1000.0]
+    d = make_daemon(clock=lambda: now[0], cap=capacity(cpus=[0]))
+    submit(d, tmp_path, [PY, "-c", "import time; time.sleep(30)"], session="blocker")  # holds the CPU
+    urgent = submit(d, tmp_path, [PY, "-c", "pass"], time_=1200.0, session="s1", priority=10)
+    other = submit(d, tmp_path, [PY, "-c", "pass"], time_=300.0, session="s2")
+    after = submit(d, tmp_path, [PY, "-c", "pass"], time_=300.0, session="s1")
+    assert job(d, urgent).tag == 1000.0 + 120.0  # a tenth of its 20 minutes
+    assert job(d, other).tag == 1000.0 + 300.0  # so the urgent job goes ahead of a shorter one
+    assert job(d, after).tag == 1000.0 + 1200.0 + 300.0  # exactly where it would be without priority
+    assert job(d, urgent).priority == 10 and job(d, after).priority == 5
+
+
+def test_priority_never_passes_a_job_that_waited_its_estimate(make_daemon, tmp_path):
+    now = [1000.0]
+    d = make_daemon(clock=lambda: now[0], cap=capacity(cpus=[0]))
+    submit(d, tmp_path, [PY, "-c", "import time; time.sleep(30)"], session="blocker")
+    waited = submit(d, tmp_path, [PY, "-c", "pass"], time_=60.0, session="s1")
+    now[0] += 120.0  # it has now waited twice its estimate
+    late = submit(d, tmp_path, [PY, "-c", "pass"], time_=600.0, session="s2", priority=10)
+    assert job(d, late).tag >= job(d, waited).tag
+
+
+def test_priority_must_be_one_to_ten(daemon, tmp_path):
+    for bad in (0, 11, "high", 2.5, True):
+        resp = daemon.submit(req(tmp_path, [PY, "-c", "pass"], priority=bad))
+        assert not resp["ok"] and "1 to 10" in resp["error"]
+
+
+def test_what_a_session_owes_lapses_after_a_day(make_daemon, tmp_path):
+    now = [1000.0]
+    d = make_daemon(clock=lambda: now[0], cap=capacity(cpus=[0]))
+    submit(d, tmp_path, [PY, "-c", "import time; time.sleep(30)"], session="blocker")
+    submit(d, tmp_path, [PY, "-c", "pass"], time_=1200.0, session="s1", priority=10)
+    now[0] += 86400 + 1
+    later = submit(d, tmp_path, [PY, "-c", "pass"], time_=300.0, session="s1")
+    assert job(d, later).tag == now[0] + 300.0
+
+
+def test_cleanup_forgets_what_sessions_owed_more_than_a_day_ago(daemon):
+    now = time.time()
+    daemon.store.set_meta("owed:old", json.dumps({"owed": 600.0, "time": now - 86400 - 60}))
+    daemon.store.set_meta("owed:new", json.dumps({"owed": 600.0, "time": now - 60}))
+    daemon._retention(now)
+    assert daemon.store.get_meta("owed:old") is None and daemon.store.get_meta("owed:new") is not None
