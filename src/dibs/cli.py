@@ -215,6 +215,16 @@ def cmd_run(args, paths: Paths, command: list[str]) -> int:
         return _keeps_running(job["id"], signal.SIGINT)
     except _Interrupted as e:
         return _keeps_running(job["id"], e.signum)
+    except dc.DibsError as e:
+        if e.code != "upgraded":
+            raise
+        # Not "run the command again": the job is submitted already, and would be submitted twice.
+        print(
+            f"\ndibs: dibs was upgraded while this command ran, and job {job['id']} keeps running. "
+            f"Wait for it: dibs wait {job['id']}   Follow it: dibs logs {job['id']} -f",
+            file=sys.stderr,
+        )
+        return 1
     if finished["state"] != "done":
         print(f"dibs: {render.finished_line(finished)}", file=sys.stderr)
     return render.exit_code(finished)
