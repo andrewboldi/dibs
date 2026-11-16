@@ -139,6 +139,7 @@ def main(argv: list[str]) -> int:
         {
             "exit_code": exit_code,
             "ended": time.time(),
+            "slept": procs.slept(),  # so the daemon can leave the time the machine slept out of the run time
             "oom_killed": oom_killed,
             "peak_mem": peak_mem,
             "cpu_seconds": cpu_seconds,

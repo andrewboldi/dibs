@@ -104,6 +104,13 @@ def test_launch_runs_and_reports_exit(paths):
     assert "hi" in output(job)
 
 
+def test_the_exit_record_has_how_long_the_machine_had_slept(paths):
+    # Issue #76: run times leave out the time the machine slept, counted up to the command's exit.
+    job = run(paths, make_job(paths, ["true"]))
+    result = wait_exit(paths, job)
+    assert isinstance(result["slept"], float) and 0 <= result["slept"] <= time.clock_gettime(time.CLOCK_BOOTTIME)
+
+
 def test_launch_pins_cpus(paths):
     job = run(paths, make_job(paths, [PY, "-c", "import os; print(sorted(os.sched_getaffinity(0)))"], cpu_ids=(0, 1)))
     wait_exit(paths, job)

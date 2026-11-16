@@ -89,6 +89,7 @@ class Daemon:
         use_systemd: bool,
         clock: Callable[[], float] = time.time,
         meminfo: Callable[[], tuple[int, int] | None] = procs.meminfo,
+        slept: Callable[[], float] = procs.slept,
     ):
         self.paths = paths
         self.config = config
@@ -99,6 +100,7 @@ class Daemon:
         self.backend = backend
         self.use_systemd = use_systemd
         self.clock = clock
+        self.slept = slept
         ensure_dirs(paths)
         self.store = Store(paths.db)
         self.closed = False
@@ -396,7 +398,9 @@ class Daemon:
         queued = self.store.jobs([State.QUEUED])
         current = plan(
             self.capacity,
-            [Running(j.id, j.request, tuple(j.cpu_ids), tuple(j.gpu_ids), j.started or now) for j in running],
+            # A job's estimate is of its running time, so the time the machine slept moves its start on.
+            [Running(j.id, j.request, tuple(j.cpu_ids), tuple(j.gpu_ids), (j.started or now) + self._asleep(j))
+             for j in running],
             [Queued(j.id, j.request, j.tag, j.submitted) for j in queued],
             now,
             outside_mem=self._outside_mem(now, running),
@@ -439,6 +443,7 @@ class Daemon:
             job = by_id[start.job_id]
             job.cpu_ids, job.gpu_ids = list(start.cpu_ids), list(start.gpu_ids)
             job.started, job.state = now, State.RUNNING
+            job.sleep_at_start = self.slept()
             self.store.update_job(job)
             try:
                 job.shim_pid, job.shim_ticks, job.unit = launcher.launch(
@@ -642,6 +647,9 @@ class Daemon:
             self._terminated.add(job.id)
 
     def _finish(self, job: Job, result: dict, now: float) -> None:
+        if job.sleep_at_start is not None:  # counted to the command's exit, so a later sleep isn't added
+            slept = result.get("slept")
+            job.asleep = max(0.0, (slept if slept is not None else self.slept()) - job.sleep_at_start)
         job.exit_code = result.get("exit_code")
         job.ended = result.get("ended") or now
         job.cpu_seconds = result.get("cpu_seconds")
@@ -675,6 +683,7 @@ class Daemon:
         return f" ({last[:200]})" if last else ""
 
     def _lose(self, job: Job, now: float, reason: str) -> None:
+        job.asleep = self._asleep(job)
         job.state, job.ended, job.reason = State.FAILED, now, reason
         self.store.update_job(job)
         self._notify(job)
@@ -714,10 +723,18 @@ class Daemon:
                 waiting_for=p.reason if p else "",
             )
         elif job.state == State.RUNNING:
-            started = job.started or now
+            started = (job.started or now) + self._asleep(job)
+            view["asleep"] = self._asleep(job)
             view["expected_end"] = current.running_ends.get(job.id, started + job.request.time)
             view["over_estimate"] = max(0.0, now - (started + job.request.time))
         return view
+
+    def _asleep(self, job: Job) -> float:
+        """How long the machine has slept since a running job started (#76); 0 for jobs started
+        before dibs kept count."""
+        if job.state != State.RUNNING:
+            return job.asleep
+        return max(0.0, self.slept() - job.sleep_at_start) if job.sleep_at_start is not None else 0.0
 
 
 _lock_fd: int | None = None  # held for the daemon's whole life

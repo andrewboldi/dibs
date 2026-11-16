@@ -92,7 +92,7 @@ def render_earlier(earlier: list[dict], match: str = "command") -> str:
         lines = ["Earlier runs of this command here:"]
     for e in earlier:
         r = e["request"]
-        ran = e["ended"] - e["started"] if e.get("ended") and e.get("started") is not None else None
+        ran = e["ended"] - e["started"] - (e.get("asleep") or 0.0) if e.get("ended") and e.get("started") is not None else None
         line = f"  #{e['id']} {e['state']}" + (f" after {format_duration(ran)}" if ran is not None else "")
         line += f" (estimated {format_duration(r['time'])})"
         used = []
@@ -236,14 +236,21 @@ def render_show(job: dict, now: float) -> str:
         got = f"CPUs {cpu_list(job['cpu_ids'])}"
         if job.get("gpu_ids"):
             got += f", GPU {','.join(str(g) for g in job['gpu_ids'])}"
-        rows.append(("running", f"since {clock(job['started'], now)} ({format_duration(now - job['started'])}) on {got}"))
+        asleep = job.get("asleep") or 0.0
+        ran = format_duration(max(0.0, now - job["started"] - asleep))
+        if asleep >= 60:
+            ran += f", plus {format_duration(asleep)} asleep"
+        rows.append(("running", f"since {clock(job['started'], now)} ({ran}) on {got}"))
         if job.get("over_estimate"):
             rows.append(("expected", f"over estimate by {format_duration(job['over_estimate'])}"))
         else:
             rows.append(("expected", f"end {when(job['expected_end'], now)}"))
     else:
         if job.get("ended"):
-            ran = f" after {format_duration(job['ended'] - job['started'])}" if job.get("started") else ""
+            asleep = job.get("asleep") or 0.0
+            ran = f" after {format_duration(max(0.0, job['ended'] - job['started'] - asleep))}" if job.get("started") else ""
+            if ran and asleep >= 60:
+                ran += f" (plus {format_duration(asleep)} asleep)"
             code = f", exit {job['exit_code']}" if job.get("exit_code") is not None else ""
             rows.append(("ended", f"{clock(job['ended'], now)}{ran}{code}"))
         if job.get("reason"):

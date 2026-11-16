@@ -165,6 +165,15 @@ def memory_in_use(cgroup_path: str) -> tuple[int, int] | None:
     return stat["anon"] + shmem, shmem
 
 
+def slept() -> float:
+    """Seconds this machine has spent asleep (suspended) since it booted: CLOCK_BOOTTIME counts that
+    time and CLOCK_MONOTONIC doesn't. 0 where there's no CLOCK_BOOTTIME."""
+    boottime = getattr(time, "CLOCK_BOOTTIME", None)
+    if boottime is None:
+        return 0.0
+    return max(0.0, time.clock_gettime(boottime) - time.monotonic())
+
+
 def cgroup(pid: int) -> str | None:
     for line in (_read(f"/proc/{pid}/cgroup") or "").splitlines():
         if line.startswith("0::"):

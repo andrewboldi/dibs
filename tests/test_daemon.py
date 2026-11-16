@@ -481,6 +481,47 @@ def test_a_ram_kill_with_little_shared_memory_says_only_that_it_went_over(daemon
     assert killed.reason == "killed: went over its 8G RAM reservation"
 
 
+def test_time_the_machine_slept_is_not_run_time(make_daemon, tmp_path, monkeypatch):
+    # Issue #76: a 2.5-hour job that had run 65 min when a laptop slept for 3 hours showed "over
+    # estimate by 1h35m" on waking, and the planner took it to be about to end.
+    start, now, slept = 1_000_000.0, [1_000_000.0], [500.0]
+    d = make_daemon(clock=lambda: now[0], slept=lambda: slept[0])
+    go = tmp_path / "go"
+    holding = [PY, "-c", f"import os, time\nwhile not os.path.exists({str(go)!r}): time.sleep(0.02)"]
+    running = submit(d, tmp_path, holding, cpus="all", time_=9000.0)
+    run_until(d, lambda: job(d, running).shim_pid)
+    now[0] += 65 * 60  # 65 minutes running
+    now[0] += 3 * 3600  # then 3 hours asleep
+    slept[0] += 3 * 3600
+    waiting = submit(d, tmp_path, [PY, "-c", "pass"], cpus="all")
+    assert d.show(waiting)["job"]["predicted_start"] == start + 3 * 3600 + 9000.0
+    view = d.show(running)["job"]
+    assert view["asleep"] == 3 * 3600 and view["over_estimate"] == 0
+    assert view["expected_end"] == start + 3 * 3600 + 9000.0
+    # The launcher reads the counter when the command exits; the job keeps what it slept.
+    real_read_exit = launcher.read_exit
+    monkeypatch.setattr(launcher, "read_exit", lambda paths, i: (r := real_read_exit(paths, i)) and {**r, "slept": 500.0 + 3 * 3600})
+    go.touch()
+    run_until(d, lambda: finished(d, running))
+    assert job(d, running).asleep == 3 * 3600
+
+
+def test_run_times_shown_leave_out_the_time_the_machine_slept():
+    from dibs.model import Job, Request, State, job_to_dict
+    from dibs.render import render_earlier, render_show
+
+    gib, t = 1 << 30, 1_000_000.0
+    request = Request(cpus=6, mem=8 * gib, gpus=1, vram=4 * gib, time=9000.0)
+    ended = Job(id=263, name="train.py", argv=["python", "train.py"], cwd="/w", env={}, request=request,
+                session="s", session_label="w·s", submitted=t, tag=t + 9000, state=State.DONE, output="/w/out",
+                started=t, ended=t + 4 * 3600 + 300, exit_code=0, cpu_seconds=2.0 * 3900, asleep=3 * 3600.0)  # fmt: skip
+    assert "#263 done after 1h5m (estimated 2h30m): 2.0 of 6 CPUs" in render_earlier([job_to_dict(ended)])
+    assert "after 1h5m (plus 3h asleep), exit 0" in render_show(job_to_dict(ended), t + 5 * 3600)
+    view = {**job_to_dict(ended), "state": "running", "ended": None, "exit_code": None, "cpu_ids": [0], "gpu_ids": [0],
+            "expected_end": t + 3 * 3600 + 9000, "over_estimate": 0.0}  # fmt: skip
+    assert "(1h5m, plus 3h asleep) on CPUs 0" in render_show(view, t + 4 * 3600 + 300)
+
+
 def test_submit_reports_earlier_runs_of_the_same_command(daemon, tmp_path):
     # Issue #31: agents guess their requests; dibs tells them what the same command used before.
     first = submit(daemon, tmp_path, [PY, "-c", "pass"])
