@@ -57,6 +57,6 @@ def test_stop_goes_through_systemctl_when_the_service_runs_dibs(tmp_path):
     bin_dir.mkdir()
     (bin_dir / "systemctl").write_text(f'#!/bin/sh\necho "$@" >> {log}\nexit 0\n')
     (bin_dir / "systemctl").chmod(0o755)
-    env = {"HOME": str(tmp_path), "PATH": f"{bin_dir}:{os.environ['PATH']}"}
+    env = {"HOME": str(tmp_path), "XDG_RUNTIME_DIR": str(tmp_path / "run"), "PATH": f"{bin_dir}:{os.environ['PATH']}"}
     assert stop_daemon(get_paths(env), env=env) is True
     assert "--user stop dibs.service" in log.read_text()

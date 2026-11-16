@@ -3,6 +3,7 @@ import socket
 import stat
 from pathlib import Path
 
+from dibs import paths
 from dibs.paths import ensure_dirs, get_paths
 
 
@@ -26,11 +27,23 @@ def test_default_paths_follow_xdg():
     assert p.socket == Path("/run/user/1000/dibs/dibs.sock")
 
 
-def test_default_paths_without_xdg():
+def test_default_paths_without_xdg(tmp_path, monkeypatch):
+    monkeypatch.setattr(paths, "SYSTEM_RUNTIME_ROOT", tmp_path / "no-such-run-user")
     p = get_paths({"HOME": "/home/u"})
     assert p.config_file == Path("/home/u/.config/dibs/config.toml")
     assert p.state_dir == Path("/home/u/.local/state/dibs")
     assert p.socket == Path("/home/u/.local/state/dibs/dibs.sock")
+
+
+def test_without_xdg_runtime_dir_the_systemd_runtime_folder_is_used(tmp_path, monkeypatch):
+    # cron or an ssh login may lack XDG_RUNTIME_DIR while the service's daemon has it: both must
+    # still agree on the socket (issue #1).
+    root = tmp_path / "run-user"
+    (root / str(os.getuid())).mkdir(parents=True, mode=0o700)
+    monkeypatch.setattr(paths, "SYSTEM_RUNTIME_ROOT", root)
+    with_var = get_paths({"HOME": "/home/u", "XDG_RUNTIME_DIR": str(root / str(os.getuid()))})
+    without = get_paths({"HOME": "/home/u"})
+    assert without.socket == with_var.socket == root / str(os.getuid()) / "dibs" / "dibs.sock"
 
 
 def test_dibs_home_puts_everything_under_it(tmp_path):
@@ -74,3 +87,10 @@ def test_ensure_dirs_private(tmp_path):
     ensure_dirs(p)
     for d in (p.state_dir, p.jobs_dir, p.socket.parent):
         assert mode(d) == 0o700
+
+
+def test_tests_never_reach_the_real_runtime_folder(monkeypatch):
+    # A test that unsets XDG_RUNTIME_DIR to stay isolated must not fall back to the machine's real
+    # /run/user/UID, where an installed dibs listens: one did, and shut the real daemon down.
+    monkeypatch.delenv("XDG_RUNTIME_DIR", raising=False)
+    assert not str(get_paths({"HOME": "/home/u"}).socket).startswith(f"/run/user/{os.getuid()}")

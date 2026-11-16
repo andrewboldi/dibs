@@ -13,6 +13,8 @@ from pathlib import Path
 
 # AF_UNIX socket paths are limited to 108 bytes on Linux (104 on macOS); stay well under.
 _SOCKET_PATH_MAX = 100
+# Where systemd puts each user's runtime folder (what XDG_RUNTIME_DIR normally points to).
+SYSTEM_RUNTIME_ROOT = Path("/run/user")
 
 
 @dataclass(frozen=True)
@@ -31,6 +33,19 @@ class Paths:
         return self.jobs_dir / str(job_id)
 
 
+def _runtime_dir(env: Mapping[str, str]) -> Path | None:
+    """XDG_RUNTIME_DIR, or systemd's /run/user/UID when it isn't set (cron, some ssh logins), so a
+    command and a daemon started by systemd agree on where the socket is."""
+    if env.get("XDG_RUNTIME_DIR"):
+        return Path(env["XDG_RUNTIME_DIR"])
+    candidate = SYSTEM_RUNTIME_ROOT / str(os.getuid())
+    try:
+        st = os.stat(candidate)
+    except OSError:
+        return None
+    return candidate if stat.S_ISDIR(st.st_mode) and st.st_uid == os.getuid() else None
+
+
 def get_paths(env: Mapping[str, str] = os.environ) -> Paths:
     if env.get("DIBS_HOME"):
         home = Path(env["DIBS_HOME"])
@@ -40,8 +55,8 @@ def get_paths(env: Mapping[str, str] = os.environ) -> Paths:
         config_home = Path(env.get("XDG_CONFIG_HOME") or user_home / ".config")
         state_home = Path(env.get("XDG_STATE_HOME") or user_home / ".local" / "state")
         config_file, state_dir = config_home / "dibs" / "config.toml", state_home / "dibs"
-        runtime = env.get("XDG_RUNTIME_DIR")
-        socket = Path(runtime) / "dibs" / "dibs.sock" if runtime else state_dir / "dibs.sock"
+        runtime = _runtime_dir(env)
+        socket = runtime / "dibs" / "dibs.sock" if runtime else state_dir / "dibs.sock"
     instance = hashlib.sha1(str(state_dir.resolve()).encode()).hexdigest()[:8]
     if len(str(socket)) > _SOCKET_PATH_MAX:
         socket = Path("/tmp") / f"dibs-{os.getuid()}" / f"{instance}.sock"
