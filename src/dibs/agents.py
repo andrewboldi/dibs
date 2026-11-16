@@ -133,7 +133,10 @@ def _write(path: Path, text: str, record: dict) -> None:
 
 
 def _run(*command: str) -> subprocess.CompletedProcess:
-    return subprocess.run(command, capture_output=True, text=True, timeout=60)
+    try:
+        return subprocess.run(command, capture_output=True, text=True, timeout=60)
+    except FileNotFoundError:  # no systemctl or loginctl here (a container): the same as failing
+        return subprocess.CompletedProcess(command, 127, "", f"{command[0]}: not found")
 
 
 def _install_service(home: Path, dibs_exe: str, record: dict, lines: list[str]) -> None:
