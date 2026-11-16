@@ -1,5 +1,6 @@
 import os
 import signal
+import subprocess
 import sys
 import time
 
@@ -243,3 +244,20 @@ def test_probe_uses_the_properties_jobs_need(tmp_path, monkeypatch):
         assert launcher.systemd_available({}) is False
     finally:
         launcher._systemd = None
+
+
+def test_job_pids_never_reach_outside_the_jobs_own_scope(paths):
+    # Issue #33: a job whose recorded unit wasn't the scope its launcher ran in made job_pids list
+    # every process in the launcher's cgroup, and stopping the job then killed the terminal and the
+    # agent that ran the test. Only the job's own scope may be read whole. This test only lists.
+    stand_in = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        job = make_job(paths, ["true"])
+        job.shim_pid, job.shim_ticks = stand_in.pid, procs.start_ticks(stand_in.pid)
+        job.unit = "dibs-test-job-1"  # not the scope the stand-in runs in
+        pids = launcher.job_pids(job)
+        assert os.getpid() not in pids
+        assert pids == []  # the stand-in launcher has no children
+    finally:
+        stand_in.kill()
+        stand_in.wait()
