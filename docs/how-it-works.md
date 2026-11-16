@@ -16,7 +16,8 @@ Each job is due at its submit time plus its estimate, and the job due first goes
 three guarantees:
 
 1. **Shortest first.** Jobs submitted around the same time run shortest first.
-2. **No starvation.** Once a job has waited as long as its own estimate, no newer job can pass it.
+2. **No starvation.** Once a job's place in line comes due (for a job at the default priority,
+   after it has waited its estimate), no newer job can pass it.
 3. **No crowding out.** A session's queued jobs line up behind each other, so an agent that queues
    fifty jobs interleaves with everyone else instead of going ahead of them all.
 
@@ -28,8 +29,8 @@ running long: the estimate only orders the queue. `dibs top` draws the timeline 
 
 **Priority.** `--priority N` (1 to 10, default 5) lets an agent say a job is urgent. A higher
 priority makes the job count as shorter in line (at 10, a tenth of its estimate), so it goes ahead
-sooner, and its session's next job pays that time back: it lands exactly where it would have
-without priority. A lower priority does the reverse and earns the next job a head start, up to an
+sooner, and its session's next job pays that time back: it lands that much later than it would
+have. A lower priority does the reverse and earns the next job a head start, up to an
 hour. Priority moves an agent's own work around but can't take other agents' share, so an agent
 that always picks 10 gains nothing after its first job. What a session owes lapses after a day.
 

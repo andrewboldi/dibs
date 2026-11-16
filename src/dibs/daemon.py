@@ -145,7 +145,13 @@ class Daemon:
 
         now = self.clock()
         session = req.get("session") or "unknown"
-        backlog = [j.tag for j in self.store.jobs([State.QUEUED]) if j.session == session]
+        # The session's queued jobs' priority-5 places: lining up behind boosted tags would pass each
+        # boost down the line, and the time a job saved would never be paid back.
+        backlog = [
+            j.plain_tag if j.plain_tag is not None else j.tag
+            for j in self.store.jobs([State.QUEUED])
+            if j.session == session
+        ]
         job = Job(
             id=0,
             name=req.get("name") or default_name(argv),
@@ -158,6 +164,7 @@ class Daemon:
             submitted=now,
             tag=compute_tag(now, request.time, backlog, priority, self._owed(session, now)),
             priority=priority,
+            plain_tag=compute_tag(now, request.time, backlog),
             state=State.QUEUED,
             output=output or "",
         )

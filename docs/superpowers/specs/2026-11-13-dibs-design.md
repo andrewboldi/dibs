@@ -216,8 +216,13 @@ What this gives:
 - **Shortest first across sessions.** Jobs submitted at about the same time are ordered by
   estimate. The user's A/B example: tags are `s+1` and `s+10`, so A goes first.
 - **Long jobs can't starve.** A job submitted after time `tag(J)` gets a tag greater than `tag(J)`,
-  so once a job has waited as long as its own estimate (plus its session's earlier queued jobs),
-  no newer job can be ordered ahead of it.
+  so once a job's tag comes due (at the default priority: once it has waited as long as its own
+  estimate, plus its session's earlier queued jobs), no newer job can be ordered ahead of it.
+- **Priority (added later).** With `--priority p`, a job's tag is
+  `max(s, L + owed + e * share(p))`, where `share` is 1/10 at 10, 1 at 5 and 4 at 1, `L` is the
+  latest *priority-5* place among its session's queued jobs (so a boost isn't passed down the
+  line), and `owed` is the time its session's previous job saved (`e * (1 - share)`, credit capped
+  at an hour). Its own priority-5 place, `max(s, L) + e`, is kept for the jobs after it.
 - **One session can't crowd out the others.** If a session queues 50 one-minute jobs at once,
   their tags are `s+1, s+2, ..., s+50`; another session's 10-minute job (tag `s+10`) goes after
   the first ten, not after all fifty. Because only *queued* jobs count toward `L`, a session isn't

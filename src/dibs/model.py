@@ -79,6 +79,7 @@ class Job:
     peak_mem: int | None = None
     cpu_seconds: float | None = None  # CPU time the job used, from its scope
     priority: int = 5  # 1-10; see compute_tag
+    plain_tag: float | None = None  # its place at priority 5 with nothing owed; the session's next jobs line up behind it
 
 
 class RequestError(ValueError):
@@ -99,10 +100,11 @@ def compute_tag(
     priority: int = DEFAULT_PRIORITY,
     owed: float = 0.0,
 ) -> float:
-    """A job's place in line (lower goes first). It lines up behind its own session's queued jobs,
-    plus what its session owes (minus its credit), plus its estimate scaled by its priority: at 10 a
-    tenth of it, at 1 four times it. Never earlier than its submit time, so no job goes ahead of one
-    that has waited as long as its own estimate."""
+    """A job's place in line (lower goes first). It lines up behind its own session's queued jobs (pass
+    their priority-5 places, so a boost isn't passed down the line), plus what its session owes
+    (minus its credit), plus its estimate scaled by its priority: at 10 a tenth of it, at 1 four
+    times it. Never earlier than its submit time, so no new job goes ahead of one whose place has
+    come due."""
     num, den = PRIORITY_SHARE[priority]
     start = max(submitted, max(session_queued_tags, default=-math.inf))
     return max(submitted, start + owed + estimate * num / den)
