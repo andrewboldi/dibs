@@ -73,7 +73,7 @@ def remove_block(text: str) -> str:
     if text[end : end + 1] == "\n":
         end += 1
     before, after = text[:start], text[end:]
-    if not after and before.endswith("\n\n"):
+    if before.endswith("\n\n"):  # the blank line put_block added before the block, text after it or not
         before = before[:-1]
     return before + after
 
