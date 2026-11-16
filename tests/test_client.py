@@ -60,3 +60,20 @@ def test_stop_goes_through_systemctl_when_the_service_runs_dibs(tmp_path):
     env = {"HOME": str(tmp_path), "XDG_RUNTIME_DIR": str(tmp_path / "run"), "PATH": f"{bin_dir}:{os.environ['PATH']}"}
     assert stop_daemon(get_paths(env), env=env) is True
     assert "--user stop dibs.service" in log.read_text()
+
+
+def test_a_version_clash_a_restart_cant_fix_names_both_builds(tmp_path):
+    # Issue #5: the service runs another install of dibs, so restarting it brings back the same
+    # other build, and the second try used to fail with a bare "the dibs daemon refused".
+    from dibs import build_id
+
+    env = {**os.environ, "DIBS_HOME": str(tmp_path / "home"), "DIBS_NO_SYSTEMD": "1",
+           "DIBS_GPU_BACKEND": "none", "DIBS_BUILD_OVERRIDE": "0.0.9+old"}  # fmt: skip
+    env.pop("DIBS_JOB_ID", None)
+    paths = get_paths(env)
+    try:
+        with pytest.raises(DibsError) as err:
+            Client(paths, env=env).call("queue")
+        assert "0.0.9+old" in str(err.value) and build_id() in str(err.value)
+    finally:
+        stop_daemon(paths, env=env)

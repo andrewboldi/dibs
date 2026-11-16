@@ -158,6 +158,15 @@ class Client:
             # The daemon runs other code (dibs was upgraded): restarting it is safe, jobs keep running.
             stop_daemon(self.paths)
             response = self._send(payload, io_timeout)
+        if response.get("code") == "build_mismatch":
+            # Still: what starts the daemon (the systemd service) runs another install of dibs.
+            raise DibsError(
+                f"this dibs ({build_id()}) and the dibs daemon ({response.get('build')}) are different "
+                "versions, and restarting the daemon brought back the same one: the service runs "
+                "another install. Use that install's dibs, or reinstall so they match, then run "
+                "dibs daemon restart",
+                "build_mismatch",
+            )
         if not response.get("ok"):
             raise DibsError(response.get("error") or "the dibs daemon refused", response.get("code"))
         return response
