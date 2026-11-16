@@ -108,8 +108,20 @@ ensure_uv() {
 
 # ---- dibs ------------------------------------------------------------------------------------
 
+# The commit main points to now. GitHub serves branch archives from a cache for a few minutes, so
+# right after a push the branch archive can still be the previous version; a commit's never is.
+main_commit() {
+  curl -fsSL --max-time 10 -H "Accept: application/vnd.github.sha" \
+    "https://api.github.com/repos/andrewboldi/dibs/commits/main" 2>/dev/null | grep -xE '[0-9a-f]{40}' || true
+}
+
 source_spec() {
-  local src="${DIBS_SOURCE:-$DEFAULT_SOURCE}"
+  local src="${DIBS_SOURCE:-}" sha
+  if [ -z "$src" ]; then
+    sha="$(main_commit)"
+    src="${sha:+https://github.com/andrewboldi/dibs/archive/$sha.tar.gz}"
+    src="${src:-$DEFAULT_SOURCE}"
+  fi
   if [ -d "$src" ]; then (cd "$src" && pwd)
   elif [ -f "$src" ]; then printf 'dibs @ file://%s\n' "$(cd "$(dirname "$src")" && pwd)/$(basename "$src")"
   else printf 'dibs @ %s\n' "$src"
