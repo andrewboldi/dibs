@@ -179,10 +179,13 @@ def _keeps_running(job_id: int, signum: int) -> int:
 
 def cmd_submit(args, paths: Paths, command: list[str]) -> int:
     response = dc.Client(paths).call("submit", **_submit_request(args, command))
+    earlier = response.get("earlier", [])
     if args.json:
-        _print_json(response["job"])
+        _print_json({**response["job"], "earlier": earlier})
     else:
         print(render.render_submit(response["job"], response["now"]))
+        if earlier:
+            print(render.render_earlier(earlier))
     return 0
 
 
@@ -191,6 +194,8 @@ def cmd_run(args, paths: Paths, command: list[str]) -> int:
     response = client.call("submit", **_submit_request(args, command))
     job = response["job"]
     print(render.render_submit(job, response["now"]), file=sys.stderr)
+    if response.get("earlier"):
+        print(render.render_earlier(response["earlier"]), file=sys.stderr)
     try:
         finished = _follow(client, job["id"], job["output"], 0, sys.stdout.buffer)
     except KeyboardInterrupt:

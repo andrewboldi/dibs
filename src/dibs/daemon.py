@@ -158,7 +158,11 @@ class Daemon:
             job.output = str(self.paths.job_dir(job.id) / "output.log")
             self.store.update_job(job)
         self.schedule()
-        return self.show(job.id)
+        response = self.show(job.id)
+        # What the same command used before, so the agent can size its next request from it.
+        earlier = [j for j in self.store.earlier_runs(job.cwd, job.argv, limit=6) if j.started is not None]
+        response["earlier"] = [job_to_dict(j) for j in earlier[:3]]
+        return response
 
     def cancel(self, ids: list[int]) -> dict:
         now = self.clock()
@@ -588,6 +592,7 @@ class Daemon:
     def _finish(self, job: Job, result: dict, now: float) -> None:
         job.exit_code = result.get("exit_code")
         job.ended = result.get("ended") or now
+        job.cpu_seconds = result.get("cpu_seconds")
         if job.peak_mem is None:  # never sampled while it ran: the launcher's figure is all there is
             job.peak_mem = result.get("peak_mem")
         if job.cancel_requested is not None:

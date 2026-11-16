@@ -236,3 +236,9 @@ def test_mine_filters_session(dibs):
     mine = js(dibs("queue", "--mine", "--json", env={"DIBS_SESSION": "aaaa"}, check=0))
     assert [j["session"] for j in mine["jobs"]] == ["aaaa"]
     dibs("cancel", "1", "2")
+
+
+def test_submit_shows_earlier_runs(dibs):
+    dibs("run", *RES, "--", "true", check=0)
+    out = dibs("submit", *RES, "--", "true", check=0).stdout
+    assert "Earlier runs of this command here:" in out and "#1 done" in out

@@ -144,8 +144,8 @@ def meminfo() -> tuple[int, int] | None:
     return fields["MemTotal"], fields["MemTotal"] - fields["MemAvailable"]
 
 
-def memory_stat(text: str | None) -> dict[str, int]:
-    """A cgroup's memory.stat, as numbers."""
+def keyed_numbers(text: str | None) -> dict[str, int]:
+    """A cgroup "key value" file (memory.stat, cpu.stat), as numbers."""
     stat = {}
     for line in (text or "").splitlines():
         key, _, value = line.partition(" ")
@@ -157,7 +157,7 @@ def memory_stat(text: str | None) -> dict[str, int]:
 def memory_in_use(cgroup_path: str) -> int | None:
     """What a cgroup's processes hold (anon + shmem), leaving out the file cache that memory.current
     and memory.peak also count: the kernel drops that cache when memory runs short."""
-    stat = memory_stat(_read(f"{CGROUP_ROOT}{cgroup_path}/memory.stat"))
+    stat = keyed_numbers(_read(f"{CGROUP_ROOT}{cgroup_path}/memory.stat"))
     return stat["anon"] + stat.get("shmem", 0) if "anon" in stat else None
 
 

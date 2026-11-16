@@ -57,7 +57,9 @@ when those resources are free, so jobs never crash each other by running out of 
   rounded up. If unsure, start with a small run and look at its peak.
 - RAM: the job's peak, including every data-loader worker.
 - CPUs: the threads or worker processes it actually uses.
-- `dibs show ID` lists a finished job's peak VRAM and RAM; size the next run from those.
+- `dibs show ID` lists a job's peak VRAM and RAM, and `dibs submit` shows what earlier runs of the
+  same command in the same folder used. Size the next run from those: the peaks plus a little
+  headroom (going over VRAM stops the job), and the CPUs it kept busy.
 - A job stopped for going over its reservation has a reason saying so: resubmit with more.
 
 ## Waiting and checking
