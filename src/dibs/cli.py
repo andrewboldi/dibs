@@ -422,6 +422,17 @@ def cmd_daemon(args, paths: Paths, _) -> int:
     return 0
 
 
+# Commands that do nothing twice when run again, so they run again on the new code after an upgrade.
+REPEATABLE = {"wait", "queue", "q", "show", "status", "info", "top"}
+
+
+def _run_again(argv: list[str]) -> None:
+    """dibs was upgraded while this command ran: run it again, started the same way, on the new code."""
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os.execve(sys.executable, [sys.executable, sys.argv[0], *argv], {**os.environ, "DIBS_RERUN": "1"})
+
+
 HANDLERS = {
     "submit": cmd_submit,
     "run": cmd_run,
@@ -445,6 +456,7 @@ def main(argv: list[str] | None = None) -> int:
     for sig in (signal.SIGTERM, signal.SIGHUP):
         signal.signal(sig, _raise_interrupted)
     argv = list(sys.argv[1:] if argv is None else argv)
+    given = list(argv)
     parser = build_parser()
     command: list[str] = []
     split = argv.index("--") if "--" in argv else len(argv)
@@ -464,6 +476,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         return HANDLERS[args.cmd](args, get_paths(), command)
     except dc.DibsError as e:
+        if e.code == "upgraded" and args.cmd in REPEATABLE and not os.environ.get("DIBS_RERUN"):
+            _run_again(given)  # once: a second upgrade under the same command shows the error
         print(f"dibs: {e}", file=sys.stderr)
         return 2 if e.code == "rejected" else 1
     except KeyboardInterrupt:

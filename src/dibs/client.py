@@ -197,7 +197,7 @@ class Client:
             raise DibsError(
                 f"dibs was upgraded while this command ran: the daemon runs {response.get('build')}, "
                 f"this command still runs the code it started with ({build_id()}). Run the command again",
-                "build_mismatch",
+                "upgraded",
             )
         if response.get("code") == "build_mismatch":
             # Still: what starts the daemon (the systemd service) runs another install of dibs.
