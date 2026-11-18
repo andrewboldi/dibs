@@ -353,3 +353,10 @@ def test_setup_says_what_it_did_in_good_english(home):
     again = setup(home)
     assert any("Claude Code: updated the dibs instructions in" in line for line in again), again
     assert not any("updateed" in line for line in again)
+
+
+def test_agents_are_told_their_own_files_in_a_ram_backed_tmp_take_ram_from_jobs():
+    # Issue #138: one agent's own scratch folder in /tmp held 5.4G and grew by about a gigabyte an hour;
+    # /tmp is a tmpfs there, so those files held RAM (or swap) that dibs could hand to no job.
+    for text in (BLOCK, AGENT_HELP):
+        assert "findmnt /tmp" in text and "your own scratch" in text, text[:80]
