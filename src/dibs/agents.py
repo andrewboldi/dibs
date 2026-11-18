@@ -204,8 +204,8 @@ def setup(
         if new == old:
             lines.append(f"{target.agent}: {target.path} already has the dibs instructions.")
             continue
-        verb = "update" if BEGIN in old else "add"
-        lines.append(f"{target.agent}: {'would ' + verb if dry_run else verb + 'ed'} the dibs instructions in {target.path}")
+        verb, done = ("update", "updated") if BEGIN in old else ("add", "added")
+        lines.append(f"{target.agent}: {'would ' + verb if dry_run else done} the dibs instructions in {target.path}")
         if not dry_run:
             _write(target.path, new, record)
     if any(t.agent == "Claude Code" for t in found):

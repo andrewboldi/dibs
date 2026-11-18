@@ -342,3 +342,14 @@ def test_setup_says_the_guard_runs_only_when_something_runs_it(tmp_path):
     unit.parent.mkdir(parents=True)
     unit.write_text("[Service]\nExecStart=/opt/dibs/bin/dibs daemon run\n")
     assert "The guard is on" in run("--no-service").stdout
+
+
+def test_setup_says_what_it_did_in_good_english(home):
+    # Issue #140: a rerun over an older dibs block said "updateed the dibs instructions".
+    first = setup(home)
+    assert any("Claude Code: added the dibs instructions in" in line for line in first), first
+    claude_md = home / ".claude" / "CLAUDE.md"
+    claude_md.write_text(claude_md.read_text().replace("Run `dibs agent-help`", "Run dibs agent-help"))
+    again = setup(home)
+    assert any("Claude Code: updated the dibs instructions in" in line for line in again), again
+    assert not any("updateed" in line for line in again)
