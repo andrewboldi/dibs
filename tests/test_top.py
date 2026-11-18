@@ -234,3 +234,38 @@ def test_neighbouring_jobs_in_a_bar_are_set_apart(snapshot):
     cpu = next(line for line in render_top(snapshot, width=120, height=40, color=False).splitlines()
                if line.startswith(" CPU"))  # fmt: skip
     assert re.search(r"█+▌█+░", cpu), cpu  # two jobs' segments, a half-cell gap between them
+
+
+def _with_outside(snapshot, cpus=None, mem=0, vram=None):
+    return {**snapshot, "outside": {"cpus": cpus, "mem": mem, "vram": vram or {}}}
+
+
+def _bars(text):
+    return {line.split()[0] + (" " + line.split()[1] if line.startswith(" GPU") else ""): line
+            for line in text.splitlines() if line.startswith((" CPU", " RAM", " GPU"))}  # fmt: skip
+
+
+def test_bars_show_what_programs_outside_dibs_use(snapshot):
+    # Issue #120: top showed 7 of 24 CPUs reserved while a program outside dibs kept most cores busy.
+    bars = _bars(render_top(_with_outside(snapshot, cpus=12.4, mem=20 * GiB, vram={"0": GiB}), width=120,
+                            height=40, color=False))  # fmt: skip
+    assert "▒" in bars["CPU"] and "8/24 · 12 busy outside dibs" in bars["CPU"], bars["CPU"]
+    assert "▒" in bars["RAM"] and "12G/32G · 20G in use outside dibs" in bars["RAM"], bars["RAM"]
+    assert "▒" in bars["GPU 0"] and "6G/8G · 1G in use outside dibs" in bars["GPU 0"], bars["GPU 0"]
+
+
+def test_outside_use_fills_only_what_jobs_left_and_its_figure_stays_whole(snapshot):
+    for width in (80, 100, 160):
+        bars = _bars(render_top(_with_outside(snapshot, cpus=23.0, mem=30 * GiB), width=width, height=40, color=False))
+        assert "░" not in bars["CPU"] and "23 busy outside dibs" in bars["CPU"], (width, bars["CPU"])
+        assert "30G in use outside dibs" in bars["RAM"], (width, bars["RAM"])
+        cells = [sum(bars[k].count(c) for c in "█▌▒░") for k in ("CPU", "RAM", "GPU 0")]
+        assert len(set(cells)) == 1, (width, cells)  # the bars stay one width
+
+
+def test_little_or_unknown_outside_use_draws_nothing(snapshot):
+    plain = render_top(snapshot, width=120, height=40, color=False)
+    for quiet in (_with_outside(snapshot), _with_outside(snapshot, cpus=0.3)):
+        bars = _bars(render_top(quiet, width=120, height=40, color=False))
+        assert "▒" not in bars["CPU"] and "outside" not in bars["CPU"] and "outside" not in bars["GPU 0"]
+    assert "▒" not in plain and "outside dibs" not in "".join(_bars(plain).values())  # an older daemon

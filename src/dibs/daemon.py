@@ -56,6 +56,8 @@ YOUNG = 600.0  # seconds: a job with no earlier runs counts at its whole RAM res
 PRESSURE_LIMIT = 10.0  # percent (PSI some avg10): above it, no job starts on borrowed RAM
 EVICT_PRESSURE = 40.0  # percent: memory pressure this high for EVICT_AFTER stops a borrower (#114)
 EVICT_AFTER = 10.0  # seconds
+OUTSIDE_CPU_EVERY = 4.0  # seconds between samples of the CPU busy outside dibs jobs (#120)
+OUTSIDE_CPU_WINDOW = 15.0  # seconds the figure dibs top shows is averaged over
 MOMENTUM_SHARE = 0.25  # under momentum, a session's jobs count as this share of their estimates (#94)
 MOMENTUM_MAX = 12 * 3600.0  # seconds a grant may last
 EARLY_STOP = 60.0  # seconds: a job stopped for VRAM sooner than this was likely still growing (#80)
@@ -140,6 +142,12 @@ class Daemon:
         self._pressured_since: float | None = None  # when memory pressure rose above EVICT_PRESSURE
         self.cpu_busy = cpu_busy
         self._beside: dict[int, tuple[float, float, float]] = {}  # job -> (time, machine busy, its own CPU)
+        # For dibs top (#120): (time, machine busy, jobs' own CPU, the jobs, time asleep) samples, and
+        # what programs outside dibs use: cores (None while unknown), RAM, and VRAM per GPU index.
+        self._cpu_samples: deque[tuple[float, float, float, frozenset[int], float]] = deque()
+        self._outside_cpu: float | None = None
+        self._shown_outside_mem = 0
+        self._outside_vram: dict[str, int] = {}
         ensure_dirs(paths)
         self.store = Store(paths.db)
         self.closed = False
@@ -422,6 +430,8 @@ class Daemon:
             "capacity": self._capacity(),
             "guard": {"mode": self.config.guard, "stopped": stopped, "outside": self.outside},
             "momentum": self._momentum(now),
+            # What programs outside dibs use, for dibs top (#120); the RAM is what _plan just subtracted.
+            "outside": {"cpus": self._outside_cpu, "mem": self._shown_outside_mem, "vram": dict(self._outside_vram)},
         }
 
     def info(self) -> dict:
@@ -565,6 +575,7 @@ class Daemon:
         running = self.store.jobs([State.RUNNING])
         queued = self.store.jobs([State.QUEUED])
         borrowing = self._borrowing()
+        outside_mem = self._shown_outside_mem = self._outside_mem(now, running)  # dibs top draws it (#120)
         current = plan(
             self.capacity,
             # A job's estimate is of its running time, so the time the machine slept moves its start on.
@@ -574,7 +585,7 @@ class Daemon:
              for j in running],
             [Queued(j.id, j.request, j.tag, j.submitted) for j in queued],
             now,
-            outside_mem=self._outside_mem(now, running),
+            outside_mem=outside_mem,
         )
         return current, running, queued
 
@@ -681,6 +692,7 @@ class Daemon:
         self._watch_memory()
         self._give_back_borrowed(now)
         self._watch_beside(now)
+        self._watch_outside_cpu(now)
         self._watch_gpus(now)
         self.schedule()
         if now - self._last_retention >= RETENTION_EVERY:
@@ -783,14 +795,10 @@ class Daemon:
         for job in self.store.jobs([State.RUNNING]):
             if not job.request.exclusive or not (job.unit and job.shim_pid):
                 continue
-            cg = procs.cgroup(job.shim_pid)
             busy = self.cpu_busy()
-            if not cg or not cg.endswith(f"/{job.unit}.scope") or busy is None:
+            own = self._job_cpu_seconds(job)
+            if busy is None or own is None:
                 continue
-            usage = procs.keyed_numbers(procs._read(f"{procs.CGROUP_ROOT}{cg}/cpu.stat")).get("usage_usec")
-            if usage is None:
-                continue
-            own = usage / 1e6
             last = self._beside.get(job.id)
             if last is not None and now - last[0] < 4.0:
                 continue
@@ -805,6 +813,42 @@ class Daemon:
             stats["mean"] = stats["core_seconds"] / stats["seconds"]
             job.background = stats
             self.store.update_job(job)
+
+    def _job_cpu_seconds(self, job: Job) -> float | None:
+        """The CPU time a running job's own scope has used, in core-seconds; None if it can't be read."""
+        cg = procs.cgroup(job.shim_pid) if job.unit and job.shim_pid else None
+        if not cg or not cg.endswith(f"/{job.unit}.scope"):
+            return None
+        usage = procs.keyed_numbers(procs._read(f"{procs.CGROUP_ROOT}{cg}/cpu.stat")).get("usage_usec")
+        return None if usage is None else usage / 1e6
+
+    def _watch_outside_cpu(self, now: float) -> None:
+        """Sample the cores programs outside dibs keep busy, for dibs top (#120): the machine's busy
+        core-seconds less the running jobs' own, over the last OUTSIDE_CPU_WINDOW seconds. Unknown
+        (None) when a job's own use can't be read, a job started or ended between samples, or the
+        machine slept: each would count a job's work, or nothing, as outside dibs. Only shown: the
+        planner doesn't use it."""
+        if self._cpu_samples and now - self._cpu_samples[-1][0] < OUTSIDE_CPU_EVERY:
+            return
+        running = self.store.jobs([State.RUNNING])
+        busy, own = self.cpu_busy(), [self._job_cpu_seconds(j) for j in running]
+        if busy is None or None in own:
+            self._cpu_samples.clear()
+            self._outside_cpu = None
+            return
+        sample = (now, busy, sum(o for o in own if o is not None), frozenset(j.id for j in running), self.slept())
+        if self._cpu_samples and (
+            self._cpu_samples[-1][3] != sample[3] or sample[4] - self._cpu_samples[-1][4] > 1.0
+        ):
+            self._cpu_samples.clear()
+        self._cpu_samples.append(sample)
+        while now - self._cpu_samples[0][0] > OUTSIDE_CPU_WINDOW:
+            self._cpu_samples.popleft()
+        first = self._cpu_samples[0]
+        if now - first[0] <= 0:
+            self._outside_cpu = None
+            return
+        self._outside_cpu = max(0.0, (busy - first[1]) - (sample[2] - first[2])) / (now - first[0])
 
     def _job_of(self, pid: int, shims: dict[int, int], units: dict[str, int]) -> int | None:
         """The running job a process belongs to: by its systemd scope, else by its shim ancestor."""
@@ -826,6 +870,7 @@ class Daemon:
         seen = self.backend.processes() if self.capacity.gpus else []
         if not seen:
             self.outside = []
+            self._outside_vram = {}
             return
         managed = {g.index for g in self.capacity.gpus}
         seen = [p for p in seen if p.gpu_index in managed]
@@ -862,6 +907,7 @@ class Daemon:
         for v in verdicts:
             if v.kind != "job" and v.used is not None:
                 outside_use[v.gpu_index] = outside_use.get(v.gpu_index, 0) + v.used
+        self._outside_vram = {str(g): used for g, used in outside_use.items() if used}
         capacity_of = {g.index: g.vram for g in self.capacity.gpus}
 
         def holds(j: Job, g: int) -> int:

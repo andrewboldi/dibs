@@ -333,6 +333,7 @@ _ID_W, _NAME_W, _SESSION_W, _WHEN_W = 5, 13, 14, 16
 _PLAN_LEFT = 4 + _ID_W + 1 + _NAME_W + 1  # where the plan's bars start, under "now"
 _NUMBERS = _PLAN_LEFT + _SESSION_W + 1  # where the CPU, RAM and VRAM numbers start
 _REASON_MIN = 10  # a reason shows only when this much of it fits
+_OUTSIDE_SGR = "38;5;245"  # a grey that reads on light and dark backgrounds: what programs outside dibs use (#120)
 
 
 def _job_color(job_id: int) -> str:
@@ -370,7 +371,9 @@ class _Line:
         return "".join(f"\033[{s}m{t}\033[0m" if color and s and t else t for t, s in pieces).rstrip()
 
 
-def _bar(width: int, total: float, shares: list[tuple[float, str]]) -> list[tuple[str, str | None]]:
+def _bar(width: int, total: float, shares: list[tuple[float, str]], outside: float = 0) -> list[tuple[str, str | None]]:
+    """Jobs' reservations in their colours, then what programs outside dibs use in grey, in what the
+    jobs left (#120), then what's free."""
     pieces, filled = [], 0
     for amount, sgr in shares:
         cells = round(amount / total * width) if total else 0
@@ -380,6 +383,10 @@ def _bar(width: int, total: float, shares: list[tuple[float, str]]) -> list[tupl
             filled += cells
     for i in range(len(pieces) - 1):  # a half-cell gap between neighbouring jobs' segments (#118)
         pieces[i] = (pieces[i][0][:-1] + "▌", pieces[i][1])
+    grey = min(width - filled, max(1, round(outside / total * width))) if total and outside > 0 else 0
+    if grey:
+        pieces.append(("▒" * grey, _OUTSIDE_SGR))
+        filled += grey
     pieces.append(("░" * (width - filled), "2"))
     return pieces
 
@@ -472,18 +479,34 @@ def _frame(snapshot: dict, width: int, rows_per_list: int) -> list[_Line]:
     lines.append(_Line())
 
     label = 7
-    bar_width = max(10, min(48, width - label - 14))
     used_cpu = [(j["request"]["cpus"], _job_color(j["id"])) for j in running]
     used_mem = [(j["request"]["mem"], _job_color(j["id"])) for j in running]
-    rows = [("CPU", len(cap["cpus"]), used_cpu, lambda n: str(int(n))), ("RAM", cap["mem"], used_mem, format_size)]
+    # What programs outside dibs use (#120), drawn when it's more than a trace; an older daemon sends none.
+    outside = snapshot.get("outside")
+    away = outside or {}
+    cpus_away = away.get("cpus") if (away.get("cpus") or 0) >= 0.5 else 0
+    mem_away = away.get("mem") or 0
+    rows = [
+        ("CPU", len(cap["cpus"]), used_cpu, lambda n: str(round(n)), cpus_away, "busy", None),
+        ("RAM", cap["mem"], used_mem, format_size, mem_away if mem_away >= cap["mem"] / 100 else 0, "in use", None),
+    ]
     for g in cap["gpus"]:
         shares = [(j["request"]["vram"], _job_color(j["id"])) for j in running if g["index"] in j.get("gpu_ids", [])]
-        rows.append((f"GPU {g['index']}", g["vram"], shares, format_size, g["name"]))
-    for name, total, shares, fmt, *extra in rows:
+        vram_away = (away.get("vram") or {}).get(str(g["index"]), 0)
+        rows.append((f"GPU {g['index']}", g["vram"], shares, format_size, vram_away, "in use", g["name"]))
+    # Room for the figures beside the bars, from the totals alone, so the bars keep one width as top redraws.
+    room = 14
+    if outside is not None:
+        room = max(room, *(len(f" {fmt(t)}/{fmt(t)} · {fmt(t)} {verb} outside dibs") + 4 for _, t, _, fmt, _, verb, _ in rows))
+    bar_width = max(10, min(48, width - label - room))
+    for name, total, shares, fmt, used_away, verb, gpu_name in rows:
         used = sum(a for a, _ in shares)
-        line = _Line((f" {name}".ljust(label), "1"), *_bar(bar_width, total, shares), (f" {fmt(used)}/{fmt(total)}", None))
-        if extra:
-            line.add(f"  {extra[0]}", "2")
+        line = _Line((f" {name}".ljust(label), "1"), *_bar(bar_width, total, shares, used_away),
+                     (f" {fmt(used)}/{fmt(total)}", None))  # fmt: skip
+        if used_away:
+            line.add(f" · {fmt(used_away)} {verb} outside dibs", "2")
+        if gpu_name:
+            line.add(f"  {gpu_name}", "2")
         lines.append(line)
     lines.append(_Line())
 

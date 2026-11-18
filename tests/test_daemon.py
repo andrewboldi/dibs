@@ -1077,3 +1077,66 @@ def test_dibs_show_says_how_busy_the_machine_was_beside_a_timing_run(make_daemon
     text = render_show(d.show(job_id)["job"], now[0])
     assert re.search(r"beside it +other programs kept 0.8 cores busy on average, at most 1.5", text), text
     go.touch()
+
+
+def _busy_outside(d, now, busy, cpu, *, job_cores, outside_cores, steps):
+    """Advance 5 s at a time: the job keeps job_cores busy, programs outside dibs outside_cores."""
+    for _ in range(steps):
+        now[0] += 5.0
+        busy[0] += (job_cores + outside_cores) * 5.0
+        if cpu is not None:
+            used = float(cpu.read_text().split()[1]) / 1e6 if cpu.exists() else 0.0
+            cpu.write_text(f"usage_usec {int((used + job_cores * 5.0) * 1e6)}\n")
+        d.tick()
+
+
+def test_snapshot_says_how_many_cores_are_busy_outside_dibs(make_daemon, tmp_path, monkeypatch):
+    # Issue #120: a program outside dibs kept most cores busy while dibs top showed 7 of 24 reserved.
+    now, busy = [time.time()], [0.0]
+    d = make_daemon(clock=lambda: now[0], cpu_busy=lambda: busy[0])
+    job_id, stat, go = _job_holding(d, tmp_path, monkeypatch, GiB)
+    cpu = stat.parent / "cpu.stat"
+    cpu.write_text("usage_usec 0\n")
+    assert d.snapshot()["outside"]["cpus"] is None  # not measured yet
+    _busy_outside(d, now, busy, cpu, job_cores=2, outside_cores=12, steps=4)
+    assert d.snapshot()["outside"]["cpus"] == pytest.approx(12.0)
+    go.touch()
+
+
+def test_cores_busy_outside_dibs_are_unknown_when_a_jobs_own_use_cant_be_read(make_daemon, tmp_path, monkeypatch):
+    # Never count a job's own work as outside dibs.
+    now, busy = [time.time()], [0.0]
+    d = make_daemon(clock=lambda: now[0], cpu_busy=lambda: busy[0])
+    job_id, stat, go = _job_holding(d, tmp_path, monkeypatch, GiB)  # no cpu.stat to read
+    _busy_outside(d, now, busy, None, job_cores=2, outside_cores=1, steps=4)
+    assert d.snapshot()["outside"]["cpus"] is None
+    go.touch()
+
+
+def test_cores_busy_outside_dibs_restart_when_a_job_ends_or_the_machine_sleeps(make_daemon, tmp_path, monkeypatch):
+    now, busy, slept = [time.time()], [0.0], [0.0]
+    d = make_daemon(clock=lambda: now[0], cpu_busy=lambda: busy[0], slept=lambda: slept[0])
+    job_id, stat, go = _job_holding(d, tmp_path, monkeypatch, GiB)
+    cpu = stat.parent / "cpu.stat"
+    cpu.write_text("usage_usec 0\n")
+    _busy_outside(d, now, busy, cpu, job_cores=2, outside_cores=4, steps=3)
+    assert d.snapshot()["outside"]["cpus"] == pytest.approx(4.0)
+    go.touch()
+    run_until(d, lambda: job(d, job_id).state == State.DONE)
+    _busy_outside(d, now, busy, None, job_cores=0, outside_cores=3, steps=1)
+    assert d.snapshot()["outside"]["cpus"] is None  # the job's last seconds aren't known
+    _busy_outside(d, now, busy, None, job_cores=0, outside_cores=3, steps=1)
+    assert d.snapshot()["outside"]["cpus"] == pytest.approx(3.0)
+    slept[0] += 600.0  # the machine slept
+    _busy_outside(d, now, busy, None, job_cores=0, outside_cores=3, steps=1)
+    assert d.snapshot()["outside"]["cpus"] is None
+
+
+def test_snapshot_shows_the_ram_in_use_outside_dibs_that_waiting_jobs_are_told(make_daemon, tmp_path):
+    # The RAM bar draws the same figure the planner subtracts and the reasons quote.
+    d = make_daemon(meminfo=lambda: (16 * GiB, 10 * GiB))
+    big = submit(d, tmp_path, [PY, "-c", "pass"], mem=8 * GiB)
+    d.tick()
+    snap = d.snapshot()
+    assert snap["outside"]["mem"] == 10 * GiB
+    assert "10G in use outside dibs" in next(j for j in snap["jobs"] if j["id"] == big)["waiting_for"]

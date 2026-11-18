@@ -25,7 +25,10 @@ Every queued job gets a place on a timeline: the earliest moment it fits for its
 run, around the running jobs and the places already given to the jobs ahead of it. A small job
 whose place is "now" starts now, so gaps get filled without delaying anyone. A job past its
 estimate is assumed to need another 10% of it (at least a minute), and nothing is ever stopped for
-running long: the estimate only orders the queue. `dibs top` draws the timeline live.
+running long: the estimate only orders the queue. `dibs top` draws the timeline live. Its bars
+show, for CPU, RAM and each GPU, what jobs reserved (in their colours), what programs outside dibs
+use (grey) and what's free. RAM in use outside dibs is never handed out; CPU busy outside dibs is
+only shown, since dibs still starts a job on cores another program keeps busy.
 
 **Priority.** `--priority N` (1 to 10, default 5) lets an agent say a job is urgent. A higher
 priority makes the job count as shorter in line (at 10, a tenth of its estimate), so it goes ahead
