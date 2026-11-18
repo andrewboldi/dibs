@@ -653,6 +653,27 @@ def test_dibs_show_lists_the_tries_that_failed_for_a_resource_reason(daemon, tmp
     assert re.search(r"try 1 +killed: went over its 2G RAM reservation; retrying with --mem 3G", text), text
 
 
+def test_a_job_gets_its_own_temp_folder_and_dibs_deletes_it_when_the_job_ends(daemon, tmp_path):
+    # Issue #89: TMPDIR is a fresh folder of the job's own, and nothing in it outlives the job.
+    script = "import os, tempfile; d = tempfile.gettempdir(); open(os.path.join(d, 'scratch'), 'w').write('x'); print(d)"
+    job_id = submit(daemon, tmp_path, [PY, "-c", script])
+    run_until(daemon, lambda: finished(daemon, job_id))
+    folder = open(job(daemon, job_id).output).read().strip()
+    assert os.path.basename(folder) == f"dibs-{daemon.paths.instance}-job-{job_id}"
+    assert not os.path.exists(folder)
+
+
+def test_recovery_sweeps_temp_folders_of_jobs_that_ended(make_daemon, tmp_path):
+    from dibs import launcher as dl
+
+    d = make_daemon()
+    orphan = dl.job_tmp(d.paths, 999)
+    orphan.mkdir(parents=True)
+    (orphan / "scratch").write_text("x")
+    d.recover()
+    assert not orphan.exists()
+
+
 def test_submit_reports_earlier_runs_of_the_same_command(daemon, tmp_path):
     # Issue #31: agents guess their requests; dibs tells them what the same command used before.
     first = submit(daemon, tmp_path, [PY, "-c", "pass"])

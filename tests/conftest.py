@@ -97,6 +97,7 @@ def make_daemon(tmp_path):
         if not d.closed:
             stop_everything(d)
             d.close()
+        launcher.sweep_job_tmps(d.paths, keep=())
 
 
 @pytest.fixture

@@ -5,12 +5,14 @@ that restarting dibs never touches running jobs. Where systemd allows it without
 the job run in their own scope with MemoryMax set to the job's RAM reservation.
 """
 
+import getpass
 import json
 import os
 import shutil
 import subprocess
 import sys
-from collections.abc import Mapping
+import tempfile
+from collections.abc import Collection, Mapping
 from pathlib import Path
 
 from dibs import procs
@@ -66,7 +68,25 @@ def unit_name(instance: str, job_id: int) -> str:
     return f"dibs-{instance}-job-{job_id}"
 
 
-def job_env(job: Job, instance: str, vendor: str = "nvidia") -> dict[str, str]:
+def job_tmp(paths: Paths, job_id: int) -> Path:
+    """The job's own temp folder, under the system temp directory, deleted when the job ends (#89)."""
+    return Path(tempfile.gettempdir()) / f"dibs-{paths.instance}-job-{job_id}"
+
+
+def remove_job_tmp(paths: Paths, job_id: int) -> None:
+    shutil.rmtree(job_tmp(paths, job_id), ignore_errors=True)
+
+
+def sweep_job_tmps(paths: Paths, keep: Collection[int]) -> None:
+    """Delete this dibs's job temp folders whose jobs aren't running (left by a crash or a reboot)."""
+    prefix = f"dibs-{paths.instance}-job-"
+    for entry in Path(tempfile.gettempdir()).glob(prefix + "*"):
+        job_id = entry.name[len(prefix):]
+        if job_id.isdigit() and int(job_id) not in keep:
+            shutil.rmtree(entry, ignore_errors=True)
+
+
+def job_env(job: Job, instance: str, vendor: str = "nvidia", tmp: Path | None = None) -> dict[str, str]:
     """The submitter's environment, plus what the job was granted. `vendor` is the machine's GPU
     vendor: NVIDIA jobs get CUDA_VISIBLE_DEVICES, AMD jobs ROCR_VISIBLE_DEVICES (ROCm's recommended
     variable on Linux; it hides GPUs from the HSA runtime, under HIP, OpenCL and everything else)."""
@@ -90,6 +110,14 @@ def job_env(job: Job, instance: str, vendor: str = "nvidia") -> dict[str, str]:
     env["DIBS_MEM"] = str(job.request.mem)
     env["DIBS_VRAM"] = str(job.request.vram)
     env["DIBS_GPUS"] = ",".join(str(g) for g in job.gpu_ids)
+    if tmp is not None and "TMPDIR" not in env:
+        # Its own temp folder, deleted when it ends, so scratch files a killed job leaves behind don't
+        # hold RAM where /tmp is a tmpfs (#89). Tools that cache under the temp directory keep their
+        # usual place, so compiled kernels aren't thrown away with each job.
+        user = env.get("USER") or getpass.getuser()
+        env.setdefault("TORCHINDUCTOR_CACHE_DIR", str(tmp.parent / f"torchinductor_{user}"))
+        for var in ("TMPDIR", "TMP", "TEMP"):
+            env[var] = str(tmp)
     return env
 
 
@@ -105,12 +133,14 @@ def launch(job: Job, paths: Paths, *, use_systemd: bool, vendor: str = "nvidia")
     """Start the job's shim, detached. Returns (shim pid, its start ticks, systemd unit or None)."""
     job_dir = paths.job_dir(job.id)
     job_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    tmp = job_tmp(paths, job.id)
+    tmp.mkdir(mode=0o700, parents=True, exist_ok=True)
     unit = unit_name(paths.instance, job.id) if use_systemd else None
     spec = {
         "job_id": job.id,
         "argv": job.argv,
         "cwd": job.cwd,
-        "env": job_env(job, paths.instance, vendor),
+        "env": job_env(job, paths.instance, vendor, tmp=tmp),
         "cpu_ids": job.cpu_ids,
         "output": job.output,
         "mem": job.request.mem,

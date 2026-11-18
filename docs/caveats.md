@@ -33,9 +33,10 @@ What dibs doesn't do, or does only partly. Each item says what happens and what 
   running keep their reservations.
 - **Files in a folder kept in RAM count as RAM.** What a job writes to /dev/shm, or to /tmp where
   /tmp is a tmpfs, counts against its RAM reservation; a job killed at its limit says so when such
-  files were a big part of it. Files a job leaves there keep holding RAM after it ends, and dibs then
-  counts them as in use outside dibs, until someone deletes them. Point big scratch files at disk
-  (most tools follow TMPDIR).
+  files were a big part of it. Each job's TMPDIR is a folder of its own that dibs deletes when the job
+  ends; files a job writes elsewhere in such a folder keep holding RAM after it ends, and dibs counts
+  them as in use outside dibs until someone deletes them. A job whose scratch is bigger than its RAM
+  can point TMPDIR at a disk with room for it.
 - **A laptop's sleep pauses the jobs, not the queue's clock.** Run times, overruns and predictions
   leave out the time the machine slept, but places in line are set by the wall clock: after a long
   sleep every queued job has waited its estimate, so newer jobs can't pass any of them. A job dibs
