@@ -223,6 +223,26 @@ def test_queue_into_closed_pipe(dibs):
     assert "Traceback" not in result.stderr
 
 
+def test_a_client_that_hangs_up_before_its_answer_leaves_the_daemon_running(dibs):
+    # Issue #82: the CLI resets SIGPIPE to its default for `dibs queue | head`, and `dibs daemon run`
+    # kept it, so the daemon died without a trace when it answered a client that had already gone,
+    # such as a `dibs wait` its agent's command timeout killed.
+    import socket
+
+    from dibs import build_id
+
+    job_id = js(dibs("submit", *RES, "--json", "--", "sleep", "30", check=0))["id"]
+    before = dibs("daemon", "status", check=0).stdout
+    client = socket.socket(socket.AF_UNIX)
+    client.connect(os.path.join(dibs.env["DIBS_HOME"], "dibs.sock"))
+    request = {"op": "wait", "ids": [job_id], "timeout": 0.5, "build": build_id()}
+    client.sendall(json.dumps(request).encode() + b"\n")
+    client.close()  # gone before the answer comes
+    time.sleep(1.5)
+    assert dibs("daemon", "status").stdout == before  # still running, the same pid
+    dibs("cancel", str(job_id), check=0)
+
+
 def test_session_from_claude_env(dibs):
     env = {"CLAUDE_CODE_SESSION_ID": "abcd1234-5678-90ab-cdef-1234567890ab"}
     job = js(dibs("submit", *RES, "--json", "--", "true", env=env, check=0))

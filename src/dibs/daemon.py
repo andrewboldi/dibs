@@ -769,6 +769,9 @@ def _setup_logging(paths: Paths) -> None:
 def run_daemon(env: Mapping[str, str] = os.environ) -> int:
     """Run the daemon in this process until it's told to stop. Returns an exit code."""
     global _lock_fd
+    # The CLI sets SIGPIPE to its default for `dibs queue | head`. The daemon must outlive a client
+    # that hangs up before its answer: then writing it raises BrokenPipeError instead (#82).
+    signal.signal(signal.SIGPIPE, signal.SIG_IGN)
     paths = get_paths(env)
     ensure_dirs(paths)
     fd = os.open(paths.lock, os.O_RDWR | os.O_CREAT, 0o600)
