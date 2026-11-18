@@ -127,3 +127,110 @@ def test_tick_labels_are_distinct(snapshot):
     axis = next(l for l in render_top(longer, width=160, height=30, color=False).splitlines() if "PLAN" in l)
     labels = axis.split()[2:]
     assert len(labels) == len(set(labels)) and "+1m10s" in labels
+
+
+def _crowded(snapshot):
+    """Issue #118: ids, a VRAM cell and a start time at their longest, and a reason too long to fit."""
+    return {**snapshot, "jobs": [
+        view(599, "cls-F-wd2", State.RUNNING, 4, int(2.5 * GiB), int(4.7 * GiB), 3600, started=NOW - 60,
+             cpu_ids=[0, 1, 2, 3], gpu_ids=[0], expected_end=NOW + 4140, over_estimate=0),
+        view(1234, "a-rather-long-job-name", State.QUEUED, 24, 12 * GiB, int(4.5 * GiB), 600, position=1,
+             predicted_start=NOW + 4560, predicted_end=NOW + 5160,
+             waiting_for="needs 24 CPUs (17 free), 12G RAM (172M free, 21.7G in use outside dibs)"),
+    ]}  # fmt: skip
+
+
+def test_columns_never_run_together(snapshot):
+    text = render_top(_crowded(snapshot), width=200, height=40, color=False)
+    assert re.search(r"#599 +cls-F-wd2", text)
+    assert re.search(r"#1234 +a-rather-lon", text)
+    assert re.search(r"4\.7G +ends in 1h9m", text)
+    assert re.search(r"starts in 1h16m +needs 24 CPUs", text)
+
+
+@pytest.mark.parametrize("color", [False, True])
+def test_a_line_cut_at_the_edge_ends_with_an_ellipsis(snapshot, color):
+    text = ANSI.sub("", render_top(_crowded(snapshot), width=100, height=40, color=color))
+    row = next(line for line in text.splitlines() if "#1234" in line)
+    assert len(row) <= 100 and row.endswith("…"), row
+    assert not row.endswith(" …") and not row.endswith("……")
+    for width in range(95, 140):  # wherever it's cut, never just after a space, comma or bracket
+        text = render_top(_crowded(snapshot), width=width, height=40, color=False)
+        cut = next(line for line in text.splitlines() if "#1234" in line)
+        assert not re.search(r"[\s,(]…$", cut), cut
+
+
+def test_sections_say_how_many_jobs_they_hold(snapshot):
+    text = render_top(snapshot, width=120, height=40, color=False)
+    assert re.search(r"^ RUNNING +2\b", text, re.M) and re.search(r"^ QUEUED +2\b", text, re.M)
+
+
+def test_resource_numbers_line_up_under_their_labels(snapshot):
+    lines = render_top(snapshot, width=120, height=40, color=False).splitlines()
+    head = next(line for line in lines if line.startswith(" RUNNING"))
+    ends = {label: re.search(rf"\b{label}\b", head).end() for label in ("CPUs", "RAM", "VRAM")}
+    cells = {"train": ("4", "8G", "6G"), "tokenize": ("4", "4G", "-"), "eval": ("2", "4G", "8G"),
+             "finetune": ("8", "16G", "8G")}  # fmt: skip
+    for name, values in cells.items():
+        row = next(line for line in lines if f" {name} " in line)
+        for label, value in zip(("CPUs", "RAM", "VRAM"), values):
+            assert row[ends[label] - len(value) : ends[label]] == value, (name, label, row)
+
+
+def test_a_cut_session_label_never_ends_in_a_piece_of_its_session(snapshot):
+    # One session often works in several project folders, so the project part is what tells rows
+    # apart: cut from the end as before, but not to "project·…" or "project·42…".
+    def shown(label):
+        jobs = [{**snapshot["jobs"][0], "session_label": label}]
+        return render_top({**snapshot, "jobs": jobs}, width=120, height=40, color=False)
+
+    assert "project-ab…" in shown("project-ab·4249") and "·4" not in shown("project-ab·4249")
+    assert "a-long-projec…" in shown("a-long-project-name·4249")
+    assert "proj·s1" in shown("proj·s1")
+
+
+def test_the_gpu_index_shows_only_when_there_are_several(snapshot):
+    assert "6G@0" not in render_top(snapshot, width=120, height=40, color=False)
+    gpus = snapshot["capacity"]["gpus"] + [{"index": 1, "uuid": "GPU-1", "name": "Fake GPU", "vram": 8 * GiB}]
+    two = {**snapshot, "capacity": {**snapshot["capacity"], "gpus": gpus}}
+    assert "6G@0" in render_top(two, width=120, height=40, color=False)
+
+
+def test_plan_bars_start_under_now(snapshot):
+    lines = render_top(snapshot, width=120, height=40, color=False).splitlines()
+    axis = next(line for line in lines if line.startswith(" PLAN"))
+    bar = next(line for line in lines[lines.index(axis) :] if " train " in line)
+    assert bar.index("█") == axis.index("now")
+
+
+def test_a_reason_shows_only_when_enough_of_it_fits(snapshot):
+    def row(width):
+        lines = render_top(snapshot, width=width, height=40, color=False).splitlines()
+        return next(line for line in lines if " eval " in line)
+
+    assert row(80).endswith("starts in 15m"), row(80)  # not a stub like "ne…"
+    assert row(100).endswith("needs 8G VRAM (2G free)"), row(100)
+
+
+def test_job_colours_are_fixed_hues_that_no_terminal_theme_turns_grey():
+    # Issue #118: the 16 basic colours follow the terminal's theme, and some themes (Solarized)
+    # make the bright ones greys, so several jobs looked alike. 256-colour hues don't change.
+    from dibs.render import _PALETTE, _job_color
+
+    assert all(re.fullmatch(r"38;5;\d+", c) for c in _PALETTE) and len(set(_PALETTE)) == len(_PALETTE)
+    assert all(_job_color(i) != _job_color(i + 1) for i in range(100))
+
+
+def test_a_coloured_dot_marks_each_job_and_its_text_stays_plain(snapshot):
+    from dibs.render import _job_color
+
+    lines = render_top(snapshot, width=120, height=40, color=True).splitlines()
+    row = next(line for line in lines if " train " in ANSI.sub("", line))
+    assert f"\x1b[{_job_color(1)}m●\x1b[0m #1 " in row
+    assert f"\x1b[{_job_color(1)}m#1" not in row and f"\x1b[{_job_color(1)}mtrain" not in "".join(lines)
+
+
+def test_neighbouring_jobs_in_a_bar_are_set_apart(snapshot):
+    cpu = next(line for line in render_top(snapshot, width=120, height=40, color=False).splitlines()
+               if line.startswith(" CPU"))  # fmt: skip
+    assert re.search(r"█+▌█+░", cpu), cpu  # two jobs' segments, a half-cell gap between them
