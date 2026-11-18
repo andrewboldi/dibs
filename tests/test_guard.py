@@ -240,6 +240,7 @@ EARLY = ", in its first minute, so it was likely still growing"
 )
 def test_vram_overuse_stops_job(world, tmp_path, used, ran, reason):
     d, backend = world()
+    _neighbour(d, tmp_path, 2 * GiB)  # holds the rest of the GPU, so going over collides with it (#88)
     resp = d.submit(
         {
             "argv": SLEEPER,
@@ -278,6 +279,13 @@ def _gpu_job(d, tmp_path, vram, argv, **extra):
     return resp["job"]["id"]
 
 
+def _neighbour(d, tmp_path, vram, argv=None):
+    """Another running job holding vram of the GPU: its own use isn't reported, so it holds its reservation."""
+    job_id = _gpu_job(d, tmp_path, vram, argv or [PY, "-c", "import time; time.sleep(60)"])
+    run_until(d, lambda: d.store.get_job(job_id).state == State.RUNNING)
+    return job_id
+
+
 def _job_python_pid(d, job_id):
     job = d.store.get_job(job_id)
     return wait_for(lambda: next((p for p in launcher.job_pids(d.store.get_job(job_id)) if (procs.cmdline(p) or [""])[0] == PY), None))
@@ -287,6 +295,7 @@ def test_a_job_stopped_for_vram_is_retried_with_the_advised_size(world, tmp_path
     # Issue #84: dibs runs a job stopped for going over its VRAM reservation again, at the size the
     # stop advises, with the same id and place in line, so its agent needn't work out what happened.
     d, backend = world()
+    _neighbour(d, tmp_path, 2 * GiB, [PY, "-c", "import time; time.sleep(2)"])  # leaves soon after the stop
     job_id = _gpu_job(d, tmp_path, 6 * GiB, [PY, "-c", "import time; time.sleep(1.5)"])
     tag = d.store.get_job(job_id).tag
     backend.procs = [GpuProcess(_job_python_pid(d, job_id), 0, 6 * GiB + MiB)]
@@ -304,16 +313,44 @@ def test_a_job_stopped_for_vram_is_retried_with_the_advised_size(world, tmp_path
 
 def test_a_job_is_retried_at_most_twice(world, tmp_path):
     d, backend = world()
-    job_id = _gpu_job(d, tmp_path, 2 * GiB, [PY, "-c", "import time; time.sleep(30)"])
-    for _ in range(3):
-        j = d.store.get_job(job_id)
-        backend.procs = [GpuProcess(_job_python_pid(d, job_id), 0, j.request.vram + MiB)]
-        tries = len(j.attempts)
-        run_until(d, lambda: len(d.store.get_job(job_id).attempts) > tries or d.store.get_job(job_id).state == State.FAILED)
+    _neighbour(d, tmp_path, 2 * GiB)
+    job_id = _gpu_job(d, tmp_path, 6 * GiB, [PY, "-c", "import time; time.sleep(30)"])
+    pid = _job_python_pid(d, job_id)
     j = d.store.get_job(job_id)
-    assert j.state == State.FAILED and len(j.attempts) == 2
-    assert [a["request"]["vram"] for a in j.attempts] == [2 * GiB, int(3.5 * GiB)]  # 2G and 1M, plus 1G, rounded up
-    assert j.request.vram == 5 * GiB and j.reason.endswith("; resubmit with --vram 6.5G")  # the third run, out of retries
+    j.attempts = [{"reason": "an earlier try"}, {"reason": "another"}]  # retried twice already
+    d.store.update_job(j)
+    backend.procs = [GpuProcess(pid, 0, 6 * GiB + MiB)]
+    run_until(d, lambda: d.store.get_job(job_id).state == State.FAILED)
+    j = d.store.get_job(job_id)
+    assert len(j.attempts) == 2 and j.reason.endswith("; resubmit with --vram all")
+
+
+def test_a_job_may_borrow_vram_nobody_reserved(world, tmp_path):
+    # Issue #88: a job that went 0.1G over its VRAM reservation lost 50 minutes of work while 5G sat
+    # unreserved. It may use memory nobody reserved, and the planner counts it at what it uses.
+    d, backend = world()
+    job_id = _gpu_job(d, tmp_path, 3 * GiB, [PY, "-c", "import time; time.sleep(60)"])
+    backend.procs = [GpuProcess(_job_python_pid(d, job_id), 0, int(3.6 * GiB))]
+    for _ in range(5):
+        d.tick()
+    assert d.store.get_job(job_id).state == State.RUNNING
+    waiting = _gpu_job(d, tmp_path, int(4.6 * GiB), [PY, "-c", "pass"])  # fits beside 3G, not beside 3.6G
+    d.tick()
+    assert d.store.get_job(waiting).state == State.QUEUED
+
+
+def test_a_borrower_is_stopped_when_it_reaches_memory_another_job_holds(world, tmp_path):
+    d, backend = world()
+    _neighbour(d, tmp_path, 2 * GiB)
+    job_id = _gpu_job(d, tmp_path, 3 * GiB, [PY, "-c", "import time; time.sleep(60)"], retry=False)
+    pid = _job_python_pid(d, job_id)
+    backend.procs = [GpuProcess(pid, 0, int(5.9 * GiB))]  # within the 3G nobody holds: fine
+    for _ in range(3):
+        d.tick()
+    assert d.store.get_job(job_id).state == State.RUNNING
+    backend.procs = [GpuProcess(pid, 0, int(6.1 * GiB))]  # into the neighbour's 2G
+    run_until(d, lambda: d.store.get_job(job_id).state == State.FAILED)
+    assert d.store.get_job(job_id).reason.startswith("stopped: used 6.1G VRAM on GPU 0, reserved 3G")
 
 
 def test_stop_message_text():
