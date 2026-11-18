@@ -340,6 +340,8 @@ _LOAD_SGR = ("38;5;29", "38;5;136", "38;5;167")  # the load row with under half 
 _SPARK = "▁▂▃▄▅▆▇█"
 # The job rows' columns, each followed by a space that's always there (#118)
 _ID_W, _NAME_W, _SESSION_W, _WHEN_W, _PROGRESS_W = 4, 13, 14, 16, 10  # "starts in 12h30m" is 16
+_NAME_MAX = 24  # names get up to this much room, as the width allows (#143)
+_PLAN_MIN = 30  # what names leave a row for its bar or timeline and its reason
 _SESSIONS_FROM = 110  # panels at least this wide inside (terminals of 114 columns) show each job's session
 _REASON_MIN = 10  # a reason shows only when this much of it fits
 _METER_MAX = 60  # the widest a meter gets
@@ -513,27 +515,46 @@ def _tick(seconds: float) -> str:
     return format_duration(s)
 
 
-def _grid(several: bool, sessions: bool) -> tuple[int, int, int]:
+def _grid(several: bool, sessions: bool, name_w: int = _NAME_W) -> tuple[int, int, int]:
     """Inside a job panel: where the CPU, RAM and VRAM numbers start, the VRAM column's width, and
     where the progress bar or the plan's timeline starts."""
-    numbers = 2 + _ID_W + 1 + _NAME_W + 1 + (_SESSION_W + 1 if sessions else 0)
+    numbers = 2 + _ID_W + 1 + name_w + 1 + (_SESSION_W + 1 if sessions else 0)
     vram = 8 if several else 5
     return numbers, vram, numbers + 3 + 1 + 5 + 1 + vram + 2 + _WHEN_W + 2
 
 
-def _job_columns(job: dict, dot: str, several: bool, sessions: bool) -> _Line:
+def _name_width(jobs: list[dict], inner: int, several: bool, sessions: bool) -> int:
+    """The name column: as wide as the longest name shown, from _NAME_W up to _NAME_MAX, leaving each
+    row _PLAN_MIN for its bar or timeline and its reason (#143)."""
+    longest = max((len(j["name"]) for j in jobs), default=0)
+    room = inner - _grid(several, sessions, 0)[2] - _PLAN_MIN
+    return max(_NAME_W, min(longest, _NAME_MAX, room))
+
+
+def _short_reason(job: dict) -> str:
+    """Why a job waits, in a few words: what it lacks (its sizes are in its row, and the meters say
+    what's in use), or the job ahead in line it would delay; else the planner's words."""
+    if job.get("behind") is not None:
+        return f"behind #{job['behind']}"
+    if job.get("lacks"):
+        return "needs " + ", ".join(job["lacks"])
+    # The mem meter already says how much is in use outside dibs; every row repeated it.
+    return re.sub(r", [\d.]+[KMGT]? in use outside dibs", "", job.get("waiting_for", ""))
+
+
+def _job_columns(job: dict, dot: str, several: bool, sessions: bool, name_w: int = _NAME_W) -> _Line:
     req = job["request"]
     line = _Line((dot, _job_color(job["id"])),
-                 (f" {str(job['id']).ljust(_ID_W)} {_short(job['name'], _NAME_W).ljust(_NAME_W)} ", None))  # fmt: skip
+                 (f" {str(job['id']).ljust(_ID_W)} {_short(job['name'], name_w).ljust(name_w)} ", None))  # fmt: skip
     if sessions:
         line.add(_short_label(job["session_label"], _SESSION_W).ljust(_SESSION_W) + " ", "2")
     vram = 8 if several else 5
     return line.add(f"{req['cpus']:>3} {format_size(req['mem']):>5} {_top_vram(job, several):>{vram}}  ", None)
 
 
-def _running_row(job: dict, now: float, several: bool, sessions: bool) -> _Line:
+def _running_row(job: dict, now: float, several: bool, sessions: bool, name_w: int = _NAME_W) -> _Line:
     """A running job: its resources, when it ends, and a bar of its time so far against its estimate."""
-    line = _job_columns(job, "●", several, sessions)
+    line = _job_columns(job, "●", several, sessions, name_w)
     over, estimate = job.get("over_estimate") or 0, job["request"]["time"]
     if over:
         line.add(f"over by {format_duration(over)}".ljust(_WHEN_W) + "  ", _WARN_SGR)
@@ -592,7 +613,8 @@ def _frame(snapshot: dict, width: int, rows_per_list: int) -> list[_Line]:
     queued = [j for j in snapshot["jobs"] if j["state"] == "queued"]
     inner = max(1, width - 4)
     several, sessions = len(cap["gpus"]) > 1, inner >= _SESSIONS_FROM
-    numbers, vram_w, graphic = _grid(several, sessions)
+    name_w = _name_width(running[:rows_per_list] + queued[:rows_per_list], inner, several, sessions)
+    numbers, vram_w, graphic = _grid(several, sessions, name_w)
     lines = _machine(snapshot, width)
     if not running and not queued:
         lines += _panel(width, [_Line(("Nothing running or waiting.", None)),
@@ -603,7 +625,7 @@ def _frame(snapshot: dict, width: int, rows_per_list: int) -> list[_Line]:
         return [(f"{len(jobs) - rows_per_list} more", "2")] if len(jobs) > rows_per_list else []
 
     if running:
-        rows = [_running_row(j, now, several, sessions) for j in running[:rows_per_list]]
+        rows = [_running_row(j, now, several, sessions, name_w) for j in running[:rows_per_list]]
         # Cell x of a border sits above column x - 1 inside the panel.
         labels = [(numbers, "cpus"), (numbers + 7, "ram"), (numbers + 7 + vram_w, "vram")]
         lines += _panel(width, rows, title=[("running", "1"), (str(len(running)), "2")], labels=labels,
@@ -616,7 +638,7 @@ def _frame(snapshot: dict, width: int, rows_per_list: int) -> list[_Line]:
         x = lambda t: int((max(t, now) - now) / span * (timeline - 1))  # noqa: E731
         rows = []
         for job in queued[:rows_per_list]:
-            line = _job_columns(job, "○", several, sessions)
+            line = _job_columns(job, "○", several, sessions, name_w)
             start = job.get("predicted_start")
             if start is None:
                 line.add("can't run".ljust(_WHEN_W) + "  ", None)
@@ -625,8 +647,7 @@ def _frame(snapshot: dict, width: int, rows_per_list: int) -> list[_Line]:
                          .ljust(_WHEN_W) + "  ", None)  # fmt: skip
                 x0, x1 = x(start), min(timeline, max(x(start) + 1, x(job["predicted_end"])))
                 line.add(" " * x0).add("━" * (x1 - x0), _job_color(job["id"]))
-            # The mem meter already says how much is in use outside dibs; every row repeated it.
-            why = re.sub(r", [\d.]+[KMGT]? in use outside dibs", "", job.get("waiting_for", ""))
+            why = _short_reason(job)
             shown = _Line((why, None)).fit(max(0, inner - len(line) - 2))
             if why and len(shown) >= min(len(why), _REASON_MIN):  # enough of it, or none
                 line.add("  " + why, "2")

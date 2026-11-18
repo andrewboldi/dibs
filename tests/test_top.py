@@ -335,3 +335,24 @@ def test_reasons_leave_out_what_the_mem_meter_already_says(snapshot):
     jobs = snapshot["jobs"][:2] + [{**snapshot["jobs"][2], "waiting_for": why}] + snapshot["jobs"][3:]
     row = inside(lines_of({**snapshot, "jobs": jobs}, width=160), " eval ")
     assert row.rstrip().endswith("needs 6G RAM (268M free), 4G VRAM (2.3G free)"), row
+
+
+def test_job_names_get_the_room_the_long_reasons_had(snapshot):
+    # Issue #143: names were cut to 13 characters, so eval-model_small and eval-model_base both read
+    # "eval-model_…", while a waiting job's reason filled the rest of its row.
+    jobs = [{**snapshot["jobs"][2], "name": "eval-model_small", "lacks": [], "behind": 2,
+             "waiting_for": "would delay #2, which is ahead in line"},
+            {**snapshot["jobs"][3], "name": "eval-model_base", "lacks": ["RAM", "VRAM"], "behind": None,
+             "waiting_for": "needs 16G RAM (220M free), 8G VRAM (2G free)"}]  # fmt: skip
+    lines = lines_of({**snapshot, "jobs": snapshot["jobs"][:2] + jobs}, width=120)
+    small, base = inside(lines, "eval-model_small").rstrip(), inside(lines, "eval-model_base").rstrip()
+    assert small.endswith("behind #2") and base.endswith("needs RAM, VRAM")
+    assert "which is ahead in line" not in small and "free" not in base
+
+
+def test_a_name_too_long_for_the_room_is_cut_and_rows_still_fit(snapshot):
+    jobs = [{**snapshot["jobs"][2], "name": "x" * 60, "lacks": ["VRAM"], "behind": None}]
+    for width in (60, 80, 100, 120, 160):
+        lines = lines_of({**snapshot, "jobs": snapshot["jobs"][:2] + jobs}, width=width)
+        assert all(len(line) <= width for line in lines), width
+        assert "x" * (20 if width >= 120 else 12) + "…" in inside(lines, "xxxxx"), width

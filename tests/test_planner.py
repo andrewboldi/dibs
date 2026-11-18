@@ -279,3 +279,17 @@ def test_an_exclusive_job_gets_only_the_cpus_and_gpus_it_asked_for():
     c = cap(cpus=8, gpus=(8 * GiB, 8 * GiB))
     p = plan(c, [], [queued(1, req(cpus=2, gpus=1, vram=2 * GiB, exclusive=True))], NOW)
     assert p.starts == [Start(1, (0, 1), (0,))]
+
+
+def test_a_waiting_job_says_in_a_word_what_it_lacks_or_whom_it_would_delay():
+    # dibs top shows "needs RAM, VRAM" or "behind #2" instead of the whole reason (#143).
+    head = queued(2, req(cpus=8, time=100), tag=0)
+    small = queued(3, req(cpus=2, time=300), tag=1)
+    p = plan(cap(), [_six_cpus_busy_until_100()], [head, small], NOW)
+    assert (p.predictions[3].lacks, p.predictions[3].behind) == ((), 2)
+    assert (p.predictions[2].lacks, p.predictions[2].behind) == (("CPUs",), None)
+    big = queued(4, req(cpus=1, mem=40 * GiB, gpus=1, vram=9 * GiB), tag=0)
+    assert plan(cap(), [], [big], NOW).predictions[4].lacks == ()  # can't fit this machine at all
+    hungry = queued(5, req(cpus=1, mem=30 * GiB, gpus=1, vram=6 * GiB), tag=0)
+    holder = running(6, req(cpus=1, mem=8 * GiB, gpus=1, vram=4 * GiB, time=200), [0], [0])
+    assert plan(cap(), [holder], [hungry], NOW).predictions[5].lacks == ("RAM", "VRAM")
