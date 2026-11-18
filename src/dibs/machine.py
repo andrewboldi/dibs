@@ -24,6 +24,7 @@ class Config:
     guard: str = "all"
     guard_allow: tuple[str, ...] = ()
     guard_desktop: bool = True  # leave alone GPU programs launched from the desktop (#92)
+    borrow_ram: bool = True  # plan RAM by what running jobs use, not only what they reserved (#86)
     agent_files: tuple[str, ...] = ()  # more instructions files for dibs setup (agent CLIs it doesn't know)
 
 
@@ -84,6 +85,10 @@ def load_config(path: Path) -> Config:
         elif key == "guard_desktop":
             if not isinstance(value, bool):
                 raise ConfigError("config setting 'guard_desktop' must be true or false")
+            fields[key] = value
+        elif key == "borrow_ram":
+            if not isinstance(value, bool):
+                raise ConfigError("config setting 'borrow_ram' must be true or false")
             fields[key] = value
         elif key == "agent_files":
             if not isinstance(value, list) or not all(isinstance(s, str) and s for s in value):

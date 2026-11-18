@@ -165,6 +165,21 @@ def memory_in_use(cgroup_path: str) -> tuple[int, int] | None:
     return stat["anon"] + shmem, shmem
 
 
+def memory_pressure() -> float:
+    """The share of the last 10 s in which some task waited for memory, in percent (PSI, "some
+    avg10"); 0 where the kernel doesn't report it."""
+    for line in (_read("/proc/pressure/memory") or "").splitlines():
+        if line.startswith("some "):
+            for field in line.split()[1:]:
+                key, _, value = field.partition("=")
+                if key == "avg10":
+                    try:
+                        return float(value)
+                    except ValueError:
+                        return 0.0
+    return 0.0
+
+
 def slept() -> float:
     """Seconds this machine has spent asleep (suspended) since it booted: CLOCK_BOOTTIME counts that
     time and CLOCK_MONOTONIC doesn't. 0 where there's no CLOCK_BOOTTIME."""

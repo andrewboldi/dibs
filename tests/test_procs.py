@@ -237,3 +237,11 @@ def test_children_forked_at_the_moment_of_the_stop_are_stopped_too(spawn, monkey
     finally:
         for pid in _survivors(marker):
             os.kill(pid, 9)
+
+
+def test_memory_pressure_reads_psi(monkeypatch):
+    text = "some avg10=12.50 avg60=3.00 avg300=1.00 total=123\nfull avg10=4.00 avg60=1.00 avg300=0.50 total=45\n"
+    monkeypatch.setattr(procs, "_read", lambda path, binary=False: text if path == "/proc/pressure/memory" else None)
+    assert procs.memory_pressure() == 12.5
+    monkeypatch.setattr(procs, "_read", lambda path, binary=False: None)
+    assert procs.memory_pressure() == 0.0

@@ -98,6 +98,12 @@ def main(argv: list[str]) -> int:
     if out is not None and not os.path.isdir(spec["cwd"]):
         reason = f"couldn't start: working directory {spec['cwd']} no longer exists"
     elif out is not None:
+        if spec.get("oom_score_adj") is not None:  # the command inherits it; raising it needs no privilege
+            try:
+                with open("/proc/self/oom_score_adj", "w") as f:
+                    f.write(str(spec["oom_score_adj"]))
+            except OSError:
+                pass
         try:
             command = subprocess.Popen(
                 spec["argv"],
@@ -121,7 +127,7 @@ def main(argv: list[str]) -> int:
         os.close(out)
 
     in_scope = bool(spec.get("unit"))
-    oom_killed, peak_mem, cpu_seconds = False, None, None
+    oom_killed, hit_limit, peak_mem, cpu_seconds = False, False, None, None
     if in_scope:
         usage = procs.keyed_numbers(_cgroup_file("cpu.stat")).get("usage_usec")
         cpu_seconds = usage / 1e6 if usage is not None else None
@@ -129,6 +135,8 @@ def main(argv: list[str]) -> int:
             key, _, count = line.partition(" ")
             if key == "oom_kill" and count.strip() not in ("", "0"):
                 oom_killed = True
+            if key == "oom" and count.strip() not in ("", "0"):
+                hit_limit = True  # its own limit; an OOM kill without this was the machine running out
         peak = _cgroup_file("memory.peak")
         if peak and peak.strip().isdigit():
             # memory.peak counts file cache; take off what's still cached, like the daemon's samples
@@ -141,6 +149,7 @@ def main(argv: list[str]) -> int:
             "ended": time.time(),
             "slept": procs.slept(),  # so the daemon can leave the time the machine slept out of the run time
             "oom_killed": oom_killed,
+            "hit_limit": hit_limit,
             "peak_mem": peak_mem,
             "cpu_seconds": cpu_seconds,
             "reason": reason,

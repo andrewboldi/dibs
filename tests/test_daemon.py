@@ -494,7 +494,7 @@ def _killed_for_ram_holding(d, tmp_path, monkeypatch, mem, anon, shmem):
     real_read_exit = launcher.read_exit
     monkeypatch.setattr(
         launcher, "read_exit",
-        lambda paths, i: (r := real_read_exit(paths, i)) and {**r, "exit_code": 137, "oom_killed": True},
+        lambda paths, i: (r := real_read_exit(paths, i)) and {**r, "exit_code": 137, "oom_killed": True, "hit_limit": True},
     )  # fmt: skip
     go.touch()
     run_until(d, lambda: finished(d, job_id))
@@ -612,7 +612,7 @@ def _oom_on_first_exit(monkeypatch, job_id):
         r = real_read_exit(paths, i)
         if r and i == job_id and not seen:
             seen.append(True)
-            return {**r, "exit_code": 137, "oom_killed": True}
+            return {**r, "exit_code": 137, "oom_killed": True, "hit_limit": True}  # at its own limit
         return r
 
     monkeypatch.setattr(launcher, "read_exit", read_exit)
@@ -682,6 +682,75 @@ def test_submit_tells_the_session_how_its_estimates_compared(daemon, tmp_path):
     resp = daemon.submit(req(tmp_path, [PY, "-c", "pass"], session="s1"))
     assert resp["estimates"]["jobs"] == 5 and resp["estimates"]["median"] < 0.05
     assert "estimates" not in daemon.submit(req(tmp_path, [PY, "-c", "pass"], session="s2"))  # too few to say
+
+
+def _borrowing(make_daemon, tmp_path, monkeypatch, *, ran, pressure=0.0, config=None):
+    """Job A reserves 12G of 16G and has used 2G after `ran` seconds; job B then asks for 8G."""
+    from dibs.machine import Config
+
+    now = [time.time()]
+    d = make_daemon(config=config or Config(), clock=lambda: now[0], meminfo=lambda: (16 * GiB, 2 * GiB),
+                    pressure=lambda: pressure)  # fmt: skip
+    a, stat, go = _job_holding(d, tmp_path, monkeypatch, 12 * GiB)
+    stat.write_text(f"anon {2 * GiB}\nshmem 0\n")
+    now[0] += 1
+    d.tick()
+    now[0] += ran
+    d.tick()
+    b = submit(d, tmp_path, [PY, "-c", "import time; time.sleep(3)"], mem=8 * GiB)
+    d.tick()
+    return d, a, b, go
+
+
+def test_ram_a_running_job_does_not_use_can_go_to_another_job(make_daemon, tmp_path, monkeypatch):
+    # Issue #86: agents reserve 2-4x the RAM their jobs use. After ten minutes, a job counts at its
+    # peak plus headroom (2G plus 1G here), so a job that fits in the rest starts, marked as borrowing.
+    d, a, b, go = _borrowing(make_daemon, tmp_path, monkeypatch, ran=700)
+    assert job(d, b).state == State.RUNNING and job(d, b).borrowed_ram
+    assert not job(d, a).borrowed_ram
+    go.touch()
+
+
+def test_a_young_job_without_history_counts_at_its_whole_reservation(make_daemon, tmp_path, monkeypatch):
+    d, a, b, go = _borrowing(make_daemon, tmp_path, monkeypatch, ran=300)  # it may still be growing
+    assert job(d, b).state == State.QUEUED
+    go.touch()
+
+
+def test_no_borrowing_under_memory_pressure_or_when_switched_off(make_daemon, tmp_path, monkeypatch):
+    from dibs.machine import Config
+
+    d, a, b, go = _borrowing(make_daemon, tmp_path, monkeypatch, ran=700, pressure=20.0)
+    assert job(d, b).state == State.QUEUED
+    go.touch()
+
+
+def test_borrowing_can_be_switched_off(make_daemon, tmp_path, monkeypatch):
+    from dibs.machine import Config
+
+    d, a, b, go = _borrowing(make_daemon, tmp_path, monkeypatch, ran=700, config=Config(borrow_ram=False))
+    assert job(d, b).state == State.QUEUED
+    go.touch()
+
+
+def test_a_borrower_killed_when_the_machine_ran_out_is_retried_without_borrowing(make_daemon, tmp_path, monkeypatch):
+    d, a, b, go = _borrowing(make_daemon, tmp_path, monkeypatch, ran=700)
+    real_read_exit = launcher.read_exit
+
+    def read_exit(paths, i):
+        r = real_read_exit(paths, i)
+        return {**r, "exit_code": 137, "oom_killed": True, "hit_limit": False} if r and i == b else r
+
+    monkeypatch.setattr(launcher, "read_exit", read_exit)
+    run_until(d, lambda: job(d, b).attempts)
+    j = job(d, b)
+    assert (j.state, j.no_borrow, j.request.mem) == (State.QUEUED, True, 8 * GiB)
+    assert j.attempts[0]["reason"] == (
+        "killed when the machine ran out of RAM, while it used RAM other jobs had reserved; retrying without borrowing"
+    )
+    d.tick()
+    assert job(d, b).state == State.QUEUED  # 8G doesn't fit beside A's 12G without borrowing
+    go.touch()
 
 
 def test_submit_reports_earlier_runs_of_the_same_command(daemon, tmp_path):
