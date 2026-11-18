@@ -56,9 +56,13 @@ a busy program let go of for a moment. A job that doesn't fit beside it waits wi
 `needs 12G RAM (10G free, 6G in use outside dibs)`.
 
 **The guard.** It stops GPU processes that aren't dibs jobs. It leaves alone other users'
-processes, programs listed in `guard_allow`, and work that was already running when it was switched
-on (including what that work starts later, like torchrun restarting a worker), and lists all of
-them in `dibs queue`. On AMD machines it only looks at processes with the ROCm compute device
+processes, programs listed in `guard_allow`, programs launched from the desktop, and work that was
+already running when it was switched on (including what that work starts later, like torchrun
+restarting a worker), and lists all of them in `dibs queue`. "Launched from the desktop" means the
+process runs in the scope a desktop launcher gives an app (`app-gnome-…`, `app-…@….service`), for an
+app that doesn't host a shell: terminals and editors with a built-in terminal, where agents run,
+are still policed, and so is a process an agent detached with `nohup` or `setsid`, which keeps its
+terminal's scope. `guard_desktop = false` polices desktop programs too. On AMD machines it only looks at processes with the ROCm compute device
 (`/dev/kfd`) open, so a desktop's graphics clients are never touched. `guard = "warn"` only lists
 offenders; `guard = "off"` turns it off.
 
@@ -104,6 +108,7 @@ gpus = [0]           # manage only these GPUs
 vram = "7.5G"        # at most this much VRAM per GPU
 guard = "all"        # "all" stops GPU processes outside dibs, "warn" only lists them, "off"
 guard_allow = ["ollama"]
+guard_desktop = true # leave alone GPU programs launched from the desktop (not terminals or editors)
 keep_days = 14       # how long finished jobs' logs are kept
 agent_files = ["~/.cursor/rules/dibs.mdc"]   # more instructions files for dibs setup
 ```

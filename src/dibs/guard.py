@@ -5,6 +5,7 @@ process, including ones dibs has never heard of.
 """
 
 import os
+import re
 import shlex
 from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
@@ -15,6 +16,7 @@ from dibs.units import format_size, suggest_size
 
 WHY = {
     "allowed": "allowlisted",
+    "desktop": "launched from the desktop",
     "other-user": "another user's",
     "other-dibs": "another dibs's job",
     "preexisting": "already running when the guard started",
@@ -28,7 +30,7 @@ class Verdict:
     pid: int
     gpu_index: int
     used: int | None
-    kind: str  # job, stop, warn, allowed, other-user, other-dibs, preexisting, inherited
+    kind: str  # job, stop, warn, allowed, desktop, other-user, other-dibs, preexisting, inherited
     job_id: int | None
 
 
@@ -42,6 +44,26 @@ def _allowed(pid: int, allow: Sequence[str]) -> bool:
     return bool(names & set(allow))
 
 
+# Apps that host a shell, where agents run (terminals, editors with a built-in terminal, agent apps):
+# their scopes are policed even when they were launched from the desktop.
+_SHELL_HOSTS = re.compile(
+    r"term|konsole|kitty|alacritty|foot|tilix|ghostty|ptyxis|kgx|console|guake|tilda|yakuake|rxvt|"
+    r"wezterm|warp|contour|blackbox|sakura|code|codium|cursor|windsurf|zed|jetbrains|idea|pycharm|"
+    r"clion|goland|webstorm|rider|studio\.android|emacs|vim|claude",
+    re.IGNORECASE,
+)
+
+
+def _launched_from_desktop(pid: int) -> bool:
+    """Whether the process runs in the scope a desktop launcher gives an app (app-gnome-<app>-<n>.scope,
+    app-<app>@<n>.service), for an app that doesn't host shells. The cgroup, unlike the parent
+    processes, survives nohup and setsid, so an agent's detached process is still its terminal's (#92)."""
+    leaf = (procs.cgroup(pid) or "").rstrip("/").rsplit("/", 1)[-1]
+    if not leaf.startswith("app-") or not leaf.endswith((".scope", ".service")):
+        return False
+    return not _SHELL_HOSTS.search(leaf)
+
+
 def classify(
     gpu_procs: Sequence[GpuProcess],
     *,
@@ -52,6 +74,7 @@ def classify(
     my_uid: int,
     parents: Collection[tuple[int, int]] = (),
     instance: str = "",
+    desktop: bool = True,
 ) -> list[Verdict]:
     """What to do about each GPU process. `parents` are (pid, start ticks) of programs whose GPU
     processes were already running when the guard started: what they start later is theirs too."""
@@ -72,6 +95,8 @@ def classify(
             kind = "other-dibs"
         elif _allowed(p.pid, allow):
             kind = "allowed"
+        elif desktop and _launched_from_desktop(p.pid):
+            kind = "desktop"
         elif started < since:
             kind = "preexisting"
         elif parents and _descends_from(p.pid, parents):
