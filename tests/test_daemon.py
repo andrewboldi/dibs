@@ -13,7 +13,7 @@ from conftest import FakeBackend, capacity, run_until
 from dibs import launcher, procs
 from dibs.daemon import OUTSIDE_WINDOW
 from dibs.model import State
-from dibs.units import GiB
+from dibs.units import GiB, MiB
 
 PY = sys.executable
 
@@ -1518,3 +1518,61 @@ def test_a_retried_job_starts_again_from_its_reservation(make_daemon, tmp_path, 
     run_until(d, lambda: job(d, a).attempts)
     j = job(d, a)
     assert (j.request.mem, j.ram_limit) == (13 * GiB, None)
+
+
+@pytest.mark.parametrize(
+    "mem,held,grows",
+    [
+        (int(1.5 * GiB), int(1.2 * GiB), False),  # a small job's usual peak is no reason to grow
+        (700 * MiB, 300 * MiB, False),
+        (1 * GiB, int(0.95 * GiB), True),  # within an eighth of its limit
+        (8 * GiB, int(7.2 * GiB), True),  # within half a step (1G) of its limit
+    ],
+)
+def test_a_job_grows_only_once_it_is_close_to_its_own_limit(make_daemon, tmp_path, monkeypatch, mem, held, grows):
+    d, a, hold, limits, go = _growing(make_daemon, tmp_path, monkeypatch, mem=mem)
+    hold(held)
+    assert bool(limits) == grows, limits
+    go.touch()
+
+
+def test_a_grown_job_killed_when_the_machine_ran_out_says_so_and_what_to_ask_for(make_daemon, tmp_path, monkeypatch):
+    # A grown job has the borrowers' OOM score, so it's the kernel's first pick when the machine runs out.
+    d, a, hold, limits, go = _growing(make_daemon, tmp_path, monkeypatch)
+    hold(int(7.2 * GiB))
+    real_read_exit = launcher.read_exit
+    monkeypatch.setattr(
+        launcher, "read_exit",
+        lambda paths, i: (r := real_read_exit(paths, i)) and {**r, "exit_code": 137, "oom_killed": True, "hit_limit": False},
+    )  # fmt: skip
+    go.touch()
+    run_until(d, lambda: finished(d, a))
+    assert job(d, a).reason == ("killed when the machine ran out of RAM, after its limit grew past its 8G reservation; "
+                                "resubmit with --mem 10G")  # fmt: skip
+
+
+def test_a_grown_retry_job_killed_when_the_machine_ran_out_runs_again_with_more(make_daemon, tmp_path, monkeypatch):
+    d, a, hold, limits, go = _growing(make_daemon, tmp_path, monkeypatch, retry=True)
+    hold(int(7.2 * GiB))
+    real_read_exit = launcher.read_exit
+    seen = []
+
+    def read_exit(paths, i):
+        r = real_read_exit(paths, i)
+        if r and i == a and not seen:
+            seen.append(True)
+            return {**r, "exit_code": 137, "oom_killed": True, "hit_limit": False}
+        return r
+
+    monkeypatch.setattr(launcher, "read_exit", read_exit)
+    go.touch()
+    run_until(d, lambda: job(d, a).attempts)
+    assert (job(d, a).request.mem, job(d, a).ram_limit) == (10 * GiB, None)
+
+
+def test_after_a_limit_it_couldnt_raise_dibs_waits_a_minute_before_trying_again(make_daemon, tmp_path, monkeypatch):
+    d, a, hold, limits, go = _growing(make_daemon, tmp_path, monkeypatch, ok=False)
+    hold(int(7.2 * GiB))
+    hold(int(7.3 * GiB))
+    assert len(limits) == 1
+    go.touch()
