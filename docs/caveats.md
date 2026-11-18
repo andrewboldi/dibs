@@ -12,9 +12,12 @@ What dibs doesn't do, or does only partly. Each item says what happens and what 
   an AMD GPU, please report what `dibs info` and a GPU job do.
 - **The guard has limits.**
   - A job that grabs GPU memory very fast can collide with another once before it's stopped.
-  - It only polices the GPU. CPU- and RAM-heavy work outside dibs isn't stopped, since nothing
-    reliably tells a heavy job from a build or a test run. dibs only stops handing out the RAM that
-    work uses.
+  - CPU-heavy work outside dibs isn't stopped, since nothing reliably tells a heavy job from a
+    build or a test run, and RAM-heavy work isn't either while the machine has RAM to spare: dibs
+    only stops handing out the RAM it uses. When memory runs short, the guard stops the largest
+    program outside dibs, which can be a person's own program in a terminal; `guard_allow`
+    exempts it by name. A swarm of small processes, none holding a tenth of the RAM, is left to
+    the kernel.
   - An agent determined to get around it could stop the daemon. Agents' instructions tell them
     not to.
 - **Going over the VRAM reservation into another job's memory stops the job, at once and without a

@@ -57,6 +57,7 @@ PRESSURE_LIMIT = 10.0  # percent (PSI some avg10): above it, no job starts on bo
 EVICT_PRESSURE = 40.0  # percent: memory pressure this high for EVICT_AFTER stops a borrower (#114)
 EVICT_AFTER = 10.0  # seconds
 SHORT_OF_RAM = 0.2  # share of the RAM: with less available, high pressure means the machine is short (#129)
+HOG_SHARE = 0.1  # share of the RAM: a program outside dibs holding this much is stopped when the machine is short (#135)
 OUTSIDE_CPU_EVERY = 4.0  # seconds between samples of the CPU busy outside dibs jobs (#120)
 OUTSIDE_CPU_WINDOW = 15.0  # seconds the figure dibs top shows is averaged over
 LOAD_EVERY = 4.0  # seconds between samples of the machine's busy cores, for dibs top's load row (#122)
@@ -67,6 +68,7 @@ EARLY_STOP = 60.0  # seconds: a job stopped for VRAM sooner than this was likely
 ALIVE_EVERY = 60.0  # seconds: how often the daemon notes it's alive, so a reboot can be dated (#78)
 RECENT = 86400.0  # how far back `queue --all` looks
 STOPS_SHOWN = 3600.0  # how far back guard stops are shown
+TOLD_WINDOW = 86400.0  # how far back a session is told, at its next dibs command, what the guard stopped (#135)
 WAIT_RECHECK = 5.0  # a long-polling wait re-checks its jobs at least this often
 LOG_MAX = 5 * 1024 * 1024
 
@@ -137,6 +139,7 @@ class Daemon:
         slept: Callable[[], float] = procs.slept,
         pressure: Callable[[], float] = procs.memory_pressure,
         cpu_busy: Callable[[], float | None] = procs.cpu_busy_seconds,
+        programs: Callable[[int], list[tuple[int, int]]] = lambda minimum: [],
     ):
         self.paths = paths
         self.config = config
@@ -151,6 +154,9 @@ class Daemon:
         self.pressure = pressure
         self._pressured_since: float | None = None  # when memory pressure rose above EVICT_PRESSURE
         self.cpu_busy = cpu_busy
+        # (pid, RAM held) of the machine's programs holding at least `minimum` bytes, for the guard
+        # (#135). Empty unless given: only the real daemon (run) looks at the real ones.
+        self.programs = programs
         self._beside: dict[int, tuple[float, float, float]] = {}  # job -> (time, machine busy, its own CPU)
         # For dibs top (#120): (time, machine busy, jobs' own CPU, the jobs, time asleep) samples, and
         # what programs outside dibs use: cores (None while unknown), RAM, and VRAM per GPU index.
@@ -548,6 +554,8 @@ class Daemon:
                 return await self._wait([int(i) for i in request["ids"]], request.get("timeout"))
             if op == "info":
                 return self.info()
+            if op == "notices":
+                return self.notices(str(request["session"]), self.clock())
             if op == "momentum":
                 return self.momentum(request)
             if op == "shutdown":
@@ -704,7 +712,7 @@ class Daemon:
                 self._push_stop(job, now)
         self._watch_memory()
         self._stop_ram_killed(now)
-        self._give_back_borrowed(now)
+        self._relieve_shortage(now)
         self._watch_beside(now)
         self._watch_gpus(now)
         self.schedule()
@@ -810,21 +818,83 @@ class Daemon:
             log.info("job %d %s; stopping the rest of it", job.id, job.stop_reason)
             self._push_stop(job, now)
 
-    def _give_back_borrowed(self, now: float) -> None:
-        """While jobs run on borrowed RAM and the machine stays short of memory, stop the most recently
-        started borrower and run it again within RAM nobody reserved (#114). The kernel's OOM killer acts
-        only after minutes of thrashing; one more after each further stretch of shortage."""
-        borrowers = [
-            j for j in self.store.jobs([State.RUNNING])
-            if j.borrowed_ram and j.stop_requested is None and j.cancel_requested is None
+    def notices(self, session: str, now: float) -> dict:
+        """What the guard stopped of this session's since it was last told, each told once: the note in a
+        stopped program's own output can be lost, in a pipe through grep or a log nobody reads (#135)."""
+        key = f"told:{session}"
+        told = float(self.store.get_meta(key) or 0.0)
+        stops = [
+            e for e in self.store.events(max(told, now - TOLD_WINDOW))
+            if e["kind"] == "stop" and e.get("session") == session and e["time"] > told and e.get("message")
         ]  # fmt: skip
-        if not borrowers or self.pressure() < EVICT_PRESSURE or not self._short_of_ram():
+        if stops:
+            self.store.set_meta(key, repr(stops[-1]["time"]))
+        return {"ok": True, "notices": [{"time": e["time"], "message": e["message"]} for e in stops]}
+
+    def _relieve_shortage(self, now: float) -> None:
+        """While the machine stays short of memory, stop one program per stretch of shortage: the largest
+        program outside dibs that holds a tenth of the RAM or more (#135), otherwise the most recently
+        started job on borrowed RAM (#114). The kernel's OOM killer acts only after minutes of thrashing,
+        and then kills whatever is largest: a job, or the program an agent runs in its own terminal."""
+        if self.pressure() < EVICT_PRESSURE or not self._short_of_ram():
             self._pressured_since = None
             return
         if self._pressured_since is None:
             self._pressured_since = now
             return
         if now - self._pressured_since < EVICT_AFTER:
+            return
+        self._pressured_since = now
+        if not self._stop_ram_hog(now):
+            self._give_back_borrowed(now)
+
+    def _stop_ram_hog(self, now: float) -> bool:
+        """Stop the largest program outside dibs that holds a tenth of the RAM or more, with a note in its
+        output on why and on running it as a job instead (#135). Whether one was stopped."""
+        if self.config.guard == "off":
+            return False
+        info = self._meminfo()
+        total, used = info if info is not None else (self.capacity.mem, self.capacity.mem)
+        minimum = int(total * HOG_SHARE)
+        running = self.store.jobs([State.RUNNING])
+        shims = {j.shim_pid: j.id for j in running if j.shim_pid}
+        units = {j.unit: j.id for j in running if j.unit}
+        mine = {os.getpid(), *self._ancestors}
+        hog = guard.ram_hog(
+            self.programs(minimum),
+            minimum=minimum,
+            in_dibs=lambda pid: pid in mine or self._job_of(pid, shims, units) is not None,
+            mode=self.config.guard,
+            allow=self.config.guard_allow,
+            since=self.guard_since,
+            my_uid=os.getuid(),
+            parents=self.guard_parents,
+            instance=self.paths.instance,
+            desktop=self.config.guard_desktop,
+        )
+        if hog is None:
+            return False
+        pid, held, kind = hog
+        if kind == "warn":
+            log.info("guard would stop pid %d, holding %s of RAM while the machine is short of memory (warn mode): %s",
+                     pid, format_size(held), procs.cmdline(pid))  # fmt: skip
+            return False
+        event = guard.stop_for_ram(pid, held, max(0, total - used), total)
+        if event is None:
+            return False
+        self.store.add_event("stop", event, now)
+        log.info("guard stopped pid %d, holding %s of RAM while the machine was short of memory: %s",
+                 pid, format_size(held), event["command"])  # fmt: skip
+        return True
+
+    def _give_back_borrowed(self, now: float) -> None:
+        """Stop the most recently started job on borrowed RAM, to run again within RAM nobody reserved
+        (#114)."""
+        borrowers = [
+            j for j in self.store.jobs([State.RUNNING])
+            if j.borrowed_ram and j.stop_requested is None and j.cancel_requested is None
+        ]  # fmt: skip
+        if not borrowers:
             return
         job = max(borrowers, key=lambda j: (j.started or 0, j.id))
         job.evicted = True
@@ -833,7 +903,6 @@ class Daemon:
         self.store.update_job(job)
         log.info("job %d %s", job.id, job.stop_reason)
         self._push_stop(job, now)
-        self._pressured_since = now
 
     def _short_of_ram(self) -> bool:
         """Whether little of the machine's RAM is available. Pressure alone doesn't say so: one job
@@ -1269,7 +1338,7 @@ def run_daemon(env: Mapping[str, str] = os.environ) -> int:
         log.error("can't start: %s", e)
         print(f"dibs: can't start: {e}", file=sys.stderr)
         return 1
-    daemon = Daemon(paths, config, capacity, backend, use_systemd=launcher.systemd_available(env))
+    daemon = Daemon(paths, config, capacity, backend, use_systemd=launcher.systemd_available(env), programs=procs.big_programs)
     daemon.recover()
     gpus = ", ".join(f"GPU {g.index} {format_size(g.vram)}" for g in capacity.gpus) or "no GPUs"
     log.info(

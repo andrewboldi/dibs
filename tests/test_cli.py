@@ -422,3 +422,43 @@ def test_a_wait_dibs_was_upgraded_under_runs_again_until_its_job_ends(dibs, tmp_
     assert result.returncode == 3, (result.stdout, result.stderr)
     after = dibs("daemon", "status", check=0).stdout
     assert re.search(r"pid (\d+)", before).group(1) == re.search(r"pid (\d+)", after).group(1)
+
+
+@pytest.mark.parametrize("argv", [["queue"], ["wait", "5"], ["submit", "--cpus", "1", "--mem", "1G", "--time", "1m", "--", "true"]])
+def test_a_dibs_command_first_tells_the_session_what_the_guard_stopped(argv, monkeypatch, tmp_path, capsys):
+    # Issue #135: the note in a stopped program's own output can be lost, in a pipe through grep.
+    from dibs import cli
+    from dibs import client as dc
+
+    monkeypatch.setenv("DIBS_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "agent-1")
+    asked = []
+
+    def call(self, op, **fields):
+        asked.append((op, fields.get("session")))
+        if op == "notices":
+            return {"ok": True, "notices": [{"time": time.time(), "message": "dibs: stopped `python prep.py` (pid 7)"}]}
+        raise dc.DibsError("the daemon is busy", "busy")
+
+    monkeypatch.setattr(dc.Client, "call", call)
+    assert cli.main(argv) == 1
+    err = capsys.readouterr().err
+    assert asked[0] == ("notices", "agent-1")
+    assert "the guard stopped a program of yours" in err and "dibs: stopped `python prep.py` (pid 7)" in err
+    assert err.index("python prep.py") < err.index("the daemon is busy")
+
+
+def test_dibs_top_never_asks_for_notices(monkeypatch, tmp_path):
+    from dibs import cli
+    from dibs import client as dc
+
+    monkeypatch.setenv("DIBS_HOME", str(tmp_path / "home"))
+    asked = []
+
+    def call(self, op, **fields):
+        asked.append(op)
+        raise dc.DibsError("the daemon is busy", "busy")
+
+    monkeypatch.setattr(dc.Client, "call", call)
+    cli.main(["top"])
+    assert "notices" not in asked

@@ -48,6 +48,7 @@ that always picks 10 gains nothing after its first job. What a session owes laps
 | VRAM | watched every second; a job may borrow VRAM nobody reserved, and one that reaches another job's is stopped, with the reason (with `--retry`, run again with more) | NVIDIA (NVML or nvidia-smi), AMD (amd-smi) |
 | Which GPUs | `CUDA_VISIBLE_DEVICES` (NVIDIA) or `ROCR_VISIBLE_DEVICES` (AMD) shows a job only its GPUs, and none to a job without `--vram` | |
 | GPU use outside dibs | the guard stops it within about a second, after writing into its output how to queue it | daemon running |
+| RAM use outside dibs | when the machine runs short of memory, the guard stops the largest program outside dibs that holds a tenth of the RAM or more, after writing into its output why and how to run it as a job | daemon running |
 | Time | never enforced: the estimate only orders the queue | |
 
 `dibs info` shows what's enforced on your machine.
@@ -69,9 +70,11 @@ reserved. Only jobs submitted with `--retry` start in the RAM this frees, since 
 them. A job with no earlier runs counts at its whole reservation for its first ten minutes,
 and an exclusive job always does. A job that starts only thanks to this is marked as borrowing and
 runs with a high OOM score. If memory pressure (PSI some avg10) stays above 40% for 10 seconds
-while less than a fifth of the RAM is available, dibs stops the newest borrower itself rather than
+while less than a fifth of the RAM is available, dibs stops a program itself rather than
 wait for the kernel's OOM killer, which acts only after minutes of thrashing; if the kernel gets
-there first, it kills a borrower rather than anything else. Either way dibs runs the job again
+there first, it kills a borrower rather than anything else. The program dibs stops is the largest
+one outside dibs, if one holds a tenth of the RAM or more (see the guard below), and otherwise
+the newest borrower; one per stretch of shortage. Either way dibs runs a borrower again
 within RAM nobody reserved, outside its retry limit, since starting it there was dibs's choice.
 Pressure with RAM to spare stops nothing: it comes from one job stalling inside itself, at its own
 limit or while the kernel compacts memory for huge pages. No job starts this way while pressure is
@@ -93,6 +96,19 @@ are still policed, and so is a process an agent detached with `nohup` or `setsid
 terminal's scope. `guard_desktop = false` polices desktop programs too. On AMD machines it only looks at processes with the ROCm compute device
 (`/dev/kfd`) open, so a desktop's graphics clients are never touched. `guard = "warn"` only lists
 offenders; `guard = "off"` turns it off.
+
+The guard also watches RAM, but only while the machine is short of it (the test above). Then it
+stops the largest program outside dibs that holds a tenth of the RAM or more, writing into its
+output what it held, why it was stopped and the `dibs run --mem` command that keeps it from
+happening again. Left running, such a program stalls everything for minutes until the kernel's
+OOM killer kills whatever is largest, a job or the program itself, and systemd may then stop the
+terminal it ran in, the agent with it. It leaves alone what it leaves alone on the GPU, and the
+agent CLIs themselves; a job is never stopped this way, since it holds the RAM it reserved. Only
+programs where agents work qualify: in a tmux or VTE terminal pane (`tmux-spawn-*`, `vte-spawn-*`
+scopes), or started by an agent CLI, as in an editor's terminal; snap apps, the desktop shell and
+user services never do. A note in a stopped program's output can be lost (a pipe through `grep`, a
+log nobody reads), so the agent's session also gets it, once, from its next `dibs` command; this
+holds for GPU stops too.
 
 **Sizing.** `dibs show ID` lists a job's peak RAM (memory in use, not file cache) and peak VRAM.
 `dibs submit` shows what earlier runs of the same command in the same folder used:
@@ -134,7 +150,8 @@ cpus = 20            # hand out only this many CPUs (the lowest-numbered ones)
 mem = "24G"          # and at most this much RAM
 gpus = [0]           # manage only these GPUs
 vram = "7.5G"        # at most this much VRAM per GPU
-guard = "all"        # "all" stops GPU processes outside dibs, "warn" only lists them, "off"
+guard = "all"        # "all" stops GPU processes outside dibs, and the largest program outside dibs
+                     # when memory runs short; "warn" only lists them, "off"
 guard_allow = ["ollama"]
 guard_desktop = true # leave alone GPU programs launched from the desktop (not terminals or editors)
 borrow_ram = true    # let jobs start in RAM other jobs reserved but aren't using

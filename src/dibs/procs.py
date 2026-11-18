@@ -127,6 +127,17 @@ def rss(pid: int) -> int | None:
     return int(statm.split()[1]) * os.sysconf("SC_PAGE_SIZE") if statm else None
 
 
+def big_programs(minimum: int) -> list[tuple[int, int]]:
+    """(pid, RAM it holds) of every process holding at least `minimum` bytes of RAM, largest first."""
+    found = []
+    for name in os.listdir("/proc"):
+        if name.isdigit():
+            held = rss(int(name))
+            if held is not None and held >= minimum:
+                found.append((int(name), held))
+    return sorted(found, key=lambda p: -p[1])
+
+
 CGROUP_ROOT = "/sys/fs/cgroup"  # where cgroup v2 is mounted
 
 
