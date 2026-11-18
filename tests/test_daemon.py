@@ -858,11 +858,47 @@ def test_ram_a_running_job_does_not_use_can_go_to_another_job(make_daemon, tmp_p
     go.touch()
 
 
-def test_a_job_without_retry_never_starts_on_borrowed_ram(make_daemon, tmp_path, monkeypatch):
-    # Issue #116: dibs may have to stop a borrower to give the RAM back, and only a job its agent
-    # marked as safe to run again may be stopped that way.
+def test_a_job_without_retry_starts_on_borrowed_ram_too(make_daemon, tmp_path, monkeypatch):
+    # Issue #148: only --retry jobs could borrow, 2 of 96 jobs in an hour used it, and idle
+    # reservations held back hours of waiting. Any job may borrow now; --retry decides what follows a stop.
     d, a, b, go = _borrowing(make_daemon, tmp_path, monkeypatch, ran=700, retry=False)
-    assert job(d, b).state == State.QUEUED
+    assert job(d, b).state == State.RUNNING and job(d, b).borrowed_ram
+    go.touch()
+
+
+NOT_RETRIED = "; resubmit it, or submit it with --retry so dibs runs it again by itself"
+
+
+def test_a_borrower_without_retry_stopped_to_give_ram_back_fails_saying_how_to_avoid_it(make_daemon, tmp_path,
+                                                                                      monkeypatch):  # fmt: skip
+    level, used, now = [0.0], [2 * GiB], [time.time()]
+    d, a, b, go = _borrowing(make_daemon, tmp_path, monkeypatch, ran=700, pressure=lambda: level[0], now=now,
+                             meminfo=lambda: (16 * GiB, used[0]), retry=False)  # fmt: skip
+    level[0], used[0] = 60.0, 15 * GiB
+    for _ in range(3):
+        d.tick()
+        now[0] += 6.0
+    run_until(d, lambda: finished(d, b))
+    j = job(d, b)
+    assert (j.state, j.attempts) == (State.FAILED, [])
+    assert j.reason == "stopped to give back borrowed RAM: the machine was short of memory" + NOT_RETRIED
+    go.touch()
+
+
+def test_a_borrower_without_retry_killed_when_the_machine_ran_out_fails_saying_how_to_avoid_it(make_daemon, tmp_path,
+                                                                                            monkeypatch):  # fmt: skip
+    d, a, b, go = _borrowing(make_daemon, tmp_path, monkeypatch, ran=700, retry=False)
+    real_read_exit = launcher.read_exit
+
+    def read_exit(paths, i):
+        r = real_read_exit(paths, i)
+        return {**r, "exit_code": 137, "oom_killed": True, "hit_limit": False} if r and i == b else r
+
+    monkeypatch.setattr(launcher, "read_exit", read_exit)
+    run_until(d, lambda: finished(d, b))
+    j = job(d, b)
+    assert j.state == State.FAILED
+    assert j.reason == "killed when the machine ran out of RAM, while it used RAM other jobs had reserved" + NOT_RETRIED
     go.touch()
 
 
