@@ -98,11 +98,18 @@ def _holding(job: Job, mem: int | None = None) -> Request:
 
 def _shared_part(job: Job) -> str:
     """For a job killed at its RAM limit: how much of its peak was shared memory, when that was at
-    least a quarter of its reservation. Files a job writes to a folder kept in RAM count as its RAM,
-    which agents don't expect (#74)."""
-    if job.peak_shmem is None or job.peak_shmem < job.request.mem / 4:
+    least a quarter of its reservation, and of which kind, since what helps differs. Files a job writes
+    to a folder kept in RAM count as its RAM, which agents don't expect (#74), and a TMPDIR on a disk
+    moves them out; memory its processes map, such as buffers pinned for GPU transfers, needs more
+    --mem (#132). Each kind is named alone only when it was at least three quarters of it."""
+    shared = job.peak_shmem
+    if shared is None or shared < job.request.mem / 4:
         return ""
-    return f" ({format_size(job.peak_shmem)} of it was files in /dev/shm or a RAM-backed /tmp, or other shared memory)"
+    low, high = job.peak_shmem_mapped or (0, shared)
+    files = "files in /dev/shm or a RAM-backed /tmp"
+    mapped = "shared memory its processes mapped, such as buffers for GPU transfers or between worker processes"
+    kind = mapped if low >= shared * 3 / 4 else files if high <= shared / 4 else f"{files}, or {mapped}"
+    return f" ({format_size(shared)} of it was {kind})"
 
 
 def _command_exists(argv0: str, env: dict, cwd: str) -> bool:
@@ -757,9 +764,9 @@ class Daemon:
 
     # Watching memory and the GPUs ----------------------------------------------------------------
 
-    def _memory_in_use(self, job: Job) -> tuple[int, int] | None:
-        """What a running job holds (anon + shmem) and the shmem part of it, read from its own scope;
-        None if dibs can't see it."""
+    def _memory_in_use(self, job: Job) -> tuple[int, int, tuple[int, int]] | None:
+        """What a running job holds (anon + shmem), the shmem part of it and how much of that part its
+        processes had mapped (procs.memory_in_use), read from its own scope; None if dibs can't see it."""
         if not (job.unit and job.shim_pid):
             return None
         cg = procs.cgroup(job.shim_pid)
@@ -774,7 +781,8 @@ class Daemon:
         for job in self.store.jobs([State.RUNNING]):
             held = self._memory_in_use(job)
             if held is not None and (job.peak_mem is None or held[0] > job.peak_mem):
-                job.peak_mem, job.peak_shmem = held
+                job.peak_mem, job.peak_shmem, mapped = held
+                job.peak_shmem_mapped = list(mapped)
                 self.store.update_job(job)
 
     def _ram_kills(self, job: Job) -> tuple[int, bool]:
@@ -1150,7 +1158,7 @@ class Daemon:
         job.shim_pid = job.shim_ticks = job.unit = None
         job.stop_reason = job.stop_requested = job.retry_vram = None
         job.borrowed_ram = job.evicted = False
-        job.peak_mem = job.peak_shmem = job.peak_vram = None
+        job.peak_mem = job.peak_shmem = job.peak_shmem_mapped = job.peak_vram = None
         job.sleep_at_start, job.asleep = None, 0.0
         with contextlib.suppress(FileNotFoundError):
             (self.paths.job_dir(job.id) / "exit.json").unlink()
