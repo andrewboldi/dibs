@@ -154,6 +154,7 @@ Run `dibs daemon restart` after changing it; running jobs keep running.
 | `~/.local/state/dibs/daemon.log` | what the scheduler did, size-capped |
 | `$XDG_RUNTIME_DIR/dibs/dibs.sock` | the socket the `dibs` command talks to |
 | `~/.config/systemd/user/dibs.service` | the service `dibs setup` installs |
+| `~/.config/systemd/user/{tmux,vte}-spawn-.scope.d/50-dibs.conf` | keeps a terminal pane, and the agent in it, running when the kernel kills a program there for lack of memory (`OOMPolicy=continue`) |
 | `~/.config/dibs/setup.json` | what `dibs setup` changed, so `--undo` can put it back |
 | `~/.local/share/dibs-install/record` | what `install.sh` added, so `--uninstall` removes only that |
 

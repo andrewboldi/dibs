@@ -25,8 +25,10 @@ time. dibs runs on Linux.
    ```
 
    It adds a short marked block about dibs to each agent CLI's instructions file it finds, writes
-   a Claude Code skill, and installs a systemd user service so dibs and its guard always run. Add
-   `--no-service` to skip the service; dibs then starts on the first `dibs` command.
+   a Claude Code skill, and installs a systemd user service so dibs and its guard always run. It
+   also keeps tmux and GNOME Terminal panes running when the kernel kills a program in them for
+   lack of memory, so an agent outlives its program. Add `--no-service` to skip both; dibs then
+   starts on the first `dibs` command.
 
 4. Check what dibs hands out and enforces:
 

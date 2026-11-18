@@ -11,8 +11,9 @@
 #   3. Installs dibs as a uv tool, or updates it if it's already installed.
 #   4. Puts ~/.local/bin on your PATH, between "# >>> dibs >>>" markers in ~/.bashrc (or
 #      ~/.zshrc), only if it isn't on PATH already. The original is kept as FILE.before-dibs.
-#   5. Runs `dibs setup`: instructions for your agent CLIs, and a systemd user service if you have
-#      a systemd user session.
+#   5. Runs `dibs setup`: instructions for your agent CLIs, and if you have a systemd user session,
+#      a systemd user service and a setting that keeps a terminal pane running when the kernel
+#      kills a program in it for lack of memory.
 #
 # Run it again to update. To undo exactly what it did:
 #
