@@ -760,3 +760,20 @@ def test_a_terminal_busy_on_a_core_or_two_is_left_alone(make_daemon):
         state["usec"] += int(15 * 1e6 * 2)  # two cores
         d.tick()
     assert [e for e in d.store.events(0) if e["kind"] == "heavy"] == []
+
+
+# Runs that reserved VRAM and never used the GPU (#139) -----------------------------------------
+
+
+@pytest.mark.parametrize("blind", [False, True])
+def test_a_job_that_reserved_vram_and_never_used_the_gpu_records_a_peak_of_zero(make_daemon, tmp_path, blind):
+    # 13 of 17 finished jobs that reserved VRAM in an hour never touched the GPU, and nothing told their
+    # agents. A peak of 0 says so, but only where dibs could see the GPU's processes at all.
+    backend = FakeBackend()
+    backend.blind = blind
+    d = make_daemon(backend=backend)
+    resp = d.submit({"argv": [PY, "-c", "pass"], "cwd": str(tmp_path), "env": CLEAN_ENV, "session": "s",
+                     "request": {"cpus": 1, "mem": GiB, "vram": GiB, "gpus": None, "time": 60}})  # fmt: skip
+    job_id = resp["job"]["id"]
+    run_until(d, lambda: d.store.get_job(job_id).state == State.DONE)
+    assert d.store.get_job(job_id).peak_vram == (None if blind else 0)

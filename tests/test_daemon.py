@@ -1576,3 +1576,25 @@ def test_after_a_limit_it_couldnt_raise_dibs_waits_a_minute_before_trying_again(
     hold(int(7.3 * GiB))
     assert len(limits) == 1
     go.touch()
+
+
+
+def test_earlier_runs_say_when_the_gpu_they_reserved_went_unused():
+    # Issue #139: an agent sizing its next run saw nothing about VRAM for runs that never used the GPU.
+    from dibs.model import Job, Request, State, job_to_dict
+    from dibs.render import render_earlier
+
+    t = 1_000_000.0
+
+    def run(i, peak_vram, ran=120.0):
+        r = Request(cpus=1, mem=GiB, gpus=1, vram=GiB, time=600.0)
+        return job_to_dict(Job(id=i, name="x", argv=["python", "x.py"], cwd="/w", env={}, request=r, session="s",
+                               session_label="w·s", submitted=t, tag=t, state=State.DONE, output="/w/o", started=t,
+                               ended=t + ran, exit_code=0, peak_vram=peak_vram))  # fmt: skip
+
+    hint = "None of them used the GPU they reserved: leave --vram out, so the job holds no GPU memory another job could use."
+    text = render_earlier([run(1, 0), run(2, 0)])
+    assert "VRAM 0 of 1G" in text and text.endswith(hint)
+    assert hint not in render_earlier([run(1, 0), run(2, 300 * MiB)])  # one did use it
+    assert hint not in render_earlier([run(1, 0, ran=3.0)])  # too short to tell
+    assert hint not in render_earlier([run(1, None)])  # dibs couldn't see the GPU's processes
