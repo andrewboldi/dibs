@@ -90,7 +90,7 @@ when those resources are free, so jobs never crash each other by running out of 
   the tries. Only --retry jobs may start on RAM other jobs reserved but aren't using, since dibs may
   have to stop them to give it back.
 - Without --retry (or once it has run out of retries), such a job fails with a reason that ends with
-  the --vram to resubmit with: use that, not the same request again.
+  the --vram or --mem to resubmit with: use that, not the same request again.
 
 ## Waiting and checking
 
