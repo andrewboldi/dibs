@@ -462,3 +462,20 @@ def test_dibs_top_never_asks_for_notices(monkeypatch, tmp_path):
     monkeypatch.setattr(dc.Client, "call", call)
     cli.main(["top"])
     assert "notices" not in asked
+
+
+
+def test_a_heavy_cpu_notice_says_what_it_is_about(monkeypatch, tmp_path, capsys):
+    from dibs import cli
+    from dibs import client as dc
+
+    monkeypatch.setenv("DIBS_HOME", str(tmp_path / "home"))
+
+    def call(self, op, **fields):
+        if op == "notices":
+            return {"ok": True, "notices": [{"time": time.time(), "kind": "heavy", "message": "dibs: `make` (pid 9)"}]}
+        raise dc.DibsError("the daemon is busy", "busy")
+
+    monkeypatch.setattr(dc.Client, "call", call)
+    cli.main(["queue"])
+    assert "a program in your terminal kept many cores busy outside dibs:" in capsys.readouterr().err

@@ -255,3 +255,22 @@ def test_cpu_busy_seconds_reads_proc_stat(monkeypatch):
     assert procs.cpu_busy_seconds() == (1000 + 200 + 300 + 10 + 20 + 5) / os.sysconf("SC_CLK_TCK")
     monkeypatch.setattr(procs, "_read", lambda path, binary=False: None)
     assert procs.cpu_busy_seconds() is None
+
+
+
+def test_pane_cpu_reads_each_terminal_panes_cpu_time(tmp_path, monkeypatch):
+    # Issue #158: dibs tells an agent when its terminal keeps many cores busy, from the pane's cgroup.
+    uid = os.getuid()
+    app = tmp_path / f"user.slice/user-{uid}.slice/user@{uid}.service/app.slice"
+    for scope, usec in (("app-org.gnome.Terminal.slice/tmux-spawn-1.scope", 5_000_000),
+                        ("app-org.gnome.Terminal.slice/vte-spawn-2.scope", 7_000_000),
+                        ("snap.chromium.chromium-3.scope", 9_000_000),
+                        ("dibs-x-job-4.scope", 11_000_000)):  # fmt: skip
+        (app / scope).mkdir(parents=True)
+        (app / scope / "cpu.stat").write_text(f"usage_usec {usec}\nuser_usec 1\n")
+    monkeypatch.setattr(procs, "CGROUP_ROOT", str(tmp_path))
+    base = f"/user.slice/user-{uid}.slice/user@{uid}.service/app.slice"
+    assert procs.pane_cpu(("tmux-spawn-", "vte-spawn-")) == {
+        f"{base}/app-org.gnome.Terminal.slice/tmux-spawn-1.scope": 5_000_000,
+        f"{base}/app-org.gnome.Terminal.slice/vte-spawn-2.scope": 7_000_000,
+    }

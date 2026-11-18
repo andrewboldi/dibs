@@ -115,6 +115,12 @@ user services never do. A note in a stopped program's output can be lost (a pipe
 log nobody reads), so the agent's session also gets it, once, from its next `dibs` command; this
 holds for GPU stops too.
 
+CPU-heavy work outside dibs is never stopped: jobs have first claim on their cores (#152), and when
+a terminal pane keeps a sixth of the machine's cores busy for two minutes (from its cgroup's CPU
+time), dibs tells that pane's agent at its next `dibs` command which program it was and the
+`dibs run --cpus` line to queue it with, at most once an hour per pane (#158). Nothing is written
+into the program's own output, which may be data.
+
 **Sizing.** `dibs show ID` lists a job's peak RAM (memory in use, not file cache) and peak VRAM.
 `dibs submit` shows what earlier runs of the same command in the same folder used:
 
