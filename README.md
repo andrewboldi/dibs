@@ -46,8 +46,9 @@ Code, Codex, opencode, pi and Gemini CLI how to use it.
   handed out: dibs measures it every second and plans with its peak over two minutes.
 - **Sizing from history.** `dibs submit` shows what earlier runs of the same command used: CPUs,
   RAM, VRAM, and run time against the estimate.
-- **NVIDIA and AMD.** Each job sees only its own GPUs, and one that goes over its VRAM reservation
-  is stopped with the reason, then run again with more VRAM.
+- **NVIDIA and AMD.** Each job sees only its own GPUs. One that goes over its VRAM reservation may
+  borrow memory nobody reserved, and is stopped only when it reaches another job's, then run again
+  with more VRAM.
 
 dibs stores each job's environment, which can hold API keys, in `~/.local/state/dibs`, readable only
 by you. Nothing leaves the machine.

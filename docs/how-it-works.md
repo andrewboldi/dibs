@@ -42,7 +42,7 @@ that always picks 10 gains nothing after its first job. What a session owes laps
 |---|---|---|
 | CPU cores | pinned to its cores; `OMP_NUM_THREADS` and the like set to match | Linux |
 | RAM | its own systemd scope with `MemoryMax` and no swap; going over kills the job, not its neighbours, and dibs runs it again with more | systemd user session |
-| VRAM | watched every second; a job over its reservation is stopped, with the reason, and dibs runs it again with more | NVIDIA (NVML or nvidia-smi), AMD (amd-smi) |
+| VRAM | watched every second; a job may borrow VRAM nobody reserved, and one that reaches another job's is stopped, with the reason, and run again with more | NVIDIA (NVML or nvidia-smi), AMD (amd-smi) |
 | Which GPUs | `CUDA_VISIBLE_DEVICES` (NVIDIA) or `ROCR_VISIBLE_DEVICES` (AMD) shows a job only its GPUs, and none to a job without `--vram` | |
 | GPU use outside dibs | the guard stops it within about a second, after writing into its output how to queue it | daemon running |
 | Time | never enforced: the estimate only orders the queue | |

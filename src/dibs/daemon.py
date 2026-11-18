@@ -65,6 +65,13 @@ def _rejected(message: str) -> dict:
     return {"ok": False, "code": "rejected", "error": message}
 
 
+def _holding(job: Job) -> Request:
+    """A running job's request as the planner should count it: VRAM it borrowed counts as held."""
+    if job.peak_vram and job.request.gpus and job.peak_vram > job.request.vram:
+        return replace(job.request, vram=job.peak_vram)
+    return job.request
+
+
 def _shared_part(job: Job) -> str:
     """For a job killed at its RAM limit: how much of its peak was shared memory, when that was at
     least a quarter of its reservation. Files a job writes to a folder kept in RAM count as its RAM,
@@ -472,7 +479,8 @@ class Daemon:
         current = plan(
             self.capacity,
             # A job's estimate is of its running time, so the time the machine slept moves its start on.
-            [Running(j.id, j.request, tuple(j.cpu_ids), tuple(j.gpu_ids), (j.started or now) + self._asleep(j))
+            # A job that borrows VRAM (#88) counts at what it has used, so nothing starts into it.
+            [Running(j.id, _holding(j), tuple(j.cpu_ids), tuple(j.gpu_ids), (j.started or now) + self._asleep(j))
              for j in running],
             [Queued(j.id, j.request, j.tag, j.submitted) for j in queued],
             now,
@@ -667,14 +675,31 @@ class Daemon:
             if v.kind == "job" and v.used is not None:
                 per_gpu = usage.setdefault(v.job_id, {})
                 per_gpu[v.gpu_index] = per_gpu.get(v.gpu_index, 0) + v.used
+        # A job may borrow VRAM beyond its reservation that no other job holds and no program outside
+        # dibs uses (#88); it's stopped only when it reaches into theirs. A job holds its reservation,
+        # or more while it borrows.
+        outside_use: dict[int, int] = {}
+        for v in verdicts:
+            if v.kind != "job" and v.used is not None:
+                outside_use[v.gpu_index] = outside_use.get(v.gpu_index, 0) + v.used
+        capacity_of = {g.index: g.vram for g in self.capacity.gpus}
+
+        def holds(j: Job, g: int) -> int:
+            return max(j.request.vram, usage.get(j.id, {}).get(g, 0)) if g in j.gpu_ids else 0
+
+        def allowed(j: Job, g: int) -> int:
+            if g not in j.gpu_ids:
+                return 0
+            others = sum(holds(o, g) for o in running.values() if o.id != j.id)
+            return max(j.request.vram, capacity_of.get(g, 0) - others - outside_use.get(g, 0))
+
         for job_id, per_gpu in usage.items():
             job = running[job_id]
             peak = max(per_gpu.values())
             changed = job.peak_vram is None or peak > job.peak_vram
             if changed:
                 job.peak_vram = peak
-            over = [(g, used) for g, used in sorted(per_gpu.items())
-                    if used > (job.request.vram if g in job.gpu_ids else 0)]  # fmt: skip
+            over = [(g, used) for g, used in sorted(per_gpu.items()) if used > allowed(job, g)]
             if over and job.stop_reason is None:
                 gpu, used = over[0]
                 reserved = job.request.vram if gpu in job.gpu_ids else 0
