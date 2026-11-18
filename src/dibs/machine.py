@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from dibs.model import Capacity, Gpu
-from dibs.units import UnitError, format_size, parse_size
+from dibs.units import GiB, UnitError, format_size, parse_size
 
 GUARD_MODES = ("all", "warn", "off")
 
@@ -114,8 +114,17 @@ def detect_mem() -> int:
     return os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
 
 
+def nominal_vram(vram: int) -> int:
+    """A GPU's memory as sold: a reported size within 0.5% under a whole GiB counts as that GiB (an
+    "8 GB" card reports 8188 MiB), so a 6G and a 2G job fit together and --vram 8G is accepted (#85).
+    The driver keeps a few hundred MiB for itself anyway, so this changes nothing a job can allocate."""
+    whole = -(-vram // GiB) * GiB
+    return whole if whole - vram <= whole // 200 else vram
+
+
 def build_capacity(config: Config, cpus: tuple[int, ...], mem: int, gpus: Sequence[Gpu]) -> Capacity:
     """What dibs hands out: everything detected, narrowed by the config."""
+    gpus = [Gpu(g.index, g.uuid, g.name, nominal_vram(g.vram)) for g in gpus]
     if config.cpus is not None:
         if config.cpus > len(cpus):
             raise ConfigError(f"config asks for {config.cpus} CPUs, but this machine has {len(cpus)}")
