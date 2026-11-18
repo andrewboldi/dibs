@@ -108,6 +108,12 @@ def render_earlier(earlier: list[dict], match: str = "command") -> str:
         if e.get("reason") and e["state"] != "done":
             line += f"; {e['reason']}"
         lines.append(line)
+    # Runs long enough to tell (10 s) that reserved VRAM and never showed on the GPU (#139).
+    told = [e for e in earlier if e["request"].get("vram") and e.get("ended") and e.get("started") is not None
+            and e["ended"] - e["started"] >= 10]  # fmt: skip
+    if told and all(e.get("peak_vram") == 0 for e in told):
+        lines.append("None of them used the GPU they reserved: leave --vram out, so the job holds no GPU memory "
+                     "another job could use.")  # fmt: skip
     return "\n".join(lines)
 
 

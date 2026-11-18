@@ -92,7 +92,9 @@ when those resources are free, so jobs never crash each other by running out of 
 - CPUs: the threads or worker processes it actually uses.
 - `dibs show ID` lists a job's peak VRAM and RAM, and `dibs submit` shows what earlier runs of the
   same command in the same folder used. Size the next run from those: the peaks plus a little
-  headroom (going over VRAM stops the job), and the CPUs it kept busy.
+  headroom (going over VRAM stops the job), and the CPUs it kept busy. When those runs never used
+  the GPU they reserved, it says so: leave --vram out, so the GPU's memory stays free for jobs that
+  use it.
 - Add `--retry` when the job is safe to run again from the start: it resumes from a checkpoint, or
   repeating it does no harm (not one that appends results, uploads or sends something). Then, if it
   is stopped for going over its VRAM reservation, killed at its RAM limit, or lost when the machine

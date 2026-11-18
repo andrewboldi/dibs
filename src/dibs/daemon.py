@@ -1275,6 +1275,8 @@ class Daemon:
         job.cpu_seconds = result.get("cpu_seconds")
         if job.peak_mem is None:  # never sampled while it ran: the launcher's figure is all there is
             job.peak_mem = result.get("peak_mem")
+        if job.request.vram and job.peak_vram is None and self._sees_processes:
+            job.peak_vram = 0  # it reserved VRAM and never showed on a GPU dibs could see (#139)
         at_limit = bool(result.get("oom_killed")) and result.get("hit_limit") is not False
         if at_limit:  # it reached its limit, maybe after dibs's last sample: that's what killed it (#127)
             job.peak_mem = max(job.peak_mem or 0, _limit(job))
