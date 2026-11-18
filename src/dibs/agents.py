@@ -92,6 +92,22 @@ def service_unit(dibs_exe: str) -> str:
     )
 
 
+# Terminals that run each pane or tab in a systemd scope of its own: tmux, and VTE (GNOME Terminal and
+# other GTK terminals). systemd's default OOMPolicy=stop stops a whole scope when the kernel's OOM killer
+# kills one process in it, which takes down the agent working in that pane along with its program (#134).
+PANE_SCOPES = ("tmux-spawn-", "vte-spawn-")
+KEEP_PANE = (
+    "# Written by dibs setup: when the kernel's OOM killer kills a program in a terminal pane, keep the\n"
+    "# pane running, and the agent working in it. `dibs setup --undo` removes this file.\n"
+    "[Scope]\n"
+    "OOMPolicy=continue\n"
+)
+
+
+def _pane_dropins(home: Path) -> list[Path]:
+    return [home / ".config" / "systemd" / "user" / f"{prefix}.scope.d" / "50-dibs.conf" for prefix in PANE_SCOPES]
+
+
 def _record_path(home: Path) -> Path:
     return home / ".config" / "dibs" / "setup.json"
 
@@ -151,7 +167,13 @@ def _install_service(home: Path, dibs_exe: str, record: dict, lines: list[str]) 
 
     stop_daemon(get_paths())  # a daemon started on demand hands over to the service; jobs keep running
     _write(home / ".config" / "systemd" / "user" / "dibs.service", service_unit(dibs_exe), record)
-    _run("systemctl", "--user", "daemon-reload")
+    for dropin in _pane_dropins(home):
+        _write(dropin, KEEP_PANE, record)
+    _run("systemctl", "--user", "daemon-reload")  # running panes take the drop-ins too
+    lines.append(
+        "Terminal panes: tmux and GNOME Terminal panes now keep running when the kernel kills a program "
+        "in them for lack of memory, so an agent outlives its program (systemd OOMPolicy=continue)."
+    )
     enabled = _run("systemctl", "--user", "enable", "--now", "dibs.service")
     if enabled.returncode != 0:
         lines.append(f"Couldn't start the dibs service: {enabled.stderr.strip()}")
@@ -194,7 +216,10 @@ def setup(
                 _write(skill, SKILL, record)
     if dry_run:
         if service:
-            lines.append("Would install and start a systemd user service so dibs (and its guard) always runs.")
+            lines.append(
+                "Would install and start a systemd user service so dibs (and its guard) always runs, and keep "
+                "terminal panes running when the kernel kills a program in them for lack of memory."
+            )
         return lines
     _save_record(home, record)  # before the service part, which can fail: undo must still work
     if service:
@@ -217,7 +242,8 @@ def undo(home: Path, *, service: bool) -> list[str]:
         user = pwd.getpwuid(os.getuid()).pw_name
         _run("loginctl", "disable-linger", user)
         lines.append("Lingering: turned back off.")
-    keep = set() if service else {str(home / ".config" / "systemd" / "user" / "dibs.service")}
+    systemd_files = [home / ".config" / "systemd" / "user" / "dibs.service", *_pane_dropins(home)]
+    keep = set() if service else {str(path) for path in systemd_files}
     for key, original in record.get("modified", {}).items():
         path = Path(key)
         if key in keep or not path.exists():

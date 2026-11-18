@@ -244,6 +244,25 @@ def test_service_install_and_undo(tmp_path, fake_systemd):
     assert not unit.exists() and not (tmp_path / ".claude" / "CLAUDE.md").exists()
 
 
+PANES = ("tmux-spawn-", "vte-spawn-")
+
+
+def test_setup_keeps_a_terminal_pane_running_when_the_kernel_kills_a_program_in_it(tmp_path, fake_systemd):
+    # Issue #134: the kernel's OOM killer killed a 14G program an agent ran in its tmux pane, and
+    # systemd's default OOMPolicy=stop then stopped the whole pane, the agent with it.
+    log, _ = fake_systemd
+    agents.setup(tmp_path, path_env="", dry_run=False, service=True, dibs_exe=EXE)
+    user_units = tmp_path / ".config" / "systemd" / "user"
+    for prefix in PANES:
+        assert "[Scope]\nOOMPolicy=continue\n" in (user_units / f"{prefix}.scope.d" / "50-dibs.conf").read_text()
+    assert "systemctl --user daemon-reload" in log.read_text().splitlines()
+
+    agents.undo(tmp_path, service=False)  # --no-service keeps them, with the service
+    assert all((user_units / f"{prefix}.scope.d" / "50-dibs.conf").exists() for prefix in PANES)
+    agents.undo(tmp_path, service=True)
+    assert not any((user_units / f"{prefix}.scope.d").exists() for prefix in PANES)
+
+
 def test_undo_without_service_leaves_the_service_alone(tmp_path, fake_systemd):
     # dibs setup --undo --no-service (issue #2): instructions go, the service and lingering stay,
     # and a later full undo still knows about them.
