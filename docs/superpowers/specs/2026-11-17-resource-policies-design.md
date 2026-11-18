@@ -32,6 +32,11 @@ stays in its terminal's scope and is still stopped. A config setting switches th
 
 ## 4. Retry jobs that failed for resource reasons
 
+Revised 2026-11-18 (#116): retries are the agent's choice. Only jobs submitted with `--retry`, which
+the agent marks as safe to run again from the start, are retried, and only they may start on
+borrowed RAM (section 9). Others fail with the reason and the size to resubmit with, as before.
+
+
 Agents shouldn't spend effort working out why a job didn't run; dibs should handle it. When a job
 is stopped for going over its VRAM reservation, killed at its RAM limit, or lost to a reboot, dibs
 queues the same job again, with the same id and its place in line, instead of marking it failed:

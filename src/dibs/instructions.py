@@ -40,7 +40,7 @@ when those resources are free, so jobs never crash each other by running out of 
 - `--cpus N`: CPU cores. The job is pinned to exactly these, and OMP_NUM_THREADS and friends are
   set to N.
 - `--mem SIZE`: RAM, like 16G or 512M. Where the system allows it, a job that goes over is killed.
-  While a running job uses less than it reserved, dibs may start other jobs in the difference; if
+  While a running job uses less than it reserved, dibs may start --retry jobs in the difference; if
   the machine then runs short, a job started that way is the one stopped, and dibs runs it again.
 - `--vram SIZE`: GPU memory on each GPU it uses. Leave it out for a CPU-only job, which then
   can't see any GPU. A job may use more VRAM than it reserved while nobody else needs that memory,
@@ -81,13 +81,15 @@ when those resources are free, so jobs never crash each other by running out of 
 - `dibs show ID` lists a job's peak VRAM and RAM, and `dibs submit` shows what earlier runs of the
   same command in the same folder used. Size the next run from those: the peaks plus a little
   headroom (going over VRAM stops the job), and the CPUs it kept busy.
-- If a job is stopped for going over its VRAM reservation, killed at its RAM limit, or lost when
-  the machine restarts, dibs runs it again by itself, up to twice, with more VRAM or RAM when that
-  was the cause, keeping its id and its place in line. `dibs wait` keeps waiting through that, and
-  `dibs show ID` lists the tries. So ask for what the job really needs: a request that turns out too
-  small costs a retry, not your work. Add `--no-retry` for a command that must not run twice.
-- When it has run out of retries, the reason ends with the --vram to resubmit with: use that, not
-  the same request again.
+- Add `--retry` when the job is safe to run again from the start: it resumes from a checkpoint, or
+  repeating it does no harm (not one that appends results, uploads or sends something). Then, if it
+  is stopped for going over its VRAM reservation, killed at its RAM limit, or lost when the machine
+  restarts, dibs runs it again by itself, up to twice, with more VRAM or RAM when that was the
+  cause, keeping its id and its place in line; `dibs wait` keeps waiting, and `dibs show ID` lists
+  the tries. Only --retry jobs may start on RAM other jobs reserved but aren't using, since dibs may
+  have to stop them to give it back.
+- Without --retry (or once it has run out of retries), such a job fails with a reason that ends with
+  the --vram to resubmit with: use that, not the same request again.
 
 ## Waiting and checking
 

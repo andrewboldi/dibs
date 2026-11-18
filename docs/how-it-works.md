@@ -41,8 +41,8 @@ that always picks 10 gains nothing after its first job. What a session owes laps
 | | How | Where |
 |---|---|---|
 | CPU cores | pinned to its cores; `OMP_NUM_THREADS` and the like set to match | Linux |
-| RAM | its own systemd scope with `MemoryMax` and no swap; going over kills the job, not its neighbours, and dibs runs it again with more | systemd user session |
-| VRAM | watched every second; a job may borrow VRAM nobody reserved, and one that reaches another job's is stopped, with the reason, and run again with more | NVIDIA (NVML or nvidia-smi), AMD (amd-smi) |
+| RAM | its own systemd scope with `MemoryMax` and no swap; going over kills the job, not its neighbours (with `--retry`, dibs runs it again with more) | systemd user session |
+| VRAM | watched every second; a job may borrow VRAM nobody reserved, and one that reaches another job's is stopped, with the reason (with `--retry`, run again with more) | NVIDIA (NVML or nvidia-smi), AMD (amd-smi) |
 | Which GPUs | `CUDA_VISIBLE_DEVICES` (NVIDIA) or `ROCR_VISIBLE_DEVICES` (AMD) shows a job only its GPUs, and none to a job without `--vram` | |
 | GPU use outside dibs | the guard stops it within about a second, after writing into its output how to queue it | daemon running |
 | Time | never enforced: the estimate only orders the queue | |
@@ -62,7 +62,8 @@ only its own GPUs; in the plan it holds everything.
 **RAM by use.** Agents reserve a median 2-4 times the RAM their jobs use, and each job keeps its own
 reservation as a hard cap. To let others use what sits idle, dibs plans with what a running job
 uses: the larger of its peak so far and earlier runs' peak, plus 25% or 1G, never more than it
-reserved. A job with no earlier runs counts at its whole reservation for its first ten minutes,
+reserved. Only jobs submitted with `--retry` start in the RAM this frees, since dibs may have to stop
+them. A job with no earlier runs counts at its whole reservation for its first ten minutes,
 and an exclusive job always does. A job that starts only thanks to this is marked as borrowing and
 runs with a high OOM score. If memory pressure (PSI some avg10) stays above 40% for 10 seconds,
 dibs stops the newest borrower itself rather than wait for the kernel's OOM killer, which acts only
