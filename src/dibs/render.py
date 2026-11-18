@@ -1,6 +1,7 @@
 """What people and agents read in their terminal."""
 
 import os
+import re
 import shlex
 import time
 
@@ -328,12 +329,17 @@ def render_info(info: dict) -> str:
 # for normal and red-green colour-blind vision (OKLab ΔE ≥ 19 and ≥ 10).
 _PALETTE = [f"38;5;{n}" for n in (167, 68, 64, 168, 136, 31, 166, 133, 29, 98)]
 _TICKS = [10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600, 7200, 10800, 21600, 43200, 86400, 172800, 604800]
-# dibs top's columns, each followed by a space that's always there (#118)
-_ID_W, _NAME_W, _SESSION_W, _WHEN_W = 5, 13, 14, 16
-_PLAN_LEFT = 4 + _ID_W + 1 + _NAME_W + 1  # where the plan's bars start, under "now"
-_NUMBERS = _PLAN_LEFT + _SESSION_W + 1  # where the CPU, RAM and VRAM numbers start
-_REASON_MIN = 10  # a reason shows only when this much of it fits
 _OUTSIDE_SGR = "38;5;245"  # a grey that reads on light and dark backgrounds: what programs outside dibs use (#120)
+# dibs top is an instrument panel (#122): rounded panels, quiet borders with their titles in them.
+_BORDER = "38;5;244"  # a mid grey: thin lines need more than dim to show on light and dark (3.5:1 or more)
+_WARN_SGR = "38;5;136"  # a job past its estimate, and what the guard stopped
+_LOAD_SGR = ("38;5;29", "38;5;136", "38;5;167")  # the load row with under half the cores busy, under 85%, more
+_SPARK = "▁▂▃▄▅▆▇█"
+# The job rows' columns, each followed by a space that's always there (#118)
+_ID_W, _NAME_W, _SESSION_W, _WHEN_W, _PROGRESS_W = 4, 13, 14, 16, 10  # "starts in 12h30m" is 16
+_SESSIONS_FROM = 110  # panels at least this wide inside (terminals of 114 columns) show each job's session
+_REASON_MIN = 10  # a reason shows only when this much of it fits
+_METER_MAX = 60  # the widest a meter gets
 
 
 def _job_color(job_id: int) -> str:
@@ -353,7 +359,7 @@ class _Line:
     def __len__(self) -> int:
         return sum(len(t) for t, _ in self.parts)
 
-    def render(self, width: int, color: bool) -> str:
+    def fit(self, width: int) -> "_Line":
         """The line cut to width; where visible text is lost, it ends with an ellipsis (#118)."""
         cut = len("".join(t for t, _ in self.parts).rstrip()) > width
         pieces, used = [], 0
@@ -368,7 +374,65 @@ class _Line:
                 pieces[-1][0] = pieces[-1][0].rstrip(" ,;:(")
                 if not pieces[-1][0].endswith("…"):
                     pieces[-1][0] += "…"
-        return "".join(f"\033[{s}m{t}\033[0m" if color and s and t else t for t, s in pieces).rstrip()
+        return _Line(*((t, s) for t, s in pieces if t))
+
+    def render(self, width: int, color: bool) -> str:
+        return "".join(f"\033[{s}m{t}\033[0m" if color and s else t for t, s in self.fit(width).parts).rstrip()
+
+
+def _spaced(pieces) -> list[tuple[str, str | None]]:
+    out: list[tuple[str, str | None]] = [(" ", None)]
+    for i, piece in enumerate(pieces):
+        out += [piece, (" ", None)] if i < len(pieces) - 1 else [piece]
+    return out + [(" ", None)]
+
+
+def _border(corners: str, width: int, *, title=(), note=(), labels=(), strip=None) -> _Line:
+    """A panel's top or bottom border, the terminal's width: a title on the left, a note on the right,
+    and labels at their cells (the plan's time axis, the columns' names) on a blank strip of cells."""
+    n = max(0, width - 2)
+    cells: list[tuple[str, str | None]] = [("─", _BORDER)] * n
+    taken = [False] * n
+
+    def place(x: int, pieces) -> None:
+        size = sum(len(t) for t, _ in pieces)
+        if x < 1 or x + size > n - 1 or any(taken[max(0, x - 1) : x + size + 1]):
+            return
+        for text, sgr in pieces:
+            for ch in text:
+                cells[x], taken[x] = (ch, sgr), True
+                x += 1
+
+    if title:
+        place(1, _spaced(title))
+    if note:
+        piece = _spaced(note)
+        place(n - 1 - sum(len(t) for t, _ in piece), piece)
+    if strip:
+        start = max(strip[0], max((i for i in range(n) if taken[i]), default=-1) + 2 if title else strip[0])
+        for i in range(max(1, start), min(strip[1], n - 1)):
+            if not taken[i]:
+                cells[i] = (" ", None)
+    for x, label in labels:
+        place(x, [(label, "2")])
+    line = _Line((corners[0], _BORDER))
+    for ch, sgr in cells:
+        if line.parts[-1][1] == sgr:
+            line.parts[-1] = (line.parts[-1][0] + ch, sgr)
+        else:
+            line.parts.append((ch, sgr))
+    return line.add(corners[1], _BORDER)
+
+
+def _panel(width: int, rows: list[_Line], *, title, note=(), foot=(), foot_note=(), labels=(), strip=None) -> list[_Line]:
+    """A rounded panel the terminal's width, each row fitted inside its borders so they never drift."""
+    inner = max(1, width - 4)
+    out = [_border("╭╮", width, title=title, note=note, labels=labels, strip=strip)]
+    for row in rows:
+        fitted = row.fit(inner)
+        out.append(_Line(("│ ", _BORDER), *fitted.parts, (" " * (inner - len(fitted)), None), (" │", _BORDER)))
+    out.append(_border("╰╯", width, title=foot, note=foot_note))
+    return out
 
 
 def _bar(width: int, total: float, shares: list[tuple[float, str]], outside: float = 0) -> list[tuple[str, str | None]]:
@@ -388,6 +452,28 @@ def _bar(width: int, total: float, shares: list[tuple[float, str]], outside: flo
         pieces.append(("▒" * grey, _OUTSIDE_SGR))
         filled += grey
     pieces.append(("░" * (width - filled), "2"))
+    return pieces
+
+
+def _spark(cores: list[float | None], total: int, width: int) -> list[tuple[str, str | None]]:
+    """The load row: the machine's busy cores over time, the newest on the right."""
+    n = len(cores)
+    if n <= width:
+        cells = [None] * (width - n) + list(cores)
+    else:
+        cells = []
+        for i in range(width):
+            known = [v for v in cores[i * n // width : (i + 1) * n // width] if v is not None]
+            cells.append(sum(known) / len(known) if known else None)
+    pieces: list[tuple[str, str | None]] = []
+    for v in cells:
+        share = (v or 0) / total if total else 0
+        ch, sgr = (" ", None) if v is None else (
+            _SPARK[min(7, max(0, round(share * 8) - 1))], _LOAD_SGR[0 if share < 0.5 else 1 if share < 0.85 else 2])
+        if pieces and pieces[-1][1] == sgr:
+            pieces[-1] = (pieces[-1][0] + ch, sgr)
+        else:
+            pieces.append((ch, sgr))
     return pieces
 
 
@@ -412,30 +498,6 @@ def _top_vram(job: dict, several_gpus: bool) -> str:
     return format_size(job["request"]["vram"])
 
 
-def _job_cells(job: dict, now: float, several_gpus: bool) -> tuple[str, str, str]:
-    """(resources, when, why) for a job row: CPUs, RAM and VRAM right-aligned under their labels."""
-    req = job["request"]
-    width = 8 if several_gpus else 5
-    res = f"{req['cpus']:>4} {format_size(req['mem']):>5} {_top_vram(job, several_gpus):>{width}}"
-    if job["state"] == "running":
-        if job.get("over_estimate"):
-            return res, f"over by {format_duration(job['over_estimate'])}", ""
-        return res, f"ends in {format_duration(max(0.0, job['expected_end'] - now))}", ""
-    if job.get("predicted_start") is None:
-        return res, "can't run", job.get("waiting_for", "")
-    if job["predicted_start"] <= now + 0.5:
-        return res, "starting", ""
-    return res, f"starts in {format_duration(job['predicted_start'] - now)}", job.get("waiting_for", "")
-
-
-def _span(job: dict, now: float) -> tuple[float, float] | None:
-    if job["state"] == "running":
-        return now, job["expected_end"]
-    if job.get("predicted_start") is None:
-        return None
-    return job["predicted_start"], job["predicted_end"]
-
-
 def _tick(seconds: float) -> str:
     """A tick label that keeps the units ticks need: 1m10s, 1h30m."""
     s = int(seconds)
@@ -448,129 +510,141 @@ def _tick(seconds: float) -> str:
     return format_duration(s)
 
 
-def _axis(width: int, left: int, span: float) -> tuple[_Line, float]:
-    """The timeline's time axis, and the tick interval chosen."""
-    area = width - left
-    interval = next((t for t in _TICKS if span / t <= max(1, area // 9)), _TICKS[-1])
-    axis = [" "] * width
-    marks = [(left, "now")]
-    t = interval
-    while t <= span:
-        marks.append((left + int(t / span * (area - 1)), "+" + _tick(t)))
-        t += interval
-    for x, label in marks:
-        if x + len(label) <= width and all(c == " " for c in axis[max(0, x - 1) : x + len(label) + 1]):
-            axis[x : x + len(label)] = label
-    return _Line((" PLAN".ljust(left), "1"), ("".join(axis[left:]).rstrip(), "2")), interval
+def _grid(several: bool, sessions: bool) -> tuple[int, int, int]:
+    """Inside a job panel: where the CPU, RAM and VRAM numbers start, the VRAM column's width, and
+    where the progress bar or the plan's timeline starts."""
+    numbers = 2 + _ID_W + 1 + _NAME_W + 1 + (_SESSION_W + 1 if sessions else 0)
+    vram = 8 if several else 5
+    return numbers, vram, numbers + 3 + 1 + 5 + 1 + vram + 2 + _WHEN_W + 2
+
+
+def _job_columns(job: dict, dot: str, several: bool, sessions: bool) -> _Line:
+    req = job["request"]
+    line = _Line((dot, _job_color(job["id"])),
+                 (f" {str(job['id']).ljust(_ID_W)} {_short(job['name'], _NAME_W).ljust(_NAME_W)} ", None))  # fmt: skip
+    if sessions:
+        line.add(_short_label(job["session_label"], _SESSION_W).ljust(_SESSION_W) + " ", "2")
+    vram = 8 if several else 5
+    return line.add(f"{req['cpus']:>3} {format_size(req['mem']):>5} {_top_vram(job, several):>{vram}}  ", None)
+
+
+def _running_row(job: dict, now: float, several: bool, sessions: bool) -> _Line:
+    """A running job: its resources, when it ends, and a bar of its time so far against its estimate."""
+    line = _job_columns(job, "●", several, sessions)
+    over, estimate = job.get("over_estimate") or 0, job["request"]["time"]
+    if over:
+        line.add(f"over by {format_duration(over)}".ljust(_WHEN_W) + "  ", _WARN_SGR)
+        done = _PROGRESS_W
+    else:
+        left = max(0.0, job["expected_end"] - now)
+        line.add(f"ends in {format_duration(left)}".ljust(_WHEN_W) + "  ", None)
+        done = round(min(1.0, max(0.0, 1 - left / estimate)) * _PROGRESS_W) if estimate else 0
+    return line.add("▰" * done, _WARN_SGR if over else _job_color(job["id"])).add("▱" * (_PROGRESS_W - done), "2")
+
+
+def _machine(snapshot: dict, width: int) -> list[_Line]:
+    """The machine panel: a meter for CPU, RAM and each GPU, and the load over the last minutes."""
+    now, cap, guard = snapshot["now"], snapshot["capacity"], snapshot.get("guard", {})
+    running = [j for j in snapshot["jobs"] if j["state"] == "running"]
+    outside = snapshot.get("outside")  # what programs outside dibs use (#120); an older daemon sends none
+    away = outside or {}
+    cpus_away = away.get("cpus") if (away.get("cpus") or 0) >= 0.5 else 0
+    mem_away = away.get("mem") or 0
+    rows = [
+        ("cpu", len(cap["cpus"]), [(j["request"]["cpus"], _job_color(j["id"])) for j in running],
+         lambda n: str(round(n)), cpus_away, "busy outside"),
+        ("mem", cap["mem"], [(j["request"]["mem"], _job_color(j["id"])) for j in running], format_size,
+         mem_away if mem_away >= cap["mem"] / 100 else 0, "used outside"),
+    ]  # fmt: skip
+    for g in cap["gpus"]:
+        shares = [(j["request"]["vram"], _job_color(j["id"])) for j in running if g["index"] in j.get("gpu_ids", [])]
+        rows.append((f"gpu {g['index']}" if len(cap["gpus"]) > 1 else "gpu", g["vram"], shares, format_size,
+                     (away.get("vram") or {}).get(str(g["index"]), 0), "used outside"))  # fmt: skip
+    # The figures' room depends on the totals alone, so the meters keep one width as top redraws.
+    room = max(len(f"{fmt(t)}/{fmt(t)}") + (len(f"   {fmt(t)} {verb}") if outside is not None else 0)
+               for _, t, _, fmt, _, verb in rows) + 4  # fmt: skip
+    meter = max(10, min(_METER_MAX, width - 4 - 6 - 2 - 2 - room))
+    lines = []
+    for name, total, shares, fmt, used_away, verb in rows:
+        used = sum(a for a, _ in shares)
+        line = _Line((f"{name:<6}", None), ("▕", _BORDER), *_bar(meter, total, shares, used_away), ("▏", _BORDER),
+                     (f"  {fmt(used)}/{fmt(total)}", None))  # fmt: skip
+        if used_away:
+            line.add(f"   {fmt(used_away)} {verb}", "2")
+        lines.append(line)
+    load = snapshot.get("load") or {}
+    cores = load.get("cores") or []
+    if sum(v is not None for v in cores) >= 2:
+        span = format_duration(len(cores) * load.get("every", 4.0))
+        lines.append(_Line(("load   ", None), *_spark(cores, len(cap["cpus"]), meter), (f"   busy cores, last {span}", "2")))
+    names = sorted({g["name"] for g in cap["gpus"]})
+    gpus = ", ".join(names) if len(names) > 1 else (f"{len(cap['gpus'])}× " if len(cap["gpus"]) > 1 else "") + "".join(names)
+    return _panel(width, lines, title=[("dibs", "1")], note=[(time.strftime("%H:%M:%S", time.localtime(now)), None)],
+                  foot=[(gpus, "2")] if gpus else (), foot_note=[(f"guard {guard.get('mode', '?')}", "2")])  # fmt: skip
 
 
 def _frame(snapshot: dict, width: int, rows_per_list: int) -> list[_Line]:
     now, cap, guard = snapshot["now"], snapshot["capacity"], snapshot.get("guard", {})
     running = [j for j in snapshot["jobs"] if j["state"] == "running"]
     queued = [j for j in snapshot["jobs"] if j["state"] == "queued"]
-    lines: list[_Line] = []
-
-    summary = (
-        f"guard {guard.get('mode', '?')} · {_plural(len(cap['cpus']), 'CPU')} · "
-        f"{format_size(cap['mem'])} RAM · {_plural(len(cap['gpus']), 'GPU')} "
-    )
-    head = f" dibs  {time.strftime('%H:%M:%S', time.localtime(now))}"
-    lines.append(_Line((" dibs ", "1;7"), (head[6:], None), (summary.rjust(max(0, width - len(head))), "2")))
-    lines.append(_Line())
-
-    label = 7
-    used_cpu = [(j["request"]["cpus"], _job_color(j["id"])) for j in running]
-    used_mem = [(j["request"]["mem"], _job_color(j["id"])) for j in running]
-    # What programs outside dibs use (#120), drawn when it's more than a trace; an older daemon sends none.
-    outside = snapshot.get("outside")
-    away = outside or {}
-    cpus_away = away.get("cpus") if (away.get("cpus") or 0) >= 0.5 else 0
-    mem_away = away.get("mem") or 0
-    rows = [
-        ("CPU", len(cap["cpus"]), used_cpu, lambda n: str(round(n)), cpus_away, "busy", None),
-        ("RAM", cap["mem"], used_mem, format_size, mem_away if mem_away >= cap["mem"] / 100 else 0, "in use", None),
-    ]
-    for g in cap["gpus"]:
-        shares = [(j["request"]["vram"], _job_color(j["id"])) for j in running if g["index"] in j.get("gpu_ids", [])]
-        vram_away = (away.get("vram") or {}).get(str(g["index"]), 0)
-        rows.append((f"GPU {g['index']}", g["vram"], shares, format_size, vram_away, "in use", g["name"]))
-    # Room for the figures beside the bars, from the totals alone, so the bars keep one width as top redraws.
-    room = 14
-    if outside is not None:
-        room = max(room, *(len(f" {fmt(t)}/{fmt(t)} · {fmt(t)} {verb} outside dibs") + 4 for _, t, _, fmt, _, verb, _ in rows))
-    bar_width = max(10, min(48, width - label - room))
-    for name, total, shares, fmt, used_away, verb, gpu_name in rows:
-        used = sum(a for a, _ in shares)
-        line = _Line((f" {name}".ljust(label), "1"), *_bar(bar_width, total, shares, used_away),
-                     (f" {fmt(used)}/{fmt(total)}", None))  # fmt: skip
-        if used_away:
-            line.add(f" · {fmt(used_away)} {verb} outside dibs", "2")
-        if gpu_name:
-            line.add(f"  {gpu_name}", "2")
-        lines.append(line)
-    lines.append(_Line())
-
+    inner = max(1, width - 4)
+    several, sessions = len(cap["gpus"]) > 1, inner >= _SESSIONS_FROM
+    numbers, vram_w, graphic = _grid(several, sessions)
+    lines = _machine(snapshot, width)
     if not running and not queued:
-        lines.append(_Line(("  Nothing running or queued.", "2")))
-    several = len(cap["gpus"]) > 1
-    sections = [(title, jobs) for title, jobs in (("RUNNING", running), ("QUEUED", queued)) if jobs]
-    for n, (title, jobs) in enumerate(sections):
-        head = _Line((f" {title}", "1"), (f"  {len(jobs)}", "2"))
-        if n == 0:  # the numbers' labels, over their columns
-            head.add(" " * max(1, _NUMBERS - len(head)))
-            head.add(f"{'CPUs':>4} {'RAM':>5} {'VRAM':>{8 if several else 5}}", "2")
-        else:
-            lines.append(_Line())
-        lines.append(head)
-        for job in jobs[:rows_per_list]:
-            res, when_text, why = _job_cells(job, now, several)
-            line = _Line(
-                ("  ", None),
-                ("●", _job_color(job["id"])),  # the job's colour on a mark, its text in plain ink
-                (" " + f"#{job['id']}".ljust(_ID_W) + " " + _short(job["name"], _NAME_W).ljust(_NAME_W) + " ", None),
-                (_short_label(job["session_label"], _SESSION_W).ljust(_SESSION_W) + " ", "2"),
-                (res + "  ", None),
-                (when_text.ljust(_WHEN_W) + "  ", None),
-            )
-            if why and width - len(line) >= _REASON_MIN:
-                line.add(why, "2")
-            lines.append(line)
-        if len(jobs) > rows_per_list:
-            lines.append(_Line((f"  … {len(jobs) - rows_per_list} more {title.lower()}", "2")))
+        lines += _panel(width, [_Line(("Nothing running or waiting.", None)),
+                                _Line(("Queue a job: dibs submit --cpus 4 --mem 8G --time 20m -- python train.py", "2"))],
+                        title=[("queue", "1")])  # fmt: skip
 
-    planned = [(j, s) for j in running + queued if (s := _span(j, now))]
-    if planned:
-        left = _PLAN_LEFT
-        horizon = max(end for _, (_, end) in planned)
+    def more(jobs: list) -> list:
+        return [(f"{len(jobs) - rows_per_list} more", "2")] if len(jobs) > rows_per_list else []
+
+    if running:
+        rows = [_running_row(j, now, several, sessions) for j in running[:rows_per_list]]
+        # Cell x of a border sits above column x - 1 inside the panel.
+        labels = [(numbers, "cpus"), (numbers + 7, "ram"), (numbers + 7 + vram_w, "vram")]
+        lines += _panel(width, rows, title=[("running", "1"), (str(len(running)), "2")], labels=labels,
+                        strip=(numbers - 1, numbers + 12 + vram_w), foot_note=more(running))  # fmt: skip
+    if queued:
+        planned = [j for j in queued if j.get("predicted_start") is not None]
+        horizon = max((j["predicted_end"] for j in planned), default=now + 60)
         span = max(60.0, horizon - now)
-        lines.append(_Line())
-        axis, _ = _axis(width, left, span)
-        lines.append(axis)
-        area = max(1, width - left)
-        for job, (start, end) in planned[: rows_per_list * 2]:
-            x0 = int((max(start, now) - now) / span * (area - 1))
-            x1 = max(x0 + 1, int((end - now) / span * (area - 1)))
-            lines.append(
-                _Line(
-                    ("    " + f"#{job['id']}".ljust(_ID_W) + " " + _short(job["name"], _NAME_W).ljust(_NAME_W) + " ",
-                     None),  # fmt: skip
-                    (" " * x0, None),
-                    ("█" * (min(x1, area) - x0), _job_color(job["id"])),
-                )
-            )
-        if len(planned) > rows_per_list * 2:
-            lines.append(_Line((f"  … {len(planned) - rows_per_list * 2} more", "2")))
-
+        timeline = max(8, (inner - graphic) * 3 // 5)
+        x = lambda t: int((max(t, now) - now) / span * (timeline - 1))  # noqa: E731
+        rows = []
+        for job in queued[:rows_per_list]:
+            line = _job_columns(job, "○", several, sessions)
+            start = job.get("predicted_start")
+            if start is None:
+                line.add("can't run".ljust(_WHEN_W) + "  ", None)
+            else:
+                line.add(("starting" if start <= now + 0.5 else f"starts in {format_duration(start - now)}")
+                         .ljust(_WHEN_W) + "  ", None)  # fmt: skip
+                x0, x1 = x(start), min(timeline, max(x(start) + 1, x(job["predicted_end"])))
+                line.add(" " * x0).add("━" * (x1 - x0), _job_color(job["id"]))
+            # The mem meter already says how much is in use outside dibs; every row repeated it.
+            why = re.sub(r", [\d.]+[KMGT]? in use outside dibs", "", job.get("waiting_for", ""))
+            shown = _Line((why, None)).fit(max(0, inner - len(line) - 2))
+            if why and len(shown) >= min(len(why), _REASON_MIN):  # enough of it, or none
+                line.add("  " + why, "2")
+            rows.append(line)
+        interval = next((t for t in _TICKS if span / t <= max(1, timeline // 7)), _TICKS[-1])
+        marks = [(graphic + 1, "now")] + [(graphic + 1 + x(now + t), "+" + _tick(t))
+                                          for t in range(int(interval), int(span) + 1, int(interval))]  # fmt: skip
+        marks = [(x, label) for x, label in marks if x + len(label) < width - 3]  # whole labels only
+        strip = (graphic, max(x + len(label) for x, label in marks) + 1) if marks else None
+        lines += _panel(width, rows, title=[("waiting", "1"), (str(len(queued)), "2")], labels=marks,
+                        strip=strip, foot_note=more(queued))  # fmt: skip
     extra = guard_lines(guard, now)
     if extra:
-        lines.append(_Line())
-        lines += [_Line((f" {text}", "33" if text.startswith("Stopped") else "2")) for text in extra[:4]]
+        rows = [_Line((text, _WARN_SGR if text.startswith("Stopped") else "2")) for text in extra[:4]]
+        lines += _panel(width, rows, title=[("guard", "1")])
     return lines
 
 
 def render_top(snapshot: dict, *, width: int, height: int, color: bool) -> str:
-    """One screen of `dibs top`: what's reserved, what runs, what's next, and the plan over time."""
-    width = max(width, 20)
+    """One screen of `dibs top`: an instrument panel of what's reserved, what runs, what's next (#122)."""
+    width = max(width, 30)
     rows = max(1, len(snapshot["jobs"]))
     lines = _frame(snapshot, width, rows)
     while len(lines) > height and rows > 1:

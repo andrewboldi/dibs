@@ -1140,3 +1140,36 @@ def test_snapshot_shows_the_ram_in_use_outside_dibs_that_waiting_jobs_are_told(m
     snap = d.snapshot()
     assert snap["outside"]["mem"] == 10 * GiB
     assert "10G in use outside dibs" in next(j for j in snap["jobs"] if j["id"] == big)["waiting_for"]
+
+
+def test_snapshot_keeps_ten_minutes_of_the_machines_busy_cores(make_daemon):
+    # Issue #122: dibs top's load row. Its own samples, so they survive jobs starting and ending.
+    now, busy, slept = [time.time()], [0.0], [0.0]
+    d = make_daemon(clock=lambda: now[0], cpu_busy=lambda: busy[0], slept=lambda: slept[0])
+    assert d.snapshot()["load"] == {"every": 4.0, "cores": []}
+    for cores in (2, 6, 12):
+        d.tick()
+        now[0] += 4.0
+        busy[0] += cores * 4.0
+    d.tick()
+    assert d.snapshot()["load"]["cores"] == pytest.approx([2, 6, 12])
+    slept[0] += 300.0  # the machine slept: that interval is a gap, not an idle machine
+    now[0] += 304.0
+    busy[0] += 4.0
+    d.tick()
+    assert d.snapshot()["load"]["cores"][-1] is None
+    for _ in range(200):  # only the last 10 minutes are kept
+        now[0] += 4.0
+        busy[0] += 4.0
+        d.tick()
+    assert len(d.snapshot()["load"]["cores"]) == 150
+
+
+def test_the_load_row_never_gets_in_the_way_of_scheduling(make_daemon, tmp_path):
+    def broken():
+        raise OSError("no /proc/stat")
+
+    d = make_daemon(cpu_busy=broken)
+    job_id = submit(d, tmp_path, [PY, "-c", "pass"])
+    run_until(d, lambda: job(d, job_id).state == State.DONE)
+    assert d.snapshot()["load"]["cores"] == []
