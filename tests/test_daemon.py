@@ -1418,3 +1418,17 @@ def test_lining_up_again_keeps_a_higher_priority_job_ahead_of_its_sessions_other
     assert job(daemon, high).tag < job(daemon, low).tag
     assert all(job(daemon, j).tag <= job(daemon, j).submitted + 1200 + 1 for j in (high, low))
     daemon.cancel([hold, low, high])
+
+
+def test_a_restart_lines_every_session_up_again(daemon, tmp_path):
+    # Issue #150 relines a session when one of its waiting jobs starts or is cancelled; places set by
+    # an older dibs stay inflated until then, so recovery relines every session once.
+    hold = _machine_held(daemon, tmp_path)
+    b = submit(daemon, tmp_path, LONG, time_=600.0)
+    j = job(daemon, b)
+    j.tag = j.plain_tag = j.submitted + 24 * 3600.0  # a place an older dibs gave it, a day out
+    daemon.store.update_job(j)
+    daemon.recover()
+    j = job(daemon, b)
+    assert j.tag == pytest.approx(j.submitted + 600, abs=1)
+    daemon.cancel([hold, b])
