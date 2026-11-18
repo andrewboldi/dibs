@@ -248,8 +248,9 @@ On every scheduling pass, dibs builds a plan for every queued job, in priority o
    higher-priority jobs. Candidate times are `now` and every time something is expected to end.
    "Fits" means: enough free CPUs, enough free RAM, and `gpus` distinct GPUs each with at least
    `vram` free, all for the entire interval `[t, t + estimate)`.
-3. Reserve those resources for that interval (choose GPUs best-fit: the GPUs with the least
-   sufficient free VRAM over the interval; ties go to the lowest index). Move to the next job.
+3. Reserve those resources for that interval (choose the GPUs with the fewest jobs over the
+   interval, since jobs on one GPU share its compute; among those, the least sufficient free VRAM,
+   so a big GPU stays free for big jobs; ties go to the lowest index; #146). Move to the next job.
 4. Every job whose planned start is `now` is started now, in priority order.
 
 So a lower-priority job only starts early if it fits in a gap without delaying any reservation
@@ -668,7 +669,7 @@ them. Limits, stated plainly in the README:
     than the bound in 7.1;
   - a session flooding the queue interleaves with other sessions as in 7.1;
   - backfill never delays a higher-priority job's planned start;
-  - multi-GPU requests, mixed VRAM sizes, best-fit placement, zero-GPU machines;
+  - multi-GPU requests, mixed VRAM sizes, placement on the least busy GPU, zero-GPU machines;
   - overrunning jobs: not stopped, predictions shift;
   - rejection of requests that can never fit; `all` values.
 - **Simulation tests**: a discrete-event simulator drives the real planner with random job streams

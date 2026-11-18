@@ -293,3 +293,29 @@ def test_a_waiting_job_says_in_a_word_what_it_lacks_or_whom_it_would_delay():
     hungry = queued(5, req(cpus=1, mem=30 * GiB, gpus=1, vram=6 * GiB), tag=0)
     holder = running(6, req(cpus=1, mem=8 * GiB, gpus=1, vram=4 * GiB, time=200), [0], [0])
     assert plan(cap(), [holder], [hungry], NOW).predictions[5].lacks == ("RAM", "VRAM")
+
+
+def test_one_gpu_jobs_spread_over_identical_gpus():
+    # Issue #146: placed by VRAM alone, four 20G jobs all went to GPU 0 of two 179G GPUs while GPU 1
+    # stayed empty, and jobs on one GPU share its compute.
+    big = cap(cpus=64, mem=512 * GiB, gpus=(179 * GiB, 179 * GiB))
+    jobs = [queued(i, req(gpus=1, vram=20 * GiB), tag=i) for i in range(1, 5)]
+    p = plan(big, [], jobs, NOW)
+    assert sorted(s.gpu_ids for s in p.starts) == [(0,), (0,), (1,), (1,)]
+
+
+def test_a_small_job_takes_the_idle_gpu_not_the_busy_one():
+    big = cap(cpus=64, mem=512 * GiB, gpus=(179 * GiB, 179 * GiB))
+    busy = running(1, req(gpus=1, vram=100 * GiB, time=7200), (0,), (0,))
+    p = plan(big, [busy], [queued(2, req(gpus=1, vram=20 * GiB))], NOW)
+    assert p.starts[0].gpu_ids == (1,)
+
+
+def test_a_job_counts_on_a_gpu_only_while_it_runs():
+    # A job on GPU 1 that ends before the new one starts doesn't make GPU 1 busy for it.
+    big = cap(cpus=64, mem=512 * GiB, gpus=(179 * GiB, 179 * GiB))
+    soon = running(1, req(gpus=1, vram=20 * GiB, time=100), (0,), (1,), started=NOW - 90)
+    later = running(2, req(gpus=1, vram=20 * GiB, time=7200), (1,), (0,))
+    waits = queued(3, req(cpus=63, gpus=1, vram=20 * GiB, time=600))  # waits for job 1's core
+    p = plan(big, [soon, later], [waits], NOW)
+    assert p.predictions[3].gpu_ids == (1,)
