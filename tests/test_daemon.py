@@ -674,6 +674,16 @@ def test_recovery_sweeps_temp_folders_of_jobs_that_ended(make_daemon, tmp_path):
     assert not orphan.exists()
 
 
+def test_submit_tells_the_session_how_its_estimates_compared(daemon, tmp_path):
+    # Issue #95: deterministic feedback, never a rescaled estimate.
+    for _ in range(5):
+        j = submit(daemon, tmp_path, [PY, "-c", "pass"], time_=600.0, session="s1")
+        run_until(daemon, lambda: finished(daemon, j))
+    resp = daemon.submit(req(tmp_path, [PY, "-c", "pass"], session="s1"))
+    assert resp["estimates"]["jobs"] == 5 and resp["estimates"]["median"] < 0.05
+    assert "estimates" not in daemon.submit(req(tmp_path, [PY, "-c", "pass"], session="s2"))  # too few to say
+
+
 def test_submit_reports_earlier_runs_of_the_same_command(daemon, tmp_path):
     # Issue #31: agents guess their requests; dibs tells them what the same command used before.
     first = submit(daemon, tmp_path, [PY, "-c", "pass"])
@@ -861,3 +871,15 @@ def test_earlier_runs_of_the_script_say_so():
            "request": {"cpus": 1, "mem": 1 << 30, "gpus": 0, "vram": 0, "time": 120.0}}  # fmt: skip
     assert render_earlier([run], "script").startswith("Earlier runs of train.py here, with other arguments:")
     assert render_earlier([run]).startswith("Earlier runs of this command here:")
+
+
+def test_render_estimate_feedback():
+    from dibs.render import render_estimates
+
+    assert render_estimates({"jobs": 20, "median": 0.11}) == (
+        "Your session's last 20 jobs ran a median 11% of their estimates: a closer --time gets jobs started sooner."
+    )
+    assert render_estimates({"jobs": 8, "median": 1.6}) == (
+        "Your session's last 8 jobs ran a median 160% of their estimates: a longer --time keeps predictions right."
+    )
+    assert render_estimates({"jobs": 20, "median": 0.9}) == "" and render_estimates(None) == ""
