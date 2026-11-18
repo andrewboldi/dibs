@@ -1038,7 +1038,8 @@ class Daemon:
     def _short_of_ram(self) -> bool:
         """Whether little of the machine's RAM is available. Pressure alone doesn't say so: one job
         stalling inside itself, at its own limit or while the kernel compacts memory for huge pages,
-        raises it with most of the RAM free (#129). Unreadable, it leaves the pressure to decide."""
+        raises it with most of the RAM free (#129), and so does the minute after a real shortage, while
+        pages pushed out to swap come back in (#131). Unreadable, it leaves the pressure to decide."""
         info = self._meminfo()
         return info is None or info[0] - info[1] < info[0] * SHORT_OF_RAM
 

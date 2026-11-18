@@ -80,8 +80,9 @@ one outside dibs, if one holds a tenth of the RAM or more (see the guard below),
 the newest borrower; one per stretch of shortage. Either way dibs runs a borrower again
 within RAM nobody reserved, outside its retry limit, since starting it there was dibs's choice.
 Pressure with RAM to spare stops nothing: it comes from one job stalling inside itself, at its own
-limit or while the kernel compacts memory for huge pages. No job starts this way while pressure is
-above 10%. `borrow_ram = false` turns it off.
+limit or while the kernel compacts memory for huge pages, or from the minute after a real shortage,
+while pages pushed out to swap come back in (pressure stayed at 99.5% for a minute with half the RAM
+free). No job starts this way while pressure is above 10%. `borrow_ram = false` turns it off.
 
 **Momentum.** For a project working better than expected and held up by another project's jobs,
 the user can agree to a boost: the agent asks them in plain words and, after their yes, records it
