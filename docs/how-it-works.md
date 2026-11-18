@@ -59,6 +59,15 @@ a busy program let go of for a moment. A job that doesn't fit beside it waits wi
 other job is running, and no job starts beside it. It is still pinned to its own `--cpus` and sees
 only its own GPUs; in the plan it holds everything.
 
+**RAM by use.** Agents reserve a median 2-4 times the RAM their jobs use, and each job keeps its own
+reservation as a hard cap. To let others use what sits idle, dibs plans with what a running job
+uses: the larger of its peak so far and earlier runs' peak, plus 25% or 1G, never more than it
+reserved. A job with no earlier runs counts at its whole reservation for its first ten minutes,
+and an exclusive job always does. A job that starts only thanks to this is marked as borrowing and
+runs with a high OOM score: if the machine runs out of RAM after all, the kernel kills it rather
+than anything else, and dibs runs it again within RAM nobody reserved. No job starts this way while
+the machine is short of memory (PSI some avg10 above 10%). `borrow_ram = false` turns it off.
+
 **The guard.** It stops GPU processes that aren't dibs jobs. It leaves alone other users'
 processes, programs listed in `guard_allow`, programs launched from the desktop, and work that was
 already running when it was switched on (including what that work starts later, like torchrun
@@ -113,6 +122,7 @@ vram = "7.5G"        # at most this much VRAM per GPU
 guard = "all"        # "all" stops GPU processes outside dibs, "warn" only lists them, "off"
 guard_allow = ["ollama"]
 guard_desktop = true # leave alone GPU programs launched from the desktop (not terminals or editors)
+borrow_ram = true    # let jobs start in RAM other jobs reserved but aren't using
 keep_days = 14       # how long finished jobs' logs are kept
 agent_files = ["~/.cursor/rules/dibs.mdc"]   # more instructions files for dibs setup
 ```

@@ -52,6 +52,8 @@ OUTSIDE_WINDOW = 120.0  # seconds: RAM in use outside dibs counts as its peak ov
 JOBS_RAM_WINDOW = 10.0  # seconds: RAM dibs jobs hold counts as its peak over this long, when taken off the in-use total
 RETENTION_EVERY = 3600.0
 MAX_RETRIES = 2  # runs again after a resource failure, at most (#84)
+YOUNG = 600.0  # seconds: a job with no earlier runs counts at its whole RAM reservation this long (#86)
+PRESSURE_LIMIT = 10.0  # percent (PSI some avg10): above it, no job starts on borrowed RAM
 EARLY_STOP = 60.0  # seconds: a job stopped for VRAM sooner than this was likely still growing (#80)
 ALIVE_EVERY = 60.0  # seconds: how often the daemon notes it's alive, so a reboot can be dated (#78)
 RECENT = 86400.0  # how far back `queue --all` looks
@@ -66,11 +68,23 @@ def _rejected(message: str) -> dict:
     return {"ok": False, "code": "rejected", "error": message}
 
 
-def _holding(job: Job) -> Request:
-    """A running job's request as the planner should count it: VRAM it borrowed counts as held."""
-    if job.peak_vram and job.request.gpus and job.peak_vram > job.request.vram:
-        return replace(job.request, vram=job.peak_vram)
-    return job.request
+def _ram_kill_reason(job: Job, result: dict) -> str:
+    """Why a job was killed for RAM: at its own limit, or because the whole machine ran out (#86)."""
+    if result.get("hit_limit") is False:
+        borrowed = ", while it used RAM other jobs had reserved" if job.borrowed_ram else ""
+        return "killed when the machine ran out of RAM" + borrowed
+    return f"killed: went over its {format_size(job.request.mem)} RAM reservation" + _shared_part(job)
+
+
+def _holding(job: Job, mem: int | None = None) -> Request:
+    """A running job's request as the planner should count it: VRAM it borrowed counts as held (#88),
+    and its RAM as `mem` when RAM is planned by use (#86)."""
+    request = job.request
+    if job.peak_vram and request.gpus and job.peak_vram > request.vram:
+        request = replace(request, vram=job.peak_vram)
+    if mem is not None and mem != request.mem:
+        request = replace(request, mem=mem)
+    return request
 
 
 def _shared_part(job: Job) -> str:
@@ -105,6 +119,7 @@ class Daemon:
         clock: Callable[[], float] = time.time,
         meminfo: Callable[[], tuple[int, int] | None] = procs.meminfo,
         slept: Callable[[], float] = procs.slept,
+        pressure: Callable[[], float] = procs.memory_pressure,
     ):
         self.paths = paths
         self.config = config
@@ -116,6 +131,7 @@ class Daemon:
         self.use_systemd = use_systemd
         self.clock = clock
         self.slept = slept
+        self.pressure = pressure
         ensure_dirs(paths)
         self.store = Store(paths.db)
         self.closed = False
@@ -210,6 +226,7 @@ class Daemon:
             retry=req.get("retry") is not False,
             owed_carried=carried,
             owed_left=left,
+            history_mem=self._history_mem(cwd, list(argv)),
             state=State.QUEUED,
             output=output or "",
         )
@@ -486,17 +503,45 @@ class Daemon:
     def _plan(self, now: float) -> tuple[Plan, list[Job], list[Job]]:
         running = self.store.jobs([State.RUNNING])
         queued = self.store.jobs([State.QUEUED])
+        borrowing = self._borrowing()
         current = plan(
             self.capacity,
             # A job's estimate is of its running time, so the time the machine slept moves its start on.
             # A job that borrows VRAM (#88) counts at what it has used, so nothing starts into it.
-            [Running(j.id, _holding(j), tuple(j.cpu_ids), tuple(j.gpu_ids), (j.started or now) + self._asleep(j))
+            [Running(j.id, _holding(j, self._planned_mem(j, now) if borrowing else None), tuple(j.cpu_ids),
+                     tuple(j.gpu_ids), (j.started or now) + self._asleep(j))
              for j in running],
             [Queued(j.id, j.request, j.tag, j.submitted) for j in queued],
             now,
             outside_mem=self._outside_mem(now, running),
         )
         return current, running, queued
+
+    def _history_mem(self, cwd: str, argv: list[str]) -> int | None:
+        """The peak RAM of earlier runs of the same command here (or the same script), if any."""
+        runs = [j for j in self.store.earlier_runs(cwd, argv, limit=6) if j.peak_mem]
+        script = script_of(argv)
+        if not runs and script:
+            runs = [j for j in self.store.earlier_runs_of_script(cwd, script, limit=6) if j.peak_mem]
+        return max((j.peak_mem for j in runs), default=None)
+
+    def _borrowing(self) -> bool:
+        """Whether jobs may start on RAM other jobs reserved but aren't using (#86): unless switched off,
+        and not while the machine is short of memory."""
+        return self.config.borrow_ram and self.pressure() < PRESSURE_LIMIT
+
+    def _planned_mem(self, job: Job, now: float) -> int:
+        """What a running job counts as holding when RAM is planned by use (#86): the larger of its peak
+        so far (which only grows) and earlier runs' peak, plus 25% or 1G, whichever is more, never more
+        than its reservation. A job with no earlier runs counts at its whole reservation for its first
+        ten minutes, while it may still be growing, and an exclusive job always does."""
+        if job.request.exclusive:
+            return job.request.mem
+        known = max(job.peak_mem or 0, job.history_mem or 0)
+        ran = now - (job.started or now) - self._asleep(job)
+        if not known or (not job.history_mem and ran < YOUNG):
+            return job.request.mem
+        return min(job.request.mem, max(int(known * 1.25), known + GiB))
 
     def _outside_mem(self, now: float, running: list[Job]) -> int:
         """RAM in use outside dibs jobs that eats into what dibs hands out, as its peak over the last
@@ -528,10 +573,18 @@ class Daemon:
     def schedule(self) -> None:
         """Start every queued job the plan says can start now."""
         now = self.clock()
-        current, _, queued = self._plan(now)
+        current, running, queued = self._plan(now)
         by_id = {j.id: j for j in queued}
+        # RAM nobody has reserved: a job that needs more starts on RAM other jobs reserved but aren't
+        # using, as a borrower (#86), which a job retried after the machine ran out may not do.
+        unreserved = self.capacity.mem - self._outside_mem(now, running) - sum(j.request.mem for j in running)
         for start in current.starts:
             job = by_id[start.job_id]
+            borrowed = job.request.mem > unreserved
+            if borrowed and job.no_borrow:
+                continue
+            unreserved -= job.request.mem
+            job.borrowed_ram = borrowed
             job.cpu_ids, job.gpu_ids = list(start.cpu_ids), list(start.gpu_ids)
             job.started, job.state = now, State.RUNNING
             job.sleep_at_start = self.slept()
@@ -788,8 +841,8 @@ class Daemon:
             job.peak_mem = result.get("peak_mem")
         retry = self._retry_with(job, result) if job.cancel_requested is None else None
         if retry is not None:
-            request, change, reason = retry
-            self._retry(job, f"{reason}; retrying with {change}", request)
+            request, how, reason = retry
+            self._retry(job, f"{reason}; retrying" + (f" {how}" if how else ""), request)
             return
         if job.cancel_requested is not None:
             job.state = State.CANCELLED
@@ -802,7 +855,7 @@ class Daemon:
         elif job.cancel_requested is not None:
             job.reason = "cancelled"
         elif result.get("oom_killed"):
-            job.reason = f"killed: went over its {format_size(job.request.mem)} RAM reservation" + _shared_part(job)
+            job.reason = _ram_kill_reason(job, result)
         else:
             job.reason = result.get("reason")
         self.store.update_job(job)
@@ -811,16 +864,20 @@ class Daemon:
 
     def _retry_with(self, job: Job, result: dict) -> tuple[Request, str, str] | None:
         """For a job that failed for a resource reason and may run again: the request to run it with,
-        what changed (as a flag) and why. None when it isn't such a failure, or it can't fit."""
+        how (after "retrying") and why. None when it isn't such a failure, or it can't fit."""
         if not job.retry or len(job.attempts) >= MAX_RETRIES:
             return None
         if job.stop_reason and job.retry_vram and job.retry_vram > job.request.vram:
-            return replace(job.request, vram=job.retry_vram), f"--vram {self._vram_text(job.retry_vram)}", job.stop_reason
+            return replace(job.request, vram=job.retry_vram), f"with --vram {self._vram_text(job.retry_vram)}", job.stop_reason
+        if result.get("oom_killed") and result.get("hit_limit") is False:
+            # The machine ran out, not the job's own limit: run it as it was, within RAM nobody reserved
+            # if it had borrowed (#86).
+            job.no_borrow = job.no_borrow or job.borrowed_ram
+            return job.request, "without borrowing" if job.borrowed_ram else "", _ram_kill_reason(job, result)
         if result.get("oom_killed"):
             mem = math.ceil(max(job.peak_mem or 0, job.request.mem) * 1.25 / GiB) * GiB
             if mem <= self.capacity.mem:
-                reason = f"killed: went over its {format_size(job.request.mem)} RAM reservation" + _shared_part(job)
-                return replace(job.request, mem=mem), f"--mem {format_size(mem)}", reason
+                return replace(job.request, mem=mem), f"with --mem {format_size(mem)}", _ram_kill_reason(job, result)
         return None
 
     def _vram_text(self, vram: int) -> str:
@@ -847,6 +904,7 @@ class Daemon:
         job.cpu_ids, job.gpu_ids = [], []
         job.shim_pid = job.shim_ticks = job.unit = None
         job.stop_reason = job.stop_requested = job.retry_vram = None
+        job.borrowed_ram = False
         job.peak_mem = job.peak_shmem = job.peak_vram = None
         job.sleep_at_start, job.asleep = None, 0.0
         with contextlib.suppress(FileNotFoundError):

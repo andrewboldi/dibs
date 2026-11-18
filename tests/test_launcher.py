@@ -215,12 +215,20 @@ needs_systemd = pytest.mark.skipif(
 
 
 @needs_systemd
+def test_a_job_started_on_borrowed_ram_runs_with_a_high_oom_score(paths):
+    # Issue #86: if the machine runs out of RAM, the kernel kills a job running on borrowed RAM first.
+    job = make_job(paths, [PY, "-c", "print(open('/proc/self/oom_score_adj').read().strip())"])
+    job.borrowed_ram = True
+    wait_exit(paths, run(paths, job))
+    assert output(job).strip() == "800"
+
+
 def test_ram_cap_kills_with_oom_flag(paths):
     code = "x = bytearray(300 << 20); print('allocated')"
     job = run(paths, make_job(paths, [PY, "-c", code], mem=100 * MiB), use_systemd=True)
     result = wait_exit(paths, job)
     assert result["exit_code"] == 137
-    assert result["oom_killed"] is True
+    assert result["oom_killed"] is True and result["hit_limit"] is True  # its own limit, not the machine's (#86)
     assert result["peak_mem"] >= 99 * MiB
     assert "allocated" not in output(job)
 

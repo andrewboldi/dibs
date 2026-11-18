@@ -68,6 +68,9 @@ def unit_name(instance: str, job_id: int) -> str:
     return f"dibs-{instance}-job-{job_id}"
 
 
+BORROWER_OOM_SCORE = 800
+
+
 def job_tmp(paths: Paths, job_id: int) -> Path:
     """The job's own temp folder, under the system temp directory, deleted when the job ends (#89)."""
     return Path(tempfile.gettempdir()) / f"dibs-{paths.instance}-job-{job_id}"
@@ -145,6 +148,8 @@ def launch(job: Job, paths: Paths, *, use_systemd: bool, vendor: str = "nvidia")
         "output": job.output,
         "mem": job.request.mem,
         "unit": unit,
+        # Started on borrowed RAM: if the machine runs out, the kernel kills this job first (#86).
+        "oom_score_adj": BORROWER_OOM_SCORE if job.borrowed_ram else None,
     }
     _write_private(job_dir / "spec.json", json.dumps(spec))
     command = [sys.executable, "-m", "dibs.shim", str(job_dir)]
