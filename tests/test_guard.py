@@ -193,15 +193,20 @@ def test_guard_since_survives_restart(make_daemon):
     assert make_daemon().guard_since > since  # switched off and on again: a new start
 
 
+EARLY = ", in its first minute, so it was likely still growing"
+
+
 @pytest.mark.parametrize(
-    "used,reason",
+    "used,ran,reason",
     [
-        (7 * GiB, "stopped: used 7G VRAM on GPU 0, reserved 6G; resubmit with --vram all"),
+        (7 * GiB, 0, f"stopped: used 7G VRAM on GPU 0, reserved 6G{EARLY}; resubmit with --vram all"),
         # 1 MiB over: rounded to 6G, the figure would hide the overage
-        (6 * GiB + MiB, "stopped: used 6145M VRAM on GPU 0, reserved 6G; resubmit with --vram 7G"),
+        (6 * GiB + MiB, 0, f"stopped: used 6145M VRAM on GPU 0, reserved 6G{EARLY}; resubmit with --vram all"),
+        # Issue #80: after its first minute, the peak is a fair guide and 10% on top will do
+        (6 * GiB + MiB, 120, "stopped: used 6145M VRAM on GPU 0, reserved 6G; resubmit with --vram 7G"),
     ],
 )
-def test_vram_overuse_stops_job(world, tmp_path, used, reason):
+def test_vram_overuse_stops_job(world, tmp_path, used, ran, reason):
     d, backend = world()
     resp = d.submit(
         {
@@ -215,6 +220,9 @@ def test_vram_overuse_stops_job(world, tmp_path, used, reason):
     job_id = resp["job"]["id"]
     job = d.store.get_job(job_id)
     pid = wait_for(lambda: next((p for p in launcher.job_pids(job) if (procs.cmdline(p) or [""])[0] == PY), None))
+    job = d.store.get_job(job_id)
+    job.started -= ran  # as if it had been running this long
+    d.store.update_job(job)
     backend.procs = [GpuProcess(pid, 0, used)]
     run_until(d, lambda: d.store.get_job(job_id).state == State.FAILED)
     j = d.store.get_job(job_id)

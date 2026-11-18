@@ -114,11 +114,13 @@ def compute_tag(
     return max(submitted, start + owed + estimate * num / den)
 
 
-def vram_to_ask(peak: int, gpu_vram: int | None) -> str:
-    """What --vram to ask for after a job was stopped at this peak: 10% headroom, rounded up to half a
-    gigabyte, or "all" when that's more than the GPU has."""
+def vram_to_ask(peak: int, gpu_vram: int | None, early: bool = False) -> str:
+    """What --vram to ask for after a job was stopped at this peak, rounded up to half a gigabyte, or
+    "all" when that's more than the GPU has: 10% headroom, or, when it was stopped in its first
+    minute and likely still growing, the larger of 25% and 1G (#80)."""
     half = GiB // 2
-    ask = math.ceil(peak * 1.1 / half) * half
+    want = max(peak * 1.25, peak + GiB) if early else peak * 1.1
+    ask = math.ceil(want / half) * half
     return "all" if gpu_vram is not None and ask >= gpu_vram else format_size(ask)
 
 

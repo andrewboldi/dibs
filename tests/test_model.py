@@ -174,6 +174,21 @@ def test_vram_to_ask_after_a_stop_is_the_peak_plus_headroom_rounded_up():
     assert vram_to_ask(7 * gib, 8 * gib) == "all"  # the peak plus headroom doesn't fit: the whole GPU
 
 
+def test_vram_to_ask_after_a_stop_in_the_first_minute_leaves_more_headroom():
+    # Issue #80: a job stopped 6 s in at 3.57G was resubmitted with the advised 4G and stopped again
+    # at 4.03G. Stopped while still allocating, its peak so far understates what it needs.
+    from dibs.model import vram_to_ask
+
+    gib = 1 << 30
+    assert vram_to_ask(int(3.57 * gib), 8 * gib, early=True) == "5G"  # 1G on top beats 25% here
+    assert vram_to_ask(int(2.19 * gib), 8 * gib, early=True) == "3.5G"
+    assert vram_to_ask(int(10 * gib), 24 * gib, early=True) == "12.5G"  # 25% beats 1G
+    assert vram_to_ask(5 * gib + (1 << 20), 8 * gib, early=True) == "6.5G"
+    assert vram_to_ask(6 * gib + (1 << 20), 8 * gib, early=True) == "all"  # 7.5G and a bit: the whole GPU
+    assert vram_to_ask(7 * gib, 8 * gib, early=True) == "all"
+    assert vram_to_ask(int(3.57 * gib), 8 * gib) == "4G"  # stopped later on: 10%, as before
+
+
 def test_script_of_a_command():
     # Issue #58: earlier runs of the same script with other arguments help size the next one.
     from dibs.model import script_of
