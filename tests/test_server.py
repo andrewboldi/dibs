@@ -150,7 +150,7 @@ def test_stale_socket_file_replaced(make_daemon):
     d.paths.socket.write_text("stale")
     thread = threading.Thread(target=lambda: asyncio.run(d.serve()), daemon=True)
     thread.start()
-    wait_for(lambda: d.paths.socket.is_socket())
+    wait_for(lambda: answers(d.paths.socket))  # the file appears a moment before the server listens
     assert call(d.paths.socket, "ping")["ok"]
     call(d.paths.socket, "shutdown")
     thread.join(5)
