@@ -57,6 +57,7 @@ PRESSURE_LIMIT = 10.0  # percent (PSI some avg10): above it, no job starts on bo
 EVICT_PRESSURE = 40.0  # percent: memory pressure this high for EVICT_AFTER stops a borrower (#114)
 EVICT_AFTER = 10.0  # seconds
 SHORT_OF_RAM = 0.2  # share of the RAM: with less available, high pressure means the machine is short (#129)
+GROW_SHARE = 0.25  # a job grows past its RAM reservation in steps of a quarter of it, at least 1G (#155)
 HOG_SHARE = 0.1  # share of the RAM: a program outside dibs holding this much is stopped when the machine is short (#135)
 OUTSIDE_CPU_EVERY = 4.0  # seconds between samples of the CPU busy outside dibs jobs (#120)
 OUTSIDE_CPU_WINDOW = 15.0  # seconds the figure dibs top shows is averaged over
@@ -84,7 +85,15 @@ def _ram_kill_reason(job: Job, result: dict) -> str:
     if result.get("hit_limit") is False:
         borrowed = ", while it used RAM other jobs had reserved" if job.borrowed_ram else ""
         return "killed when the machine ran out of RAM" + borrowed
+    if job.ram_limit and job.ram_limit > job.request.mem:  # it had grown into RAM nobody reserved (#155)
+        return (f"killed: went over its RAM limit of {format_size(job.ram_limit)} ({format_size(job.request.mem)} "
+                "reserved, the rest grown into RAM nobody reserved)" + _shared_part(job))  # fmt: skip
     return f"killed: went over its {format_size(job.request.mem)} RAM reservation" + _shared_part(job)
+
+
+def _limit(job: Job) -> int:
+    """The RAM a running job may hold: its reservation, or the limit it grew to past it (#155)."""
+    return max(job.request.mem, job.ram_limit or 0)
 
 
 def _holding(job: Job, mem: int | None = None) -> Request:
@@ -140,6 +149,7 @@ class Daemon:
         pressure: Callable[[], float] = procs.memory_pressure,
         cpu_busy: Callable[[], float | None] = procs.cpu_busy_seconds,
         programs: Callable[[int], list[tuple[int, int]]] = lambda minimum: [],
+        set_mem_limit: Callable[[Job, int], bool] | None = None,
     ):
         self.paths = paths
         self.config = config
@@ -153,10 +163,14 @@ class Daemon:
         self.slept = slept
         self.pressure = pressure
         self._pressured_since: float | None = None  # when memory pressure rose above EVICT_PRESSURE
+        self._held: dict[int, int] = {}  # job id -> what it held (anon + shmem) at the last sample
         self.cpu_busy = cpu_busy
         # (pid, RAM held) of the machine's programs holding at least `minimum` bytes, for the guard
         # (#135). Empty unless given: only the real daemon (run) looks at the real ones.
         self.programs = programs
+        # Raises a running job's RAM limit (#155): None unless given, so only the real daemon (run), whose
+        # jobs have systemd scopes, ever does. Tests pass a stand-in.
+        self.set_mem_limit = set_mem_limit
         self._beside: dict[int, tuple[float, float, float]] = {}  # job -> (time, machine busy, its own CPU)
         # For dibs top (#120): (time, machine busy, jobs' own CPU, the jobs, time asleep) samples, and
         # what programs outside dibs use: cores (None while unknown), RAM, and VRAM per GPU index.
@@ -629,8 +643,10 @@ class Daemon:
             self.capacity,
             # A job's estimate is of its running time, so the time the machine slept moves its start on.
             # A job that borrows VRAM (#88) counts at what it has used, so nothing starts into it.
-            [Running(j.id, _holding(j, self._planned_mem(j, now) if borrowing else None), tuple(j.cpu_ids),
-                     tuple(j.gpu_ids), (j.started or now) + self._asleep(j))
+            # A job that grew past its RAM reservation counts at its raised limit, so nothing starts into
+            # RAM it may yet use (#155).
+            [Running(j.id, _holding(j, _limit(j) if j.ram_limit else self._planned_mem(j, now) if borrowing else None),
+                     tuple(j.cpu_ids), tuple(j.gpu_ids), (j.started or now) + self._asleep(j))
              for j in running],
             [Queued(j.id, j.request, j.tag, j.submitted) for j in queued],
             now,
@@ -700,7 +716,7 @@ class Daemon:
         # RAM nobody has reserved: a job that needs more starts on RAM other jobs reserved but aren't
         # using, as a borrower (#86), which a job retried after the machine ran out may not do. Any
         # job may borrow (#148): --retry decides whether one dibs has to stop runs again.
-        unreserved = self.capacity.mem - self._outside_mem(now, running) - sum(j.request.mem for j in running)
+        unreserved = self.capacity.mem - self._outside_mem(now, running) - sum(_limit(j) for j in running)
         for start in current.starts:
             job = by_id[start.job_id]
             borrowed = job.request.mem > unreserved
@@ -749,6 +765,7 @@ class Daemon:
         self._watch_beside(now)
         self._watch_gpus(now)
         self.schedule()
+        self._grow(now)  # after starting what can start: growth takes only RAM left unreserved
         for watch in (self._watch_outside_cpu, self._watch_load):  # only shown by dibs top, after scheduling
             try:
                 watch(now)
@@ -823,6 +840,8 @@ class Daemon:
         its reservation."""
         for job in self.store.jobs([State.RUNNING]):
             held = self._memory_in_use(job)
+            if held is not None:
+                self._held[job.id] = held[0]
             if held is not None and (job.peak_mem is None or held[0] > job.peak_mem):
                 job.peak_mem, job.peak_shmem, mapped = held
                 job.peak_shmem_mapped = list(mapped)
@@ -852,6 +871,31 @@ class Daemon:
             self.store.update_job(job)
             log.info("job %d %s; stopping the rest of it", job.id, job.stop_reason)
             self._push_stop(job, now)
+
+    def _grow(self, now: float) -> None:
+        """Let a running job grow past its RAM reservation, a step at a time, when what it holds comes
+        within half a step of its limit (#155). Only into RAM no job has reserved and nothing outside dibs
+        uses: every running job counts at its reservation or raised limit, whichever is larger, never at
+        what it uses, since a job may grow back into RAM it reserved. The planner counts a grown job at
+        its new limit at once, so that RAM is never handed out twice. Limits only rise during a run."""
+        if self.set_mem_limit is None:
+            return
+        running = self.store.jobs([State.RUNNING])
+        room = self.capacity.mem - self._outside_mem(now, running) - sum(_limit(j) for j in running)
+        for job in sorted(running, key=lambda j: (j.started or 0, j.id)):
+            held = self._held.get(job.id)
+            if held is None or job.request.exclusive or job.stop_requested is not None or job.cancel_requested is not None:
+                continue
+            limit, step = _limit(job), max(GiB, int(job.request.mem * GROW_SHARE))
+            if held < limit - step // 2 or room < step or not self.set_mem_limit(job, limit + step):
+                continue
+            if job.ram_limit is None:  # past its reservation now: if the machine runs out, it goes first
+                launcher.raise_oom_score(job)
+            job.ram_limit = limit + step
+            room -= step
+            self.store.update_job(job)
+            log.info("job %d grew past its %s RAM reservation into RAM nobody reserved: its limit is now %s",
+                     job.id, format_size(job.request.mem), format_size(job.ram_limit))  # fmt: skip
 
     def notices(self, session: str, now: float) -> dict:
         """What the guard stopped of this session's since it was last told, each told once: the note in a
@@ -1181,7 +1225,7 @@ class Daemon:
             job.peak_mem = result.get("peak_mem")
         at_limit = bool(result.get("oom_killed")) and result.get("hit_limit") is not False
         if at_limit:  # it reached its limit, maybe after dibs's last sample: that's what killed it (#127)
-            job.peak_mem = max(job.peak_mem or 0, job.request.mem)
+            job.peak_mem = max(job.peak_mem or 0, _limit(job))
         retry = self._retry_with(job, result) if job.cancel_requested is None else None
         if retry is not None:
             request, how, reason = retry
@@ -1265,7 +1309,7 @@ class Daemon:
         job.shim_pid = job.shim_ticks = job.unit = None
         job.stop_reason = job.stop_requested = job.retry_vram = None
         job.borrowed_ram = job.evicted = False
-        job.peak_mem = job.peak_shmem = job.peak_shmem_mapped = job.peak_vram = None
+        job.peak_mem = job.peak_shmem = job.peak_shmem_mapped = job.peak_vram = job.ram_limit = None
         job.sleep_at_start, job.asleep = None, 0.0
         with contextlib.suppress(FileNotFoundError):
             (self.paths.job_dir(job.id) / "exit.json").unlink()
@@ -1378,7 +1422,9 @@ def run_daemon(env: Mapping[str, str] = os.environ) -> int:
         log.error("can't start: %s", e)
         print(f"dibs: can't start: {e}", file=sys.stderr)
         return 1
-    daemon = Daemon(paths, config, capacity, backend, use_systemd=launcher.systemd_available(env), programs=procs.big_programs)
+    use_systemd = launcher.systemd_available(env)
+    daemon = Daemon(paths, config, capacity, backend, use_systemd=use_systemd, programs=procs.big_programs,
+                    set_mem_limit=launcher.set_memory_max if use_systemd else None)  # fmt: skip
     daemon.recover()
     gpus = ", ".join(f"GPU {g.index} {format_size(g.vram)}" for g in capacity.gpus) or "no GPUs"
     log.info(

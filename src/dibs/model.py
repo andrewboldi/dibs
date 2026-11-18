@@ -87,6 +87,7 @@ class Job:
     priority: int = 5  # 1-10; see compute_tag
     plain_tag: float | None = None  # its place at priority 5 with nothing owed; the session's next jobs line up behind it
     own_time: float | None = None  # what it adds to its session's line: its estimate, at any momentum share (#150)
+    ram_limit: int | None = None  # the RAM limit it grew to past its reservation, into RAM nobody reserved (#155)
     retry: bool = False  # its agent marked it safe to run again after a resource failure (#84, #116)
     attempts: list[dict] = field(default_factory=list)  # earlier runs that failed for a resource reason
     retry_vram: int | None = None  # the VRAM a stop for going over the reservation advises
