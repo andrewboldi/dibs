@@ -68,12 +68,14 @@ uses: the larger of its peak so far and earlier runs' peak, plus 25% or 1G, neve
 reserved. Only jobs submitted with `--retry` start in the RAM this frees, since dibs may have to stop
 them. A job with no earlier runs counts at its whole reservation for its first ten minutes,
 and an exclusive job always does. A job that starts only thanks to this is marked as borrowing and
-runs with a high OOM score. If memory pressure (PSI some avg10) stays above 40% for 10 seconds,
-dibs stops the newest borrower itself rather than wait for the kernel's OOM killer, which acts only
-after minutes of thrashing; if the kernel gets there first, it kills a borrower rather than
-anything else. Either way dibs runs the job again within RAM nobody reserved, outside its retry
-limit, since starting it there was dibs's choice. No job starts this way while pressure is above
-10%. `borrow_ram = false` turns it off.
+runs with a high OOM score. If memory pressure (PSI some avg10) stays above 40% for 10 seconds
+while less than a fifth of the RAM is available, dibs stops the newest borrower itself rather than
+wait for the kernel's OOM killer, which acts only after minutes of thrashing; if the kernel gets
+there first, it kills a borrower rather than anything else. Either way dibs runs the job again
+within RAM nobody reserved, outside its retry limit, since starting it there was dibs's choice.
+Pressure with RAM to spare stops nothing: it comes from one job stalling inside itself, at its own
+limit or while the kernel compacts memory for huge pages. No job starts this way while pressure is
+above 10%. `borrow_ram = false` turns it off.
 
 **Momentum.** For a project working better than expected and held up by another project's jobs,
 the user can agree to a boost: the agent asks them in plain words and, after their yes, records it
