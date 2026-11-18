@@ -52,6 +52,9 @@ when those resources are free, so jobs never crash each other by running out of 
   your next job a head start).
 - `all` works for --cpus, --mem and --vram when a job needs the whole machine or a whole GPU.
 - `--name LABEL` to label it, `-o FILE` to write its output somewhere you choose.
+- `--replace ID` to change a job that's still waiting (a smaller request, a fixed command): dibs
+  cancels ID and queues the new job in one step. Cancelling first and then submitting can let
+  another job start in the gap and keep the resources.
 - The command goes after `--`, exactly as you would run it. It runs in your current folder with
   your current environment, so virtualenvs work. For shell syntax, use `-- bash -c '...'`.
 

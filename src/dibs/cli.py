@@ -91,6 +91,10 @@ def build_parser() -> argparse.ArgumentParser:
             help="1-10 (default 5): higher goes ahead sooner, and your session's next job pays the time back",
         )  # fmt: skip
         s.add_argument("-n", "--name", help="a label for the job (default: the script or program name)")
+        s.add_argument(
+            "--replace", type=int, metavar="ID",
+            help="cancel job ID and queue this one in its place, in one step, so no other job starts in between",
+        )  # fmt: skip
         s.add_argument("-o", "--output", help="write the job's output to this file instead of dibs's log")
         if name == "submit":
             s.add_argument("--json", action="store_true", help="print the job as JSON")
@@ -150,6 +154,7 @@ def _submit_request(args, command: list[str]) -> dict:
         "session_label": label,
         "name": args.name,
         "priority": args.priority,
+        "replace": args.replace,
         "output": os.path.abspath(args.output) if args.output else None,
         "request": {"cpus": args.cpus, "mem": args.mem, "vram": args.vram, "gpus": args.gpus, "time": args.time},
     }
@@ -194,9 +199,11 @@ def cmd_submit(args, paths: Paths, command: list[str]) -> int:
     response = dc.Client(paths).call("submit", **_submit_request(args, command))
     earlier, match = response.get("earlier", []), response.get("earlier_match", "command")
     if args.json:
-        _print_json({**response["job"], "earlier": earlier, "earlier_match": match})
+        _print_json({**response["job"], "earlier": earlier, "earlier_match": match, "replaced": response.get("replaced")})
     else:
         print(render.render_submit(response["job"], response["now"]))
+        if response.get("replaced") is not None:
+            print(f"It replaces job {response['replaced']}, which is cancelled.")
         if earlier:
             print(render.render_earlier(earlier, match))
     return 0
@@ -207,6 +214,8 @@ def cmd_run(args, paths: Paths, command: list[str]) -> int:
     response = client.call("submit", **_submit_request(args, command))
     job = response["job"]
     print(render.render_submit(job, response["now"]), file=sys.stderr)
+    if response.get("replaced") is not None:
+        print(f"It replaces job {response['replaced']}, which is cancelled.", file=sys.stderr)
     if response.get("earlier"):
         print(render.render_earlier(response["earlier"], response.get("earlier_match", "command")), file=sys.stderr)
     try:

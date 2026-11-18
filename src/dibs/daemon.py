@@ -161,7 +161,17 @@ class Daemon:
         if isinstance(priority, bool) or not isinstance(priority, int) or not 1 <= priority <= 10:
             return _rejected("priority must be a whole number from 1 to 10")
 
+        replaced = None
+        if req.get("replace") is not None:
+            replaced = self.store.get_job(int(req["replace"]))
+            if replaced is None:
+                return _rejected(f"no job {req['replace']} to replace")
+
         now = self.clock()
+        if replaced is not None:
+            # In the same step as the new job, so nothing can start in the gap (#93), and before the
+            # backlog is read, so the replacement doesn't line up behind the job it replaces.
+            self._cancel_job(replaced, now)
         session = req.get("session") or "unknown"
         # The session's queued jobs' priority-5 places: lining up behind boosted tags would pass each
         # boost down the line, and the time a job saved would never be paid back.
@@ -192,8 +202,13 @@ class Daemon:
         if not job.output:
             job.output = str(self.paths.job_dir(job.id) / "output.log")
             self.store.update_job(job)
+        if replaced is not None and replaced.state == State.CANCELLED:
+            replaced.reason = f"replaced by job {job.id}"
+            self.store.update_job(replaced)
         self.schedule()
         response = self.show(job.id)
+        if replaced is not None:
+            response["replaced"] = replaced.id
         # What the same command used before, so the agent can size its next request from it.
         earlier = [j for j in self.store.earlier_runs(job.cwd, job.argv, limit=6) if j.started is not None]
         match = "command"
@@ -217,21 +232,28 @@ class Daemon:
             job = self.store.get_job(job_id)
             if job is None:
                 errors.append(f"no job {job_id}")
-            elif job.state == State.QUEUED:
-                job.state, job.ended, job.reason = State.CANCELLED, now, "cancelled"
-                self.store.update_job(job)
-                self._notify(job)
-                cancelled.append(job_id)
-            elif job.state == State.RUNNING:
-                if job.cancel_requested is None:
-                    job.cancel_requested = now
-                    self.store.update_job(job)
-                self._push_stop(job, now)
+            elif self._cancel_job(job, now):
                 cancelled.append(job_id)
             else:
                 errors.append(f"job {job_id} already {job.state}")
         self.schedule()
         return {"ok": True, "cancelled": cancelled, "errors": errors}
+
+    def _cancel_job(self, job: Job, now: float) -> bool:
+        """Cancel one job without scheduling: a queued one ends now, a running one is asked to stop.
+        False if it had already ended."""
+        if job.state == State.QUEUED:
+            job.state, job.ended, job.reason = State.CANCELLED, now, "cancelled"
+            self.store.update_job(job)
+            self._notify(job)
+            return True
+        if job.state == State.RUNNING:
+            if job.cancel_requested is None:
+                job.cancel_requested = now
+                self.store.update_job(job)
+            self._push_stop(job, now)
+            return True
+        return False
 
     def show(self, job_id: int) -> dict:
         job = self.store.get_job(job_id)

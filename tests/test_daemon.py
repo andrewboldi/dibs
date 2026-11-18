@@ -550,6 +550,49 @@ def test_run_times_shown_leave_out_the_time_the_machine_slept():
     assert "(1h5m, plus 3h asleep) on CPUs 0" in render_show(view, t + 4 * 3600 + 300)
 
 
+def _held_behind(d, tmp_path):
+    """A running 3.4G job, session a's queued 7.2G job, and session b's 3.4G hour-long job, which
+    would fit now but is held back so as not to delay a's job."""
+    gib = 1 << 30
+    runner = submit(d, tmp_path, ["sleep", "30"], vram=int(3.4 * gib), time_=900.0, session="r")
+    run_until(d, lambda: job(d, runner).state == State.RUNNING)
+    first = submit(d, tmp_path, ["sleep", "1"], vram=int(7.2 * gib), time_=480.0, session="a")
+    held = submit(d, tmp_path, ["sleep", "1"], vram=int(3.4 * gib), time_=3600.0, session="b")
+    d.tick()
+    assert job(d, held).state == State.QUEUED
+    return first, held
+
+
+def test_replacing_a_queued_job_leaves_no_gap_for_another_job(daemon, tmp_path):
+    # Issue #93: an agent cancelled its queued job and resubmitted it; in between, the other session's
+    # held-back job started and kept the GPU for its hour.
+    first, held = _held_behind(daemon, tmp_path)
+    gib = 1 << 30
+    resp = daemon.submit(req(tmp_path, ["sleep", "1"], vram=int(7.2 * gib), time_=1080.0, session="a", replace=first))
+    assert resp["ok"], resp
+    assert resp["replaced"] == first and job(daemon, first).state == State.CANCELLED
+    assert job(daemon, first).reason == f"replaced by job {resp['job']['id']}"
+    assert job(daemon, held).state == State.QUEUED  # still held: the replacement is ahead of it
+    assert job(daemon, resp["job"]["id"]).tag < job(daemon, held).tag
+
+
+def test_a_replacement_that_is_refused_leaves_the_old_job_alone(daemon, tmp_path):
+    first, _ = _held_behind(daemon, tmp_path)
+    resp = daemon.submit(req(tmp_path, ["no-such-command-xyz"], session="a", replace=first))
+    assert not resp["ok"] and job(daemon, first).state == State.QUEUED
+    resp = daemon.submit(req(tmp_path, ["sleep", "1"], session="a", replace=99999))
+    assert not resp["ok"] and resp["error"] == "no job 99999 to replace"
+
+
+def test_replacing_a_running_job_stops_it(daemon, tmp_path):
+    running = submit(daemon, tmp_path, ["sleep", "30"])
+    run_until(daemon, lambda: job(daemon, running).state == State.RUNNING)
+    resp = daemon.submit(req(tmp_path, ["sleep", "1"], replace=running))
+    assert resp["ok"], resp
+    run_until(daemon, lambda: finished(daemon, running))
+    assert job(daemon, running).state == State.CANCELLED
+
+
 def test_submit_reports_earlier_runs_of_the_same_command(daemon, tmp_path):
     # Issue #31: agents guess their requests; dibs tells them what the same command used before.
     first = submit(daemon, tmp_path, [PY, "-c", "pass"])
