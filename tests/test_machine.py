@@ -4,7 +4,7 @@ import pytest
 
 from dibs.machine import Config, ConfigError, build_capacity, detect_cpus, detect_mem, load_config
 from dibs.model import Capacity, Gpu
-from dibs.units import GiB
+from dibs.units import GiB, MiB
 
 CPUS = tuple(range(24))
 GPUS = [Gpu(0, "GPU-0", "Small", 8 * GiB), Gpu(1, "GPU-1", "Big", 24 * GiB)]
@@ -100,3 +100,21 @@ def test_load_config_agent_files(tmp_path):
     assert load_config(path).agent_files == ("~/.cursor/rules/dibs.mdc", "/opt/agent/RULES.md")
     with pytest.raises(ConfigError, match="agent_files"):
         load_config(write(tmp_path, 'agent_files = "~/x.md"\n'))
+
+
+def test_a_gpu_just_under_a_whole_gib_counts_as_that_gib():
+    # Issue #85: an "8 GB" card reports 8188 MiB, so a 6G and a 2G job couldn't run together and
+    # --vram 8G was refused. Within 0.5% under a whole GiB it counts as that GiB; others stay as they are.
+    gpus = [Gpu(0, "GPU-a", "A", 8188 * MiB), Gpu(1, "GPU-b", "B", 7000 * MiB), Gpu(2, "GPU-c", "C", 24564 * MiB)]
+    cap = build_capacity(Config(), CPUS, 30 * GiB, gpus)
+    assert [g.vram for g in cap.gpus] == [8 * GiB, 7000 * MiB, 24 * GiB]
+    assert build_capacity(Config(vram=8 * GiB), CPUS, 30 * GiB, gpus[:1]).gpus[0].vram == 8 * GiB
+
+
+def test_a_6g_and_a_2g_job_start_together_on_an_8188m_gpu():
+    from dibs.planner import Queued, plan
+    from dibs.model import Request
+
+    cap = build_capacity(Config(), CPUS, 30 * GiB, [Gpu(0, "GPU-a", "A", 8188 * MiB)])
+    jobs = [Queued(1, Request(1, GiB, 1, 6 * GiB, 60.0), 160.0, 100.0), Queued(2, Request(1, GiB, 1, 2 * GiB, 60.0), 161.0, 101.0)]
+    assert sorted(s.job_id for s in plan(cap, [], jobs, 102.0).starts) == [1, 2]
