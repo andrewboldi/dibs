@@ -174,6 +174,11 @@ def slept() -> float:
     return max(0.0, time.clock_gettime(boottime) - time.monotonic())
 
 
+def boot_id() -> str | None:
+    """This boot's id: it changes when the machine restarts."""
+    return (_read("/proc/sys/kernel/random/boot_id") or "").strip() or None
+
+
 def cgroup(pid: int) -> str | None:
     for line in (_read(f"/proc/{pid}/cgroup") or "").splitlines():
         if line.startswith("0::"):
