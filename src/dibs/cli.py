@@ -518,6 +518,21 @@ HANDLERS = {
 }
 
 
+TELLS = {"submit", "run", "queue", "q", "momentum", "show", "status", "wait", "logs", "cancel", "info"}  # not top
+
+
+def _tell_stops(paths) -> None:
+    """Tell this session what the guard stopped of its since it was last told: the note in a stopped
+    program's own output can be lost, in a pipe through grep or a log nobody reads (#135)."""
+    try:
+        notices = dc.Client(paths).call("notices", session=dc.current_session()[0]).get("notices", [])
+    except (dc.DibsError, OSError):
+        return  # the command itself will say what's wrong
+    for notice in notices:
+        when = time.strftime("%H:%M", time.localtime(notice["time"]))
+        print(f"dibs: at {when}, the guard stopped a program of yours:\n{notice['message']}\n", file=sys.stderr)
+
+
 def main(argv: list[str] | None = None) -> int:
     signal.signal(signal.SIGPIPE, signal.SIG_DFL)  # `dibs queue | head` ends quietly
     for sig in (signal.SIGTERM, signal.SIGHUP):
@@ -541,6 +556,8 @@ def main(argv: list[str] | None = None) -> int:
         parser.print_help(sys.stderr)
         return 2
     try:
+        if args.cmd in TELLS:
+            _tell_stops(get_paths())
         return HANDLERS[args.cmd](args, get_paths(), command)
     except dc.DibsError as e:
         if e.code == "upgraded" and args.cmd in REPEATABLE and not os.environ.get("DIBS_RERUN"):

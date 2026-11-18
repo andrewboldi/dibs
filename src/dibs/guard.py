@@ -12,7 +12,7 @@ from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
 
 from dibs import procs
-from dibs.agents import AGENTS
+from dibs.agents import AGENTS, PANE_SCOPES
 from dibs.gpu import GpuProcess
 from dibs.units import format_size, suggest_size
 
@@ -129,6 +129,22 @@ def _is_agent(pid: int) -> bool:
     return bool(names & AGENT_COMMANDS)
 
 
+def _where_agents_run(pid: int) -> bool:
+    """Whether the process runs where agents work: in a terminal pane's scope (tmux, VTE), or under
+    an agent CLI, as in an editor's built-in terminal. The rest of the desktop (snap apps, the shell,
+    user services) runs in scopes of its own, and the RAM guard never stops it."""
+    leaf = (procs.cgroup(pid) or "").rstrip("/").rsplit("/", 1)[-1]
+    if leaf.startswith(PANE_SCOPES):
+        return True
+    for _ in range(64):
+        pid = procs.parent(pid) or 0
+        if pid <= 1:
+            return False
+        if _is_agent(pid):
+            return True
+    return False
+
+
 def ram_hog(
     programs: Sequence[tuple[int, int]],
     *,
@@ -143,12 +159,12 @@ def ram_hog(
     desktop: bool = True,
 ) -> tuple[int, int, str] | None:
     """The program to stop while the machine is short of memory, as (pid, RAM it holds, "stop" or
-    "warn"): the largest one outside dibs that holds at least `minimum` bytes, leaving alone what the
-    GPU guard leaves alone, and the agent CLIs themselves."""
+    "warn"): the largest one outside dibs that holds at least `minimum` bytes and runs where agents
+    work, leaving alone the agent CLIs themselves and what the GPU guard leaves alone."""
     for pid, held in sorted(programs, key=lambda p: -p[1]):
         if held < minimum:
             break
-        if mode == "off" or in_dibs(pid) or _is_agent(pid):
+        if mode == "off" or in_dibs(pid) or _is_agent(pid) or not _where_agents_run(pid):
             continue
         kind = _judge(pid, mode, allow, since, my_uid, parents, instance, desktop)
         if kind in ("stop", "warn"):
@@ -202,6 +218,18 @@ def ram_stop_message(pid: int, argv: Sequence[str], held: int, available: int, t
     )
 
 
+def _session_of(pid: int, env: Mapping[str, str]) -> str | None:
+    """The session dibs gives the agent that started the process (client.current_session), so the
+    agent can be told about a stop at its next dibs command."""
+    named = env.get("DIBS_SESSION") or env.get("CLAUDE_CODE_SESSION_ID")
+    if named:
+        return named
+    try:
+        return f"t{os.getsid(pid)}"
+    except OSError:
+        return None
+
+
 def stop_for_ram(pid: int, held: int, available: int, total: int) -> dict | None:
     """Stop a program (and what it started) for holding too much RAM outside dibs, leaving the note in
     its output; the event to record, or None if it was already gone."""
@@ -209,8 +237,10 @@ def stop_for_ram(pid: int, held: int, available: int, total: int) -> dict | None
         return None
     argv = procs.cmdline(pid) or [name for name in [procs.exe_name(pid)] if name]
     env = procs.environ(pid) or {}
-    procs.stop_with_message([pid], ram_stop_message(pid, argv, held, available, total))
-    return {"pid": pid, "command": argv, "ram": held, "session": env.get("DIBS_SESSION") or env.get("CLAUDE_CODE_SESSION_ID")}
+    message = ram_stop_message(pid, argv, held, available, total)
+    session = _session_of(pid, env)
+    procs.stop_with_message([pid], message)
+    return {"pid": pid, "command": argv, "ram": held, "session": session, "message": message}
 
 
 def enforce(verdicts: Sequence[Verdict]) -> list[dict]:
@@ -225,14 +255,9 @@ def enforce(verdicts: Sequence[Verdict]) -> list[dict]:
         argv = procs.cmdline(v.pid) or [name for name in [procs.exe_name(v.pid)] if name]
         env = procs.environ(v.pid) or {}
         message = stop_message(v.pid, argv, v.gpu_index, v.used, procs.rss(v.pid))
+        session = _session_of(v.pid, env)
         procs.stop_with_message([v.pid], message)
         events.append(
-            {
-                "pid": v.pid,
-                "command": argv,
-                "gpu": v.gpu_index,
-                "used": v.used,
-                "session": env.get("DIBS_SESSION") or env.get("CLAUDE_CODE_SESSION_ID"),
-            }
+            {"pid": v.pid, "command": argv, "gpu": v.gpu_index, "used": v.used, "session": session, "message": message}
         )
     return events

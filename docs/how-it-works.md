@@ -103,7 +103,12 @@ output what it held, why it was stopped and the `dibs run --mem` command that ke
 happening again. Left running, such a program stalls everything for minutes until the kernel's
 OOM killer kills whatever is largest, a job or the program itself, and systemd may then stop the
 terminal it ran in, the agent with it. It leaves alone what it leaves alone on the GPU, and the
-agent CLIs themselves; a job is never stopped this way, since it holds the RAM it reserved.
+agent CLIs themselves; a job is never stopped this way, since it holds the RAM it reserved. Only
+programs where agents work qualify: in a tmux or VTE terminal pane (`tmux-spawn-*`, `vte-spawn-*`
+scopes), or started by an agent CLI, as in an editor's terminal; snap apps, the desktop shell and
+user services never do. A note in a stopped program's output can be lost (a pipe through `grep`, a
+log nobody reads), so the agent's session also gets it, once, from its next `dibs` command; this
+holds for GPU stops too.
 
 **Sizing.** `dibs show ID` lists a job's peak RAM (memory in use, not file cache) and peak VRAM.
 `dibs submit` shows what earlier runs of the same command in the same folder used:

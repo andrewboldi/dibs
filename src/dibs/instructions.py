@@ -34,7 +34,8 @@ when those resources are free, so jobs never crash each other by running out of 
   data processing, CPU training, long test suites. That includes the CPU steps of a pipeline whose
   GPU step already runs through dibs. When the machine runs short of memory, dibs stops the largest
   program outside it (one holding a tenth of the RAM or more), with a message saying why and how to
-  run it as a job: a job gets the RAM it reserved, so it is never stopped that way.
+  run it as a job, which your next dibs command repeats: a job gets the RAM it reserved, so it is
+  never stopped that way.
 - Not needed for quick commands: git, editing, small scripts, light unit tests.
 
 ## Submitting

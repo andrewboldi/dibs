@@ -68,6 +68,7 @@ EARLY_STOP = 60.0  # seconds: a job stopped for VRAM sooner than this was likely
 ALIVE_EVERY = 60.0  # seconds: how often the daemon notes it's alive, so a reboot can be dated (#78)
 RECENT = 86400.0  # how far back `queue --all` looks
 STOPS_SHOWN = 3600.0  # how far back guard stops are shown
+TOLD_WINDOW = 86400.0  # how far back a session is told, at its next dibs command, what the guard stopped (#135)
 WAIT_RECHECK = 5.0  # a long-polling wait re-checks its jobs at least this often
 LOG_MAX = 5 * 1024 * 1024
 
@@ -553,6 +554,8 @@ class Daemon:
                 return await self._wait([int(i) for i in request["ids"]], request.get("timeout"))
             if op == "info":
                 return self.info()
+            if op == "notices":
+                return self.notices(str(request["session"]), self.clock())
             if op == "momentum":
                 return self.momentum(request)
             if op == "shutdown":
@@ -814,6 +817,19 @@ class Daemon:
             self.store.update_job(job)
             log.info("job %d %s; stopping the rest of it", job.id, job.stop_reason)
             self._push_stop(job, now)
+
+    def notices(self, session: str, now: float) -> dict:
+        """What the guard stopped of this session's since it was last told, each told once: the note in a
+        stopped program's own output can be lost, in a pipe through grep or a log nobody reads (#135)."""
+        key = f"told:{session}"
+        told = float(self.store.get_meta(key) or 0.0)
+        stops = [
+            e for e in self.store.events(max(told, now - TOLD_WINDOW))
+            if e["kind"] == "stop" and e.get("session") == session and e["time"] > told and e.get("message")
+        ]  # fmt: skip
+        if stops:
+            self.store.set_meta(key, repr(stops[-1]["time"]))
+        return {"ok": True, "notices": [{"time": e["time"], "message": e["message"]} for e in stops]}
 
     def _relieve_shortage(self, now: float) -> None:
         """While the machine stays short of memory, stop one program per stretch of shortage: the largest
