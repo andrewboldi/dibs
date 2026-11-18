@@ -133,6 +133,12 @@ def test_agent_help_covers_the_essentials():
         assert phrase in AGENT_HELP, phrase
 
 
+def test_agent_help_says_dibs_retries_resource_failures():
+    # Issue #84: agents needn't resubmit, so they needn't pad requests either.
+    for phrase in ("runs it again by itself", "--no-retry", "costs a retry, not your work"):
+        assert phrase in AGENT_HELP, phrase
+
+
 def test_agent_help_says_files_in_a_folder_kept_in_ram_count_as_ram():
     # Issue #74: most RAM kills were scratch files in a /tmp kept in RAM.
     for phrase in ("/dev/shm", "findmnt /tmp", "TMPDIR", "until deleted"):

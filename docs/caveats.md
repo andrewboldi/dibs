@@ -18,8 +18,10 @@ What dibs doesn't do, or does only partly. Each item says what happens and what 
   - An agent determined to get around it could stop the daemon. Agents' instructions tell them
     not to.
 - **Going over the VRAM reservation stops the job, at once and without a grace margin**, even when
-  no other job needed that memory. Reserve the peak plus some headroom. `dibs submit` shows what
-  earlier runs of the same command used.
+  no other job needed that memory. dibs then runs it again with the advised size, as it does a job
+  killed at its RAM limit or by a restart, up to twice and keeping its place in line, but the work
+  the stopped run did is lost unless the job saves and resumes it. Reserve the peak plus some
+  headroom. `dibs submit` shows what earlier runs of the same command used.
 - **Estimates only order the queue.** Nothing stops a job for running past its estimate, so
   predictions are only as good as the estimates. An agent that underestimates on purpose would get
   ahead of honest ones. In practice agents overestimate: over the first two hours of real use, jobs

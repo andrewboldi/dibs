@@ -247,6 +247,7 @@ def test_vram_overuse_stops_job(world, tmp_path, used, ran, reason):
             "env": dict(os.environ),
             "session": "s",
             "request": {"cpus": 1, "mem": GiB, "vram": 6 * GiB, "gpus": None, "time": 60},
+            "retry": False,
         }
     )
     job_id = resp["job"]["id"]
@@ -260,6 +261,59 @@ def test_vram_overuse_stops_job(world, tmp_path, used, ran, reason):
     j = d.store.get_job(job_id)
     assert j.reason == reason
     assert j.peak_vram == used
+
+
+def _gpu_job(d, tmp_path, vram, argv, **extra):
+    resp = d.submit(
+        {
+            "argv": argv,
+            "cwd": str(tmp_path),
+            "env": dict(os.environ),
+            "session": "s",
+            "request": {"cpus": 1, "mem": GiB, "vram": vram, "gpus": None, "time": 60},
+            **extra,
+        }
+    )
+    assert resp["ok"], resp
+    return resp["job"]["id"]
+
+
+def _job_python_pid(d, job_id):
+    job = d.store.get_job(job_id)
+    return wait_for(lambda: next((p for p in launcher.job_pids(d.store.get_job(job_id)) if (procs.cmdline(p) or [""])[0] == PY), None))
+
+
+def test_a_job_stopped_for_vram_is_retried_with_the_advised_size(world, tmp_path):
+    # Issue #84: dibs runs a job stopped for going over its VRAM reservation again, at the size the
+    # stop advises, with the same id and place in line, so its agent needn't work out what happened.
+    d, backend = world()
+    job_id = _gpu_job(d, tmp_path, 6 * GiB, [PY, "-c", "import time; time.sleep(1.5)"])
+    tag = d.store.get_job(job_id).tag
+    backend.procs = [GpuProcess(_job_python_pid(d, job_id), 0, 6 * GiB + MiB)]
+    run_until(d, lambda: d.store.get_job(job_id).attempts)
+    backend.procs = []
+    run_until(d, lambda: d.store.get_job(job_id).state == State.DONE)
+    j = d.store.get_job(job_id)
+    assert (j.request.vram, j.tag) == (8 * GiB, tag)
+    assert [a["reason"] for a in j.attempts] == [
+        "stopped: used 6145M VRAM on GPU 0, reserved 6G, in its first minute, so it was likely still growing; "
+        "retrying with --vram all"
+    ]
+    assert "dibs: stopped: used 6145M VRAM on GPU 0" in open(j.output).read()
+
+
+def test_a_job_is_retried_at_most_twice(world, tmp_path):
+    d, backend = world()
+    job_id = _gpu_job(d, tmp_path, 2 * GiB, [PY, "-c", "import time; time.sleep(30)"])
+    for _ in range(3):
+        j = d.store.get_job(job_id)
+        backend.procs = [GpuProcess(_job_python_pid(d, job_id), 0, j.request.vram + MiB)]
+        tries = len(j.attempts)
+        run_until(d, lambda: len(d.store.get_job(job_id).attempts) > tries or d.store.get_job(job_id).state == State.FAILED)
+    j = d.store.get_job(job_id)
+    assert j.state == State.FAILED and len(j.attempts) == 2
+    assert [a["request"]["vram"] for a in j.attempts] == [2 * GiB, int(3.5 * GiB)]  # 2G and 1M, plus 1G, rounded up
+    assert j.request.vram == 5 * GiB and j.reason.endswith("; resubmit with --vram 6.5G")  # the third run, out of retries
 
 
 def test_stop_message_text():

@@ -5,6 +5,7 @@ and never touches running jobs: they're adopted again on start (recover).
 """
 
 import asyncio
+import contextlib
 import fcntl
 import json
 import logging
@@ -16,6 +17,7 @@ import signal
 import sys
 import time
 from collections import deque
+from dataclasses import asdict, replace
 from collections.abc import Callable, Mapping
 
 from dibs import __version__, build_id, guard, launcher, procs
@@ -25,6 +27,7 @@ from dibs.model import (
     TERMINAL,
     Capacity,
     Job,
+    Request,
     RequestError,
     State,
     DEFAULT_PRIORITY,
@@ -39,13 +42,14 @@ from dibs.model import (
 from dibs.paths import Paths, ensure_dirs, get_paths
 from dibs.planner import Plan, Queued, Running, plan
 from dibs.store import Store
-from dibs.units import format_size, format_size_against
+from dibs.units import GiB, format_size, format_size_against, parse_size
 
 KILL_AFTER = 10.0  # seconds between asking a job to stop (SIGTERM) and forcing it (SIGKILL)
 OWED_FOR = 86400.0  # seconds: what a session owes (or is owed) for its priorities lapses after a day
 OUTSIDE_WINDOW = 120.0  # seconds: RAM in use outside dibs counts as its peak over this long
 JOBS_RAM_WINDOW = 10.0  # seconds: RAM dibs jobs hold counts as its peak over this long, when taken off the in-use total
 RETENTION_EVERY = 3600.0
+MAX_RETRIES = 2  # runs again after a resource failure, at most (#84)
 EARLY_STOP = 60.0  # seconds: a job stopped for VRAM sooner than this was likely still growing (#80)
 ALIVE_EVERY = 60.0  # seconds: how often the daemon notes it's alive, so a reboot can be dated (#78)
 RECENT = 86400.0  # how far back `queue --all` looks
@@ -193,6 +197,7 @@ class Daemon:
             tag=compute_tag(now, request.time, backlog, priority, self._owed(session, now)),
             priority=priority,
             plain_tag=compute_tag(now, request.time, backlog),
+            retry=req.get("retry") is not False,
             state=State.QUEUED,
             output=output or "",
         )
@@ -525,7 +530,11 @@ class Daemon:
                 # at boot, so what it slept is taken from that note.
                 slept = max(0.0, alive["slept"] - job.sleep_at_start) if job.sleep_at_start is not None else 0.0
                 ended = max(alive["time"], job.started or alive["time"])
-                self._lose(job, ended, "lost: the machine restarted while it ran", asleep=slept)
+                if job.retry and len(job.attempts) < MAX_RETRIES:
+                    job.ended, job.asleep = ended, slept
+                    self._retry(job, "lost: the machine restarted while it ran; retrying", job.request)
+                else:
+                    self._lose(job, ended, "lost: the machine restarted while it ran", asleep=slept)
             elif not (job.shim_pid and procs.alive(job.shim_pid, job.shim_ticks)):
                 self._lose(job, now, "lost: its process ended while dibs was not running")
 
@@ -627,11 +636,11 @@ class Daemon:
                 total = next((g.vram for g in self.capacity.gpus if g.index == gpu), None)
                 early = now - (job.started or now) - self._asleep(job) < EARLY_STOP
                 ask = vram_to_ask(max(used, job.peak_vram or 0), total, early=early)
+                job.retry_vram = total if ask == "all" else parse_size(ask)
                 job.stop_reason = (
                     f"stopped: used {format_size_against(used, reserved)} VRAM on GPU {gpu}, "
                     f"reserved {format_size(reserved)}"
                     + (", in its first minute, so it was likely still growing" if early else "")
-                    + f"; resubmit with --vram {ask}"
                 )
                 job.stop_requested = now
                 changed = True
@@ -696,6 +705,11 @@ class Daemon:
         job.cpu_seconds = result.get("cpu_seconds")
         if job.peak_mem is None:  # never sampled while it ran: the launcher's figure is all there is
             job.peak_mem = result.get("peak_mem")
+        retry = self._retry_with(job, result) if job.cancel_requested is None else None
+        if retry is not None:
+            request, change, reason = retry
+            self._retry(job, f"{reason}; retrying with {change}", request)
+            return
         if job.cancel_requested is not None:
             job.state = State.CANCELLED
         elif job.exit_code == 0 and job.stop_reason is None:
@@ -703,7 +717,7 @@ class Daemon:
         else:
             job.state = State.FAILED
         if job.stop_reason:
-            job.reason = job.stop_reason
+            job.reason = job.stop_reason + (f"; resubmit with --vram {self._vram_text(job.retry_vram)}" if job.retry_vram else "")
         elif job.cancel_requested is not None:
             job.reason = "cancelled"
         elif result.get("oom_killed"):
@@ -713,6 +727,54 @@ class Daemon:
         self.store.update_job(job)
         self._terminated.discard(job.id)
         self._notify(job)
+
+    def _retry_with(self, job: Job, result: dict) -> tuple[Request, str, str] | None:
+        """For a job that failed for a resource reason and may run again: the request to run it with,
+        what changed (as a flag) and why. None when it isn't such a failure, or it can't fit."""
+        if not job.retry or len(job.attempts) >= MAX_RETRIES:
+            return None
+        if job.stop_reason and job.retry_vram and job.retry_vram > job.request.vram:
+            return replace(job.request, vram=job.retry_vram), f"--vram {self._vram_text(job.retry_vram)}", job.stop_reason
+        if result.get("oom_killed"):
+            mem = math.ceil(max(job.peak_mem or 0, job.request.mem) * 1.25 / GiB) * GiB
+            if mem <= self.capacity.mem:
+                reason = f"killed: went over its {format_size(job.request.mem)} RAM reservation" + _shared_part(job)
+                return replace(job.request, mem=mem), f"--mem {format_size(mem)}", reason
+        return None
+
+    def _vram_text(self, vram: int) -> str:
+        return "all" if self.capacity.gpus and vram >= max(g.vram for g in self.capacity.gpus) else format_size(vram)
+
+    def _retry(self, job: Job, reason: str, request: Request) -> None:
+        """Queue a job that failed for a resource reason again (#84): same id, same place in line, with
+        the failed run on record and a note in its output. It never looks finished, so `dibs wait` and
+        `dibs run` keep waiting: the agent needn't work out what happened and resubmit."""
+        job.attempts.append(
+            {
+                "started": job.started,
+                "ended": job.ended,
+                "exit_code": job.exit_code,
+                "reason": reason,
+                "request": asdict(job.request),
+                "peak_mem": job.peak_mem,
+                "peak_vram": job.peak_vram,
+                "asleep": job.asleep,
+            }
+        )
+        job.request, job.state, job.reason = request, State.QUEUED, None
+        job.started = job.ended = job.exit_code = job.cpu_seconds = None
+        job.cpu_ids, job.gpu_ids = [], []
+        job.shim_pid = job.shim_ticks = job.unit = None
+        job.stop_reason = job.stop_requested = job.retry_vram = None
+        job.peak_mem = job.peak_shmem = job.peak_vram = None
+        job.sleep_at_start, job.asleep = None, 0.0
+        with contextlib.suppress(FileNotFoundError):
+            (self.paths.job_dir(job.id) / "exit.json").unlink()
+        with contextlib.suppress(OSError), open(job.output, "a") as f:
+            f.write(f"\ndibs: {reason} (try {len(job.attempts) + 1} of {MAX_RETRIES + 1})\n")
+        self.store.update_job(job)
+        self._terminated.discard(job.id)
+        log.info("job %d %s", job.id, reason)
 
     def _shim_said(self, job: Job) -> str:
         """The last thing the job's launcher logged, as " (...)", for a job that was lost."""

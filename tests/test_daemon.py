@@ -1,9 +1,12 @@
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
 import time
+
+import pytest
 
 from conftest import FakeBackend, capacity, run_until
 
@@ -169,7 +172,8 @@ def test_recover_marks_lost(make_daemon, tmp_path):
     assert (j.state, j.reason) == (State.FAILED, "lost: its process ended while dibs was not running")
 
 
-def test_a_job_a_reboot_killed_keeps_the_sleep_counted_before_it(make_daemon, tmp_path, monkeypatch):
+@pytest.mark.parametrize("retry", [False, True])
+def test_a_job_a_reboot_killed_keeps_the_sleep_counted_before_it(make_daemon, tmp_path, monkeypatch, retry):
     # Issue #78: a reboot resets the machine's count of time asleep. A job that had run 13 min
     # across 4h38m of sleep before a reboot was recorded as lost "after 4h51m".
     start, now, slept = 1_000_000.0, [1_000_000.0], [100.0]
@@ -185,6 +189,7 @@ def test_a_job_a_reboot_killed_keeps_the_sleep_counted_before_it(make_daemon, tm
     dead.wait()
     j = job(first, job_id)  # as if it had been running since `start`
     j.state, j.started, j.sleep_at_start, j.shim_pid, j.shim_ticks = State.RUNNING, start, 100.0, dead.pid, None
+    j.retry = retry
     first.store.update_job(j)
     first.close()
     monkeypatch.setattr(procs, "boot_id", lambda: "boot-b")  # the machine restarted
@@ -193,8 +198,14 @@ def test_a_job_a_reboot_killed_keeps_the_sleep_counted_before_it(make_daemon, tm
     second = make_daemon(clock=lambda: now[0], slept=lambda: slept[0])
     second.recover()
     j = job(second, job_id)
-    assert (j.state, j.reason) == (State.FAILED, "lost: the machine restarted while it ran")
-    assert (j.ended, j.asleep) == (noted, 4 * 3600)  # so it ran 10 minutes
+    if not retry:
+        assert (j.state, j.reason) == (State.FAILED, "lost: the machine restarted while it ran")
+        assert (j.ended, j.asleep) == (noted, 4 * 3600)  # so it ran 10 minutes
+    else:  # Issue #84: queued again, same request, with the lost run on record
+        assert j.state == State.QUEUED and j.request.vram == 8 * GiB
+        assert [(a["reason"], a["ended"], a["asleep"]) for a in j.attempts] == [
+            ("lost: the machine restarted while it ran; retrying", noted, 4 * 3600)
+        ]
 
 
 def test_retention_deletes_old_jobs(make_daemon, tmp_path):
@@ -412,11 +423,11 @@ def test_ram_in_use_by_jobs_is_not_counted_as_outside(make_daemon, tmp_path, mon
     assert job(d, second).state != State.QUEUED, json.dumps(d.show(second)["job"])
 
 
-def _job_holding(d, tmp_path, monkeypatch, mem):
+def _job_holding(d, tmp_path, monkeypatch, mem, **extra):
     """A running job whose scope dibs reads its memory from, and a file that ends the job once it exists."""
     go = tmp_path / "go"
     job_id = submit(d, tmp_path, [PY, "-c", f"import os, time\nwhile not os.path.exists({str(go)!r}): time.sleep(0.02)"],
-                    mem=mem)
+                    mem=mem, **extra)
     run_until(d, lambda: job(d, job_id).shim_pid)
     j = job(d, job_id)
     j.unit = "dibs-test-job-1"
@@ -477,7 +488,7 @@ def test_ram_a_finished_job_is_letting_go_of_is_not_counted_as_outside(make_daem
 
 def _killed_for_ram_holding(d, tmp_path, monkeypatch, mem, anon, shmem):
     """A job that held this much (anon, shmem) at its last sample, then was killed at its RAM limit."""
-    job_id, stat, go = _job_holding(d, tmp_path, monkeypatch, mem)
+    job_id, stat, go = _job_holding(d, tmp_path, monkeypatch, mem, retry=False)
     stat.write_text(f"anon {anon}\nfile {4 * GiB}\nshmem {shmem}\n")
     d.tick()
     real_read_exit = launcher.read_exit
@@ -591,6 +602,55 @@ def test_replacing_a_running_job_stops_it(daemon, tmp_path):
     assert resp["ok"], resp
     run_until(daemon, lambda: finished(daemon, running))
     assert job(daemon, running).state == State.CANCELLED
+
+
+def _oom_on_first_exit(monkeypatch, job_id):
+    real_read_exit = launcher.read_exit
+    seen = []
+
+    def read_exit(paths, i):
+        r = real_read_exit(paths, i)
+        if r and i == job_id and not seen:
+            seen.append(True)
+            return {**r, "exit_code": 137, "oom_killed": True}
+        return r
+
+    monkeypatch.setattr(launcher, "read_exit", read_exit)
+
+
+def test_a_job_killed_at_its_ram_limit_is_retried_with_more_ram(daemon, tmp_path, monkeypatch):
+    # Issue #84: 25% more, rounded up to a whole gigabyte, with the same id and place in line.
+    job_id = submit(daemon, tmp_path, [PY, "-c", "pass"], mem=2 * GiB)
+    _oom_on_first_exit(monkeypatch, job_id)
+    run_until(daemon, lambda: job(daemon, job_id).state == State.DONE)
+    j = job(daemon, job_id)
+    assert j.request.mem == 3 * GiB
+    assert [a["reason"] for a in j.attempts] == ["killed: went over its 2G RAM reservation; retrying with --mem 3G"]
+
+
+def test_a_ram_kill_is_not_retried_when_more_ram_wont_fit(daemon, tmp_path, monkeypatch):
+    job_id = submit(daemon, tmp_path, [PY, "-c", "pass"], mem=14 * GiB)  # 17.5G won't fit in 16G
+    _oom_on_first_exit(monkeypatch, job_id)
+    run_until(daemon, lambda: finished(daemon, job_id))
+    j = job(daemon, job_id)
+    assert (j.state, j.reason, j.attempts) == (State.FAILED, "killed: went over its 14G RAM reservation", [])
+
+
+def test_no_retry_opts_a_job_out(daemon, tmp_path, monkeypatch):
+    job_id = submit(daemon, tmp_path, [PY, "-c", "pass"], mem=2 * GiB, retry=False)
+    _oom_on_first_exit(monkeypatch, job_id)
+    run_until(daemon, lambda: finished(daemon, job_id))
+    assert (job(daemon, job_id).state, job(daemon, job_id).attempts) == (State.FAILED, [])
+
+
+def test_dibs_show_lists_the_tries_that_failed_for_a_resource_reason(daemon, tmp_path, monkeypatch):
+    from dibs.render import render_show
+
+    job_id = submit(daemon, tmp_path, [PY, "-c", "pass"], mem=2 * GiB)
+    _oom_on_first_exit(monkeypatch, job_id)
+    run_until(daemon, lambda: job(daemon, job_id).state == State.DONE)
+    text = render_show(daemon.show(job_id)["job"], time.time())
+    assert re.search(r"try 1 +killed: went over its 2G RAM reservation; retrying with --mem 3G", text), text
 
 
 def test_submit_reports_earlier_runs_of_the_same_command(daemon, tmp_path):
