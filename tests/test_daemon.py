@@ -169,6 +169,34 @@ def test_recover_marks_lost(make_daemon, tmp_path):
     assert (j.state, j.reason) == (State.FAILED, "lost: its process ended while dibs was not running")
 
 
+def test_a_job_a_reboot_killed_keeps_the_sleep_counted_before_it(make_daemon, tmp_path, monkeypatch):
+    # Issue #78: a reboot resets the machine's count of time asleep. A job that had run 13 min
+    # across 4h38m of sleep before a reboot was recorded as lost "after 4h51m".
+    start, now, slept = 1_000_000.0, [1_000_000.0], [100.0]
+    monkeypatch.setattr(procs, "boot_id", lambda: "boot-a")
+    first = make_daemon(clock=lambda: now[0], slept=lambda: slept[0])
+    submit(first, tmp_path, ["sleep", "30"], vram="all")
+    job_id = submit(first, tmp_path, ["true"], vram="all")  # queued behind the blocker
+    now[0] += 10 * 60 + 4 * 3600  # 10 minutes running, then 4 hours asleep
+    slept[0] += 4 * 3600
+    first.tick()  # awake again: the daemon notes it
+    noted = now[0]
+    dead = subprocess.Popen(["true"])
+    dead.wait()
+    j = job(first, job_id)  # as if it had been running since `start`
+    j.state, j.started, j.sleep_at_start, j.shim_pid, j.shim_ticks = State.RUNNING, start, 100.0, dead.pid, None
+    first.store.update_job(j)
+    first.close()
+    monkeypatch.setattr(procs, "boot_id", lambda: "boot-b")  # the machine restarted
+    now[0] += 120
+    slept[0] = 0.0
+    second = make_daemon(clock=lambda: now[0], slept=lambda: slept[0])
+    second.recover()
+    j = job(second, job_id)
+    assert (j.state, j.reason) == (State.FAILED, "lost: the machine restarted while it ran")
+    assert (j.ended, j.asleep) == (noted, 4 * 3600)  # so it ran 10 minutes
+
+
 def test_retention_deletes_old_jobs(make_daemon, tmp_path):
     now = [time.time()]
     d = make_daemon(clock=lambda: now[0])

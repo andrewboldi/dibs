@@ -46,6 +46,7 @@ OWED_FOR = 86400.0  # seconds: what a session owes (or is owed) for its prioriti
 OUTSIDE_WINDOW = 120.0  # seconds: RAM in use outside dibs counts as its peak over this long
 JOBS_RAM_WINDOW = 10.0  # seconds: RAM dibs jobs hold counts as its peak over this long, when taken off the in-use total
 RETENTION_EVERY = 3600.0
+ALIVE_EVERY = 60.0  # seconds: how often the daemon notes it's alive, so a reboot can be dated (#78)
 RECENT = 86400.0  # how far back `queue --all` looks
 STOPS_SHOWN = 3600.0  # how far back guard stops are shown
 WAIT_RECHECK = 5.0  # a long-polling wait re-checks its jobs at least this often
@@ -108,6 +109,7 @@ class Daemon:
         self._callbacks: list[Callable[[Job], None]] = []
         self._terminated: set[int] = set()  # jobs that have been sent SIGTERM
         self._last_retention = -math.inf
+        self._last_alive = -math.inf
         self._sees_processes = backend.processes() is not None
         self._wake: set[asyncio.Event] = set()  # waits to wake when any job finishes
         self._stop: asyncio.Event | None = None
@@ -477,10 +479,16 @@ class Daemon:
         self.schedule()
         if now - self._last_retention >= RETENTION_EVERY:
             self._retention(now)
+        if now - self._last_alive >= ALIVE_EVERY:
+            self._last_alive = now
+            self.store.set_meta("alive", json.dumps({"time": now, "slept": self.slept(), "boot": procs.boot_id()}))
 
     def recover(self) -> None:
         """After a (re)start: finish jobs that ended meanwhile, adopt the ones still running."""
         now = self.clock()
+        # The daemon's last note before it stopped; on another boot, the machine restarted since.
+        alive = json.loads(self.store.get_meta("alive") or "{}")
+        rebooted = bool(alive) and alive.get("boot") != procs.boot_id()
         for job in self.store.jobs([State.RUNNING]):
             result = launcher.read_exit(self.paths, job.id)
             if result is not None:
@@ -489,6 +497,12 @@ class Daemon:
                 # dibs died between saving the job as running and recording its launcher.
                 job.shim_pid, job.shim_ticks, job.unit = found
                 self.store.update_job(job)
+            elif not (job.shim_pid and procs.alive(job.shim_pid, job.shim_ticks)) and rebooted:
+                # It died with the old boot, after dibs last saw it; the count of time asleep restarted
+                # at boot, so what it slept is taken from that note.
+                slept = max(0.0, alive["slept"] - job.sleep_at_start) if job.sleep_at_start is not None else 0.0
+                ended = max(alive["time"], job.started or alive["time"])
+                self._lose(job, ended, "lost: the machine restarted while it ran", asleep=slept)
             elif not (job.shim_pid and procs.alive(job.shim_pid, job.shim_ticks)):
                 self._lose(job, now, "lost: its process ended while dibs was not running")
 
@@ -682,8 +696,8 @@ class Daemon:
         last = next((line.strip() for line in reversed(lines) if line.strip()), "")
         return f" ({last[:200]})" if last else ""
 
-    def _lose(self, job: Job, now: float, reason: str) -> None:
-        job.asleep = self._asleep(job)
+    def _lose(self, job: Job, now: float, reason: str, asleep: float | None = None) -> None:
+        job.asleep = self._asleep(job) if asleep is None else asleep
         job.state, job.ended, job.reason = State.FAILED, now, reason
         self.store.update_job(job)
         self._notify(job)
