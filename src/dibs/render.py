@@ -322,8 +322,17 @@ def render_info(info: dict) -> str:
 
 # dibs top ----------------------------------------------------------------------------------------
 
-_PALETTE = ["36", "35", "33", "32", "34", "91", "96", "95", "93", "92", "94", "31"]
+# Job colours (#118): fixed 256-colour hues, since terminal themes remap the 16 basic colours (Solarized
+# makes the bright ones greys). Mid-lightness, so each reads at 3:1 or more on light and dark
+# backgrounds, and in an order where consecutive job ids, the last and first included, stay apart
+# for normal and red-green colour-blind vision (OKLab ΔE ≥ 19 and ≥ 10).
+_PALETTE = [f"38;5;{n}" for n in (167, 68, 64, 168, 136, 31, 166, 133, 29, 98)]
 _TICKS = [10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600, 7200, 10800, 21600, 43200, 86400, 172800, 604800]
+# dibs top's columns, each followed by a space that's always there (#118)
+_ID_W, _NAME_W, _SESSION_W, _WHEN_W = 5, 13, 14, 16
+_PLAN_LEFT = 4 + _ID_W + 1 + _NAME_W + 1  # where the plan's bars start, under "now"
+_NUMBERS = _PLAN_LEFT + _SESSION_W + 1  # where the CPU, RAM and VRAM numbers start
+_REASON_MIN = 10  # a reason shows only when this much of it fits
 
 
 def _job_color(job_id: int) -> str:
@@ -344,12 +353,21 @@ class _Line:
         return sum(len(t) for t, _ in self.parts)
 
     def render(self, width: int, color: bool) -> str:
-        out, used = [], 0
+        """The line cut to width; where visible text is lost, it ends with an ellipsis (#118)."""
+        cut = len("".join(t for t, _ in self.parts).rstrip()) > width
+        pieces, used = [], 0
         for text, sgr in self.parts:
-            text = text[: max(0, width - used)]
+            text = text[: max(0, (width - 1 if cut else width) - used)]
             used += len(text)
-            out.append(f"\033[{sgr}m{text}\033[0m" if color and sgr and text else text)
-        return "".join(out).rstrip()
+            pieces.append([text, sgr])
+        if cut:
+            while pieces and not pieces[-1][0].rstrip(" ,;:("):
+                pieces.pop()
+            if pieces:
+                pieces[-1][0] = pieces[-1][0].rstrip(" ,;:(")
+                if not pieces[-1][0].endswith("…"):
+                    pieces[-1][0] += "…"
+        return "".join(f"\033[{s}m{t}\033[0m" if color and s and t else t for t, s in pieces).rstrip()
 
 
 def _bar(width: int, total: float, shares: list[tuple[float, str]]) -> list[tuple[str, str | None]]:
@@ -360,6 +378,8 @@ def _bar(width: int, total: float, shares: list[tuple[float, str]]) -> list[tupl
         if cells:
             pieces.append(("█" * cells, sgr))
             filled += cells
+    for i in range(len(pieces) - 1):  # a half-cell gap between neighbouring jobs' segments (#118)
+        pieces[i] = (pieces[i][0][:-1] + "▌", pieces[i][1])
     pieces.append(("░" * (width - filled), "2"))
     return pieces
 
@@ -368,10 +388,28 @@ def _short(text: str, n: int) -> str:
     return text if len(text) <= n else text[: n - 1] + "…"
 
 
-def _job_cells(job: dict, now: float) -> tuple[str, str, str]:
-    """(resources, when, why) for a job row."""
+def _short_label(label: str, n: int) -> str:
+    """A session label (project·session) cut to n characters from the end like any text, since one
+    session often works in several project folders, but never to a piece of its session part, such
+    as "project·…" (#118)."""
+    if len(label) <= n:
+        return label
+    kept = label[: n - 1]
+    return (kept[: kept.rindex("·")] if "·" in kept else kept) + "…"
+
+
+def _top_vram(job: dict, several_gpus: bool) -> str:
+    """The VRAM cell in dibs top: which GPU a job runs on only when there are several (#118)."""
+    if several_gpus or not job["request"]["vram"]:
+        return _vram_cell(job)
+    return format_size(job["request"]["vram"])
+
+
+def _job_cells(job: dict, now: float, several_gpus: bool) -> tuple[str, str, str]:
+    """(resources, when, why) for a job row: CPUs, RAM and VRAM right-aligned under their labels."""
     req = job["request"]
-    res = f"{req['cpus']} CPU {format_size(req['mem'])} {_vram_cell(job)}"
+    width = 8 if several_gpus else 5
+    res = f"{req['cpus']:>4} {format_size(req['mem']):>5} {_top_vram(job, several_gpus):>{width}}"
     if job["state"] == "running":
         if job.get("over_estimate"):
             return res, f"over by {format_duration(job['over_estimate'])}", ""
@@ -451,20 +489,27 @@ def _frame(snapshot: dict, width: int, rows_per_list: int) -> list[_Line]:
 
     if not running and not queued:
         lines.append(_Line(("  Nothing running or queued.", "2")))
-    for title, jobs in (("RUNNING", running), ("QUEUED", queued)):
-        if not jobs:
-            continue
-        lines.append(_Line((f" {title}", "1")))
+    several = len(cap["gpus"]) > 1
+    sections = [(title, jobs) for title, jobs in (("RUNNING", running), ("QUEUED", queued)) if jobs]
+    for n, (title, jobs) in enumerate(sections):
+        head = _Line((f" {title}", "1"), (f"  {len(jobs)}", "2"))
+        if n == 0:  # the numbers' labels, over their columns
+            head.add(" " * max(1, _NUMBERS - len(head)))
+            head.add(f"{'CPUs':>4} {'RAM':>5} {'VRAM':>{8 if several else 5}}", "2")
+        else:
+            lines.append(_Line())
+        lines.append(head)
         for job in jobs[:rows_per_list]:
-            res, when_text, why = _job_cells(job, now)
+            res, when_text, why = _job_cells(job, now, several)
             line = _Line(
-                (f"  #{job['id']:<3}", _job_color(job["id"])),
-                (f"{_short(job['name'], 13):<14}", _job_color(job["id"])),
-                (f"{_short(job['session_label'], 14):<15}", "2"),
-                (f"{res:<17}", None),
-                (f"{when_text:<15}", None),
+                ("  ", None),
+                ("●", _job_color(job["id"])),  # the job's colour on a mark, its text in plain ink
+                (" " + f"#{job['id']}".ljust(_ID_W) + " " + _short(job["name"], _NAME_W).ljust(_NAME_W) + " ", None),
+                (_short_label(job["session_label"], _SESSION_W).ljust(_SESSION_W) + " ", "2"),
+                (res + "  ", None),
+                (when_text.ljust(_WHEN_W) + "  ", None),
             )
-            if why:
+            if why and width - len(line) >= _REASON_MIN:
                 line.add(why, "2")
             lines.append(line)
         if len(jobs) > rows_per_list:
@@ -472,7 +517,7 @@ def _frame(snapshot: dict, width: int, rows_per_list: int) -> list[_Line]:
 
     planned = [(j, s) for j in running + queued if (s := _span(j, now))]
     if planned:
-        left = 22
+        left = _PLAN_LEFT
         horizon = max(end for _, (_, end) in planned)
         span = max(60.0, horizon - now)
         lines.append(_Line())
@@ -484,7 +529,8 @@ def _frame(snapshot: dict, width: int, rows_per_list: int) -> list[_Line]:
             x1 = max(x0 + 1, int((end - now) / span * (area - 1)))
             lines.append(
                 _Line(
-                    (f"  #{job['id']:<3}{_short(job['name'], 13):<17}", _job_color(job["id"])),
+                    ("    " + f"#{job['id']}".ljust(_ID_W) + " " + _short(job["name"], _NAME_W).ljust(_NAME_W) + " ",
+                     None),  # fmt: skip
                     (" " * x0, None),
                     ("█" * (min(x1, area) - x0), _job_color(job["id"])),
                 )
