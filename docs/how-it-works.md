@@ -19,7 +19,9 @@ three guarantees:
 2. **No starvation.** Once a job's place in line comes due (for a job at the default priority,
    after it has waited its estimate), no newer job can pass it.
 3. **No crowding out.** A session's queued jobs line up behind each other, so an agent that queues
-   fifty jobs interleaves with everyone else instead of going ahead of them all.
+   fifty jobs interleaves with everyone else instead of going ahead of them all. A job lines up
+   only behind its session's jobs that are still waiting: when one starts or is cancelled, the ones
+   after it move up, so a busy session's line never runs ahead of the clock (#150).
 
 Every queued job gets a place on a timeline: the earliest moment it fits for its whole estimated
 run, around the running jobs and the places already given to the jobs ahead of it. A small job

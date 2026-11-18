@@ -1371,3 +1371,50 @@ def test_the_load_row_never_gets_in_the_way_of_scheduling(make_daemon, tmp_path)
     job_id = submit(d, tmp_path, [PY, "-c", "pass"])
     run_until(d, lambda: job(d, job_id).state == State.DONE)
     assert d.snapshot()["load"]["cores"] == []
+
+
+LONG = [PY, "-c", "import time; time.sleep(600)"]
+
+
+def _machine_held(daemon, tmp_path):
+    """A job of another session that holds every CPU, and its id: the jobs after it wait."""
+    return submit(daemon, tmp_path, LONG, cpus=len(daemon.capacity.cpus), time_=3600.0, session="other")
+
+
+def test_a_job_lines_up_only_behind_its_sessions_jobs_still_waiting(daemon, tmp_path):
+    # Issue #150: places never moved when the jobs ahead of them started, so a busy session's line ran
+    # hours ahead of the clock: a job submitted at 10:43 had its place at 21:22, and every newer job of
+    # another session went ahead of it.
+    all_cpus = len(daemon.capacity.cpus)
+    hold = _machine_held(daemon, tmp_path)
+    a = submit(daemon, tmp_path, LONG, cpus=all_cpus, time_=3600.0)
+    b = submit(daemon, tmp_path, LONG, cpus=all_cpus, time_=3600.0)
+    assert job(daemon, b).tag == pytest.approx(job(daemon, a).tag + 3600, abs=1)  # B after A
+    daemon.cancel([hold])
+    run_until(daemon, lambda: job(daemon, a).state == State.RUNNING)
+    b_now = job(daemon, b)
+    assert b_now.tag == pytest.approx(b_now.submitted + 3600, abs=1)  # A has started: B is due an hour after it came
+    daemon.cancel([a, b])
+
+
+def test_cancelling_a_waiting_job_moves_the_ones_behind_it_forward(daemon, tmp_path):
+    hold = _machine_held(daemon, tmp_path)
+    a = submit(daemon, tmp_path, LONG, time_=7200.0)
+    b = submit(daemon, tmp_path, LONG, time_=600.0)
+    before = job(daemon, b).tag
+    daemon.cancel([a])
+    after = job(daemon, b)
+    assert after.tag == pytest.approx(after.submitted + 600, abs=1) and after.tag < before
+    daemon.cancel([hold, b])
+
+
+def test_lining_up_again_keeps_a_higher_priority_job_ahead_of_its_sessions_others(daemon, tmp_path):
+    hold = _machine_held(daemon, tmp_path)
+    first = submit(daemon, tmp_path, LONG, time_=600.0)
+    low = submit(daemon, tmp_path, LONG, time_=600.0)
+    high = submit(daemon, tmp_path, LONG, time_=600.0, priority=8)  # goes ahead of low, which moves back
+    assert job(daemon, high).tag < job(daemon, low).tag
+    daemon.cancel([first])
+    assert job(daemon, high).tag < job(daemon, low).tag
+    assert all(job(daemon, j).tag <= job(daemon, j).submitted + 1200 + 1 for j in (high, low))
+    daemon.cancel([hold, low, high])
