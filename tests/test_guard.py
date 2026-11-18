@@ -163,6 +163,18 @@ def test_preexisting_left_alone(make_daemon, spawned):
     assert outside(d) == {p.pid: "already running when the guard started"}
 
 
+def test_snapshot_shows_vram_in_use_outside_dibs(make_daemon, spawned):
+    # Issue #120: dibs top draws what programs outside dibs use on each GPU.
+    p = spawned(["sleep", "60"])
+    time.sleep(0.05)
+    backend = FakeBackend()
+    d = make_daemon(backend=backend)
+    assert d.snapshot()["outside"]["vram"] == {}
+    backend.procs = [GpuProcess(p.pid, 0, GiB)]
+    d.tick()
+    assert d.snapshot()["outside"]["vram"] == {"0": GiB}
+
+
 def test_other_user_reported(world):
     d, backend = world()
     backend.procs = [GpuProcess(1, 0, GiB)]  # init belongs to root
