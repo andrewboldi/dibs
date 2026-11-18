@@ -180,7 +180,10 @@ def _command(argv: list[str], width: int = 60) -> str:
 def guard_lines(guard: dict, now: float) -> list[str]:
     lines = []
     for e in guard.get("stopped", []):
-        used = f"{format_size(e['used'])} on GPU {e['gpu']}" if e.get("used") else f"GPU {e['gpu']}"
+        if "ram" in e:  # the machine was short of memory (#135)
+            used = f"{format_size(e['ram'])} of RAM while memory ran short"
+        else:
+            used = f"{format_size(e['used'])} on GPU {e['gpu']}" if e.get("used") else f"GPU {e['gpu']}"
         lines.append(f"Stopped outside dibs: pid {e['pid']} {_command(e['command'])} ({used}), {ago(e['time'], now)}")
     for o in guard.get("outside", []):
         used = f"{format_size(o['used'])} on GPU {o['gpu']}" if o.get("used") else f"GPU {o['gpu']}"

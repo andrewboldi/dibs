@@ -424,14 +424,18 @@ def cmd_setup(args, paths: Paths, _) -> int:
     print("\n".join(lines))
     if not args.dry_run:
         if (home / ".config" / "systemd" / "user" / "dibs.service").exists():
-            running = "The guard is on: GPU processes started outside dibs get stopped"
+            running = (
+                "The guard is on: GPU processes started outside dibs get stopped, and so does the largest "
+                "program outside dibs when memory runs short"
+            )
         else:
             running = (
                 "No service runs dibs here, so it starts on the first dibs command, and its guard runs "
-                "while it does: GPU processes started outside dibs then get stopped"
+                "while it does: GPU processes started outside dibs then get stopped, and so does the "
+                "largest program outside dibs when memory runs short"
             )
         print(
-            f"\n{running}, with a note on how to resubmit them.\nTo only warn instead, put "
+            f"\n{running}, with a note on how to run them as jobs.\nTo only warn instead, put "
             f'guard = "warn" in {paths.config_file} and run dibs daemon restart. Undo all of this '
             "with dibs setup --undo."
         )

@@ -84,13 +84,14 @@ def make_daemon(tmp_path):
     made = []
 
     def _make(config=Config(), cap=None, backend=None, clock=time.time, meminfo=lambda: None, slept=procs.slept,
-              pressure=lambda: 0.0, cpu_busy=lambda: None):
+              pressure=lambda: 0.0, cpu_busy=lambda: None, programs=lambda minimum: []):
         paths = get_paths({"DIBS_HOME": str(tmp_path / "home"), "HOME": str(tmp_path)})
         d = Daemon(
             paths, config, cap or capacity(), backend or FakeBackend(), use_systemd=False, clock=clock, meminfo=meminfo,
             slept=slept,
             pressure=pressure,
             cpu_busy=cpu_busy,
+            programs=programs,  # never this machine's real programs: the guard could stop them (#135)
         )
         made.append(d)
         return d

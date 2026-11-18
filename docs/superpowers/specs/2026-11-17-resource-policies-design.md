@@ -132,3 +132,22 @@ finish before it starts may still go first, as with any job. Borrowing (sections
 puts a job beside it, and the over-reservation investigation (section 8) counts it apart from
 padding. A follow-up has `dibs show` say how busy the machine was outside the job while it ran,
 so an agent can tell whether its timing was disturbed.
+
+## 13. Stop a program outside dibs that runs the machine out of RAM
+
+Added at the maintainer's request after a program an agent ran outside dibs used up the machine's
+RAM and swap (#135). While the machine is short of memory (the test in section 9), the guard stops
+the largest program outside dibs that holds a tenth of the RAM or more, before the newest borrower,
+one per stretch of shortage. It leaves alone what the GPU guard leaves alone (other users,
+allowlisted names, desktop apps, programs older than the guard and what they start), the agent
+CLIs themselves, and jobs, which hold the RAM they reserved. The program's output gets what it
+held, why it was stopped, and the `dibs run --mem` command that keeps it from happening again, and
+agents' instructions say that every RAM-heavy step goes through dibs, not only the GPU step.
+`guard = "warn"` only logs it.
+
+## 14. Keep an agent's terminal when the kernel kills a program in it
+
+systemd's default `OOMPolicy=stop` stops a whole scope when the kernel's OOM killer kills one of its
+processes, and tmux and VTE terminals run each pane in a scope of its own, so the agent died with
+its program (#134). `dibs setup` writes drop-ins setting `OOMPolicy=continue` for `tmux-spawn-*.scope`
+and `vte-spawn-*.scope`, as dibs's job scopes already have; `dibs setup --undo` removes them.

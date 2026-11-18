@@ -489,3 +489,126 @@ def test_a_live_process_without_a_readable_command_is_recorded_by_its_name(monke
         if p.poll() is None:
             p.kill()
             p.wait()
+
+
+# Programs outside dibs that run the machine out of RAM (#135) ----------------------------------
+
+CLEAN_ENV = {k: v for k, v in os.environ.items() if not k.startswith("DIBS_")}  # not a job of any dibs
+
+
+@pytest.fixture
+def short_world(make_daemon):
+    """A daemon on a 16G machine with a fake clock, fake memory pressure and RAM in use, and a fake
+    view of the machine's big programs: the guard must never see this machine's real ones."""
+
+    def _short_world(config=Config()):
+        state = {"now": time.time(), "pressure": 0.0, "used": 4 * GiB, "programs": []}
+        d = make_daemon(
+            config=config,
+            clock=lambda: state["now"],
+            meminfo=lambda: (16 * GiB, state["used"]),
+            pressure=lambda: state["pressure"],
+            programs=lambda minimum: list(state["programs"]),
+        )
+        time.sleep(0.05)  # processes spawned from here on start after the guard did
+
+        def run(seconds, pressure=60.0, used=15 * GiB):
+            state.update(pressure=pressure, used=used)
+            for _ in range(int(seconds // 6)):
+                state["now"] += 6
+                d.tick()
+
+        return d, state, run
+
+    return _short_world
+
+
+def test_when_memory_runs_short_the_guard_stops_the_largest_program_outside_dibs(short_world, spawned):
+    # Issue #135: a program an agent ran outside dibs grew to 14.1G and ran the machine out of RAM and
+    # swap. The kernel killed it after a minute and a half of thrashing, and the agent's pane with it.
+    d, state, run = short_world()
+    small = spawned(SLEEPER, env=CLEAN_ENV)
+    big = spawned(SLEEPER, env=CLEAN_ENV, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    state["programs"] = [(small.pid, 2 * GiB), (big.pid, 9 * GiB)]
+    run(6)
+    assert procs.alive(big.pid)  # not before the shortage has lasted 10 s
+    run(12)
+    assert big.wait(timeout=5) == -9 and procs.alive(small.pid)  # one per stretch of shortage
+    out = big.stdout.read().decode()
+    assert "it held 9G of RAM outside dibs while the machine was running out of memory (1G of 16G left)" in out
+    assert f"dibs run --cpus N --mem 10G --time ESTIMATE -- {PY} -c" in out
+    assert [(e["kind"], e["pid"], e["ram"]) for e in d.store.events(0)] == [("stop", big.pid, 9 * GiB)]
+    assert "(9G of RAM while memory ran short)" in render_queue(d.snapshot(), color=False)
+
+
+@pytest.mark.parametrize(
+    "held,pressure,used",
+    [
+        (GiB, 60.0, 15 * GiB),  # less than a tenth of the RAM: not the cause
+        (9 * GiB, 60.0, 8 * GiB),  # half the RAM available: one program stalling inside itself (#129)
+        (9 * GiB, 5.0, 15 * GiB),  # little available, but nothing waits for memory
+    ],
+)
+def test_a_big_program_is_left_alone_unless_the_machine_is_short(short_world, spawned, held, pressure, used):
+    d, state, run = short_world()
+    p = spawned(SLEEPER, env=CLEAN_ENV)
+    state["programs"] = [(p.pid, held)]
+    run(30, pressure=pressure, used=used)
+    assert procs.alive(p.pid) and d.store.events(0) == []
+
+
+def test_the_agent_itself_and_desktop_programs_are_never_stopped_for_ram(short_world, spawned, tmp_path, monkeypatch):
+    d, state, run = short_world()
+    (tmp_path / "claude").write_text("import time\ntime.sleep(60)\n")  # an agent CLI run by its interpreter
+    agent = spawned([PY, str(tmp_path / "claude")], env=CLEAN_ENV)
+    browser = spawned(["sleep", "61"], env=CLEAN_ENV)
+    script = spawned(SLEEPER, env=CLEAN_ENV)
+    real_cgroup = procs.cgroup
+    desktop = APP_SLICE + "app-gnome-org.mozilla.firefox-7731.scope"
+    monkeypatch.setattr(procs, "cgroup", lambda pid: desktop if pid == browser.pid else real_cgroup(pid))
+    state["programs"] = [(agent.pid, 12 * GiB), (browser.pid, 10 * GiB), (script.pid, 3 * GiB)]
+    run(18)
+    assert script.wait(timeout=5) == -9
+    assert procs.alive(agent.pid) and procs.alive(browser.pid)
+
+
+def test_a_job_is_never_stopped_for_ram_by_the_guard(short_world, tmp_path):
+    # A job holds the RAM it reserved, and its own limit stops it if it goes over.
+    d, state, run = short_world()
+    resp = d.submit(
+        {
+            "argv": SLEEPER,
+            "cwd": str(tmp_path),
+            "env": CLEAN_ENV,
+            "session": "s",
+            "request": {"cpus": 1, "mem": GiB, "vram": 0, "gpus": None, "time": 60},
+        }
+    )
+    job = d.store.get_job(resp["job"]["id"])
+    pid = wait_for(lambda: next((p for p in launcher.job_pids(job) if (procs.cmdline(p) or [""])[0] == PY), None))
+    state["programs"] = [(pid, 9 * GiB)]
+    run(18)
+    assert procs.alive(pid) and d.store.events(0) == []
+
+
+def test_in_warn_mode_a_big_program_is_only_logged(short_world, spawned):
+    d, state, run = short_world(Config(guard="warn"))
+    p = spawned(SLEEPER, env=CLEAN_ENV)
+    state["programs"] = [(p.pid, 9 * GiB)]
+    run(18)
+    assert procs.alive(p.pid) and d.store.events(0) == []
+
+
+def test_ram_stop_message_says_why_and_how_to_keep_it_from_happening_again():
+    text = guard.ram_stop_message(4121, ["python", "align.py", "--reads", "r.jsonl"], int(14.1 * GiB),
+                                  int(0.8 * GiB), int(30.6 * GiB))  # fmt: skip
+    assert text == (
+        "dibs: stopped `python align.py --reads r.jsonl` (pid 4121): it held 14.1G of RAM outside dibs while "
+        "the machine was running out of memory (819M of 30.6G left).\n"
+        "dibs: Programs outside dibs get no RAM set aside, so left running it would have stalled every program "
+        "here until the kernel killed it, or something else.\n"
+        "dibs: So it doesn't happen again, run it as a job: a job gets the RAM it reserves.\n"
+        "dibs:   dibs run --cpus N --mem 16G --time ESTIMATE -- python align.py --reads r.jsonl\n"
+        "dibs: Run every step that may need more than a few GB of RAM through dibs, not only GPU work. "
+        "`dibs agent-help` explains how to choose N, --mem and ESTIMATE."
+    )

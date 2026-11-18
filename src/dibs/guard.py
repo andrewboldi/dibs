@@ -1,16 +1,18 @@
 """The guard: GPU processes that aren't dibs jobs are stopped, with a note saying how to use dibs.
+So is the largest program outside dibs when the machine runs short of memory (#135).
 
-It watches the GPUs themselves, not the agents, so it works whichever agent CLI started the
-process, including ones dibs has never heard of.
+It watches the GPUs and the machine's memory, not the agents, so it works whichever agent CLI
+started the process, including ones dibs has never heard of.
 """
 
 import os
 import re
 import shlex
-from collections.abc import Collection, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
 
 from dibs import procs
+from dibs.agents import AGENTS
 from dibs.gpu import GpuProcess
 from dibs.units import format_size, suggest_size
 
@@ -85,26 +87,73 @@ def classify(
             continue
         if mode == "off":
             continue
-        owner = procs.uid(p.pid)
-        started = procs.start_time(p.pid)
-        if owner is None or started is None:
-            continue  # already gone
-        if owner != my_uid:
-            kind = "other-user"
-        elif _other_dibs_job(p.pid, instance):
-            kind = "other-dibs"
-        elif _allowed(p.pid, allow):
-            kind = "allowed"
-        elif desktop and _launched_from_desktop(p.pid):
-            kind = "desktop"
-        elif started < since:
-            kind = "preexisting"
-        elif parents and _descends_from(p.pid, parents):
-            kind = "inherited"
-        else:
-            kind = "stop" if mode == "all" else "warn"
-        verdicts.append(Verdict(p.pid, p.gpu_index, p.used, kind, None))
+        kind = _judge(p.pid, mode, allow, since, my_uid, parents, instance, desktop)
+        if kind is not None:
+            verdicts.append(Verdict(p.pid, p.gpu_index, p.used, kind, None))
     return verdicts
+
+
+def _judge(
+    pid: int, mode: str, allow: Sequence[str], since: float, my_uid: int,
+    parents: Collection[tuple[int, int]], instance: str, desktop: bool,
+) -> str | None:  # fmt: skip
+    """What to do about a process outside dibs: "stop", "warn", or why it's left alone (a WHY key);
+    None if it's gone."""
+    owner = procs.uid(pid)
+    started = procs.start_time(pid)
+    if owner is None or started is None:
+        return None
+    if owner != my_uid:
+        return "other-user"
+    if _other_dibs_job(pid, instance):
+        return "other-dibs"
+    if _allowed(pid, allow):
+        return "allowed"
+    if desktop and _launched_from_desktop(pid):
+        return "desktop"
+    if started < since:
+        return "preexisting"
+    if parents and _descends_from(pid, parents):
+        return "inherited"
+    return "stop" if mode == "all" else "warn"
+
+
+AGENT_COMMANDS = frozenset(command for *_, command in AGENTS)
+
+
+def _is_agent(pid: int) -> bool:
+    """Whether the process is an agent CLI itself (claude, codex, ...), run directly or by an
+    interpreter: stopping one is what the RAM guard is there to prevent."""
+    argv = procs.cmdline(pid) or []
+    names = {procs.exe_name(pid) or ""} | {os.path.basename(arg) for arg in argv[:2]}
+    return bool(names & AGENT_COMMANDS)
+
+
+def ram_hog(
+    programs: Sequence[tuple[int, int]],
+    *,
+    minimum: int,
+    in_dibs: Callable[[int], bool],
+    mode: str,
+    allow: Sequence[str],
+    since: float,
+    my_uid: int,
+    parents: Collection[tuple[int, int]] = (),
+    instance: str = "",
+    desktop: bool = True,
+) -> tuple[int, int, str] | None:
+    """The program to stop while the machine is short of memory, as (pid, RAM it holds, "stop" or
+    "warn"): the largest one outside dibs that holds at least `minimum` bytes, leaving alone what the
+    GPU guard leaves alone, and the agent CLIs themselves."""
+    for pid, held in sorted(programs, key=lambda p: -p[1]):
+        if held < minimum:
+            break
+        if mode == "off" or in_dibs(pid) or _is_agent(pid):
+            continue
+        kind = _judge(pid, mode, allow, since, my_uid, parents, instance, desktop)
+        if kind in ("stop", "warn"):
+            return pid, held, kind
+    return None
 
 
 def _other_dibs_job(pid: int, instance: str) -> bool:
@@ -136,6 +185,32 @@ def stop_message(pid: int, argv: Sequence[str], gpu_index: int, used: int | None
         f"dibs:   dibs run --cpus N --mem {mem} --vram {vram} --time ESTIMATE -- {command}\n"
         "dibs: `dibs agent-help` explains how to choose N and ESTIMATE."
     )
+
+
+def ram_stop_message(pid: int, argv: Sequence[str], held: int, available: int, total: int) -> str:
+    """What a program stopped for RAM leaves in its output: why, and how to keep it from happening again."""
+    command = shlex.join(argv) if argv else "this process"
+    return (
+        f"dibs: stopped `{command}` (pid {pid}): it held {format_size(held)} of RAM outside dibs while the "
+        f"machine was running out of memory ({format_size(available)} of {format_size(total)} left).\n"
+        "dibs: Programs outside dibs get no RAM set aside, so left running it would have stalled every program "
+        "here until the kernel killed it, or something else.\n"
+        "dibs: So it doesn't happen again, run it as a job: a job gets the RAM it reserves.\n"
+        f"dibs:   dibs run --cpus N --mem {format_size(suggest_size(held))} --time ESTIMATE -- {command}\n"
+        "dibs: Run every step that may need more than a few GB of RAM through dibs, not only GPU work. "
+        "`dibs agent-help` explains how to choose N, --mem and ESTIMATE."
+    )
+
+
+def stop_for_ram(pid: int, held: int, available: int, total: int) -> dict | None:
+    """Stop a program (and what it started) for holding too much RAM outside dibs, leaving the note in
+    its output; the event to record, or None if it was already gone."""
+    if not procs.alive(pid):
+        return None
+    argv = procs.cmdline(pid) or [name for name in [procs.exe_name(pid)] if name]
+    env = procs.environ(pid) or {}
+    procs.stop_with_message([pid], ram_stop_message(pid, argv, held, available, total))
+    return {"pid": pid, "command": argv, "ram": held, "session": env.get("DIBS_SESSION") or env.get("CLAUDE_CODE_SESSION_ID")}
 
 
 def enforce(verdicts: Sequence[Verdict]) -> list[dict]:

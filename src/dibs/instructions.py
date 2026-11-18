@@ -10,7 +10,8 @@ BLOCK = """\
 This machine's GPUs, and its CPU cores and RAM for heavy work, are shared with other agents
 through `dibs`, a job queue. Anything that uses a GPU must run through dibs: GPU processes
 started any other way are stopped within seconds. Also queue CPU- or RAM-heavy work that runs
-for more than a minute or two.
+for more than a minute or two, every step of it and not only the GPU step: when the machine runs
+short of memory, dibs stops the largest program running outside it.
 
     dibs submit --cpus 4 --mem 16G --vram 6G --time 20m -- python train.py
 
@@ -30,7 +31,10 @@ when those resources are free, so jobs never crash each other by running out of 
   CUDA, a model server. A GPU process started outside dibs is stopped within seconds, with a
   message saying how to resubmit it.
 - Work that keeps several CPU cores or a lot of RAM busy for more than a minute or two: big builds,
-  data processing, CPU training, long test suites.
+  data processing, CPU training, long test suites. That includes the CPU steps of a pipeline whose
+  GPU step already runs through dibs. When the machine runs short of memory, dibs stops the largest
+  program outside it (one holding a tenth of the RAM or more), with a message saying why and how to
+  run it as a job: a job gets the RAM it reserved, so it is never stopped that way.
 - Not needed for quick commands: git, editing, small scripts, light unit tests.
 
 ## Submitting
@@ -126,8 +130,8 @@ their estimates, and it ends by itself; `dibs momentum --end` ends it early.
 - `dibs cancel ID` as soon as you no longer need a job, for example after finding a bug.
 - A long-running server is a job too: give it an estimate of how long you'll need it, and cancel
   it when you're done.
-- Never run GPU work outside dibs, and never stop the dibs daemon or edit its config to get
-  around it: the other agents rely on it.
+- Never run GPU work, or anything that may need several GB of RAM, outside dibs, and never stop
+  the dibs daemon or edit its config to get around it: the other agents rely on it.
 - Inside a job, DIBS_CPUS, DIBS_MEM and DIBS_VRAM (bytes) say what it was given, and
   CUDA_VISIBLE_DEVICES shows only its GPUs. On a machine with AMD GPUs it is
   ROCR_VISIBLE_DEVICES instead (the GPU ids are amd-smi's), and HIP_VISIBLE_DEVICES and
@@ -140,6 +144,7 @@ SKILL = (
     "description: Use before running anything that uses a GPU (training, fine-tuning, inference, "
     "evals, CUDA tests, model servers) or keeps several CPU cores or lots of RAM busy for more than "
     "a minute or two. This machine's GPUs, CPUs and RAM are shared with other agents through the "
-    "dibs job queue, and GPU processes started outside it are stopped.\n"
+    "dibs job queue: GPU processes started outside it are stopped, and so is the largest program "
+    "outside it when memory runs short.\n"
     "---\n\n" + AGENT_HELP
 )
