@@ -293,7 +293,8 @@ def render_show(job: dict, now: float) -> str:
     if job.get("peak_vram") is not None and job["request"]["vram"]:
         peaks.append(f"VRAM {format_size(job['peak_vram'])} of {format_size(job['request']['vram'])}")
     if job.get("peak_mem") is not None:
-        peaks.append(f"RAM {format_size(job['peak_mem'])} of {format_size(job['request']['mem'])} (not counting file cache)")
+        grown = f", grown to a {format_size(job['ram_limit'])} limit" if (job.get("ram_limit") or 0) > job["request"]["mem"] else ""
+        peaks.append(f"RAM {format_size(job['peak_mem'])} of {format_size(job['request']['mem'])}{grown} (not counting file cache)")
     if peaks:
         rows.append(("peak", ", ".join(peaks)))
     rows.append(("output", _home(job["output"])))
@@ -577,7 +578,7 @@ def _machine(snapshot: dict, width: int) -> list[_Line]:
     rows = [
         ("cpu", len(cap["cpus"]), [(j["request"]["cpus"], _job_color(j["id"])) for j in running],
          lambda n: str(round(n)), cpus_away, "busy outside"),
-        ("mem", cap["mem"], [(j["request"]["mem"], _job_color(j["id"])) for j in running], format_size,
+        ("mem", cap["mem"], [(max(j["request"]["mem"], j.get("ram_limit") or 0), _job_color(j["id"])) for j in running], format_size,
          mem_away if mem_away >= cap["mem"] / 100 else 0, "used outside"),
     ]  # fmt: skip
     for g in cap["gpus"]:

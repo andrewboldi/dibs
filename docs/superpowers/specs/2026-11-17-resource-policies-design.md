@@ -95,7 +95,8 @@ Deliberate isolation for timing (section 12) is counted apart from padding.
 A running job counts in the plan at the larger of its peak so far (which only grows) and the peak
 of earlier runs of the same command, plus headroom (25% or 1G, whichever is more), and never more
 than its reservation. A job with no history counts at its full reservation for its first ten
-minutes. Each job's hard cap stays its reservation. Jobs started on RAM borrowed this way get a
+minutes. Each job's hard cap starts at its reservation; since #155 a job nearing it may grow into
+RAM no job reserved (section 16). Jobs started on RAM borrowed this way get a
 higher OOM score, so if several jobs grow at once and the machine runs out, the kernel kills a
 borrower first; dibs then retries it (item 4) at its full reservation, without borrowing, if it
 has `--retry`, and any other borrower fails with a note to resubmit it (#148).
@@ -164,3 +165,16 @@ ahead of it. The maintainer picked the fix (#150): when one of a session's waiti
 cancelled, its still-waiting jobs line up again by submit's rules, in the order they came. A job
 still runs after its session's earlier jobs of the same priority, a higher priority still goes ahead
 of the session's lower ones, and a place only ever moves earlier.
+
+## 16. Let a job grow past its RAM reservation, tracked
+
+The maintainer approved this on the condition that the growth is tracked, so no RAM is handed out
+twice (#155). When what a running job holds comes within half a step of its limit, dibs raises the
+limit by a step, a quarter of the reservation and at least 1G, but only into RAM no job has
+reserved: the RAM dibs hands out, less what programs outside dibs use, less every running job's
+reservation or raised limit, whichever is larger. A job's use doesn't count here, since a job may
+grow back into RAM it reserved. The planner counts a grown job at its raised limit from then on.
+Limits are raised with `systemctl --user set-property --runtime`, which a systemd reload keeps, and
+never lowered during a run; a retry starts again from the reservation. A grown job gets the
+borrowers' OOM score. With no room, a job meets its limit as before, and a kill at a raised limit
+says what it reached and reserved. Only the reservation is promised, and agents are told so.

@@ -41,6 +41,9 @@ What dibs doesn't do, or does only partly. Each item says what happens and what 
   for hours holding the job's reservation. A job built to carry on without a killed process (a sweep
   that skips a failed trial) fails too. Reserve for the job's peak across all its processes, or run
   such pieces as jobs of their own.
+- **Only `--mem` is promised.** A job nearing its limit may grow past it into RAM no other job
+  reserved, when there is some; with none, it is killed at its limit as before. Size `--mem` for its
+  real peak. A job that grew is the first the kernel kills if the machine runs out.
 - **Files in a folder kept in RAM count as RAM.** What a job writes to /dev/shm, or to /tmp where
   /tmp is a tmpfs, counts against its RAM reservation, and so does shared memory its processes map,
   such as buffers pinned for GPU transfers. A job killed at its limit says when either was a big part

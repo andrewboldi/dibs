@@ -47,7 +47,7 @@ that always picks 10 gains nothing after its first job. What a session owes laps
 | | How | Where |
 |---|---|---|
 | CPU cores | pinned to its cores, with first claim on them (its scope's `CPUWeight` is 1000, other programs' 100); `OMP_NUM_THREADS` and the like set to match | Linux (first claim: systemd user session) |
-| RAM | its own systemd scope with `MemoryMax` and no swap; going over kills the job, not its neighbours, and when the kernel kills only one of its processes, dibs stops the rest within a second or two (with `--retry`, dibs runs it again with more) | systemd user session |
+| RAM | its own systemd scope with `MemoryMax` and no swap; going over kills the job, not its neighbours, and when the kernel kills only one of its processes, dibs stops the rest within a second or two (with `--retry`, dibs runs it again with more). A job nearing its limit may grow past its reservation, a quarter of it at a time, into RAM no job reserved; the planner counts it at its raised limit, so that RAM is never handed out twice (#155) | systemd user session |
 | VRAM | watched every second; a job may borrow VRAM nobody reserved, and one that reaches another job's is stopped, with the reason (with `--retry`, run again with more) | NVIDIA (NVML or nvidia-smi), AMD (amd-smi) |
 | Which GPUs | `CUDA_VISIBLE_DEVICES` (NVIDIA) or `ROCR_VISIBLE_DEVICES` (AMD) shows a job only its GPUs, and none to a job without `--vram` | |
 | GPU use outside dibs | the guard stops it within about a second, after writing into its output how to queue it | daemon running |

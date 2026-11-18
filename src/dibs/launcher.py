@@ -69,6 +69,30 @@ def _probe_systemd() -> bool:
     return out.returncode == 0 and out.stdout.strip() == str(64 * MiB)
 
 
+def set_memory_max(job: Job, limit: int) -> bool:
+    """Raise a running job's RAM limit (#155). --runtime keeps it through a systemd reload, which would
+    otherwise put the scope back at its reservation and kill a job holding more."""
+    if not job.unit:
+        return False
+    try:
+        done = subprocess.run(["systemctl", "--user", "set-property", "--runtime", f"{job.unit}.scope", f"MemoryMax={limit}"],
+                              capture_output=True, timeout=10)  # fmt: skip
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return done.returncode == 0
+
+
+def raise_oom_score(job: Job) -> None:
+    """Give a job's processes the borrowers' OOM score: if the machine runs out, the kernel kills it
+    first. Raising it needs no privilege, and what the job starts later inherits it."""
+    for pid in job_pids(job):
+        try:
+            with open(f"/proc/{pid}/oom_score_adj", "w") as f:
+                f.write(str(BORROWER_OOM_SCORE))
+        except OSError:
+            pass
+
+
 def unit_name(instance: str, job_id: int) -> str:
     return f"dibs-{instance}-job-{job_id}"
 
