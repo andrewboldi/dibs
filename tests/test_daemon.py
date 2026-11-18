@@ -515,18 +515,35 @@ def test_a_ram_kill_says_when_most_of_the_ram_was_shared_memory(daemon, tmp_path
     # against --mem, and the reason said only "went over its 10G RAM reservation".
     gib = 1 << 30
     killed = _killed_for_ram_holding(daemon, tmp_path, monkeypatch, 10 * gib, int(4.1 * gib), int(5.4 * gib))
-    assert killed.peak_mem == int(4.1 * gib) + int(5.4 * gib)
     assert killed.peak_shmem == int(5.4 * gib)
     assert killed.reason == (
         "killed: went over its 10G RAM reservation "
-        "(5.4G of it was files in /dev/shm or a RAM-backed /tmp, or other shared memory)"
+        "(5.4G of it was files in /dev/shm or a RAM-backed /tmp, or other shared memory); resubmit with --mem 13G"
     )
 
 
 def test_a_ram_kill_with_little_shared_memory_says_only_that_it_went_over(daemon, tmp_path, monkeypatch):
     gib = 1 << 30
     killed = _killed_for_ram_holding(daemon, tmp_path, monkeypatch, 8 * gib, int(7.8 * gib), int(0.1 * gib))
-    assert killed.reason == "killed: went over its 8G RAM reservation"
+    assert killed.reason == "killed: went over its 8G RAM reservation; resubmit with --mem 10G"
+
+
+def test_a_job_killed_at_its_ram_limit_shows_it_reached_that_limit(daemon, tmp_path, monkeypatch):
+    # Issue #127: a job can grow past dibs's last sample before the kernel kills it. One killed at its
+    # 200M limit showed "peak RAM 14M of 200M", and agents size their next run from the peak.
+    killed = _killed_for_ram_holding(daemon, tmp_path, monkeypatch, 8 * GiB, 2 * GiB, 0)
+    assert killed.peak_mem == 8 * GiB
+
+
+def test_a_retry_job_out_of_retries_says_what_to_resubmit_with(daemon, tmp_path, monkeypatch):
+    job_id = submit(daemon, tmp_path, [PY, "-c", "pass"], mem=2 * GiB, retry=True)
+    j = job(daemon, job_id)
+    j.attempts = [{"reason": "an earlier try"}, {"reason": "another"}]
+    daemon.store.update_job(j)
+    _oom_on_first_exit(monkeypatch, job_id)
+    run_until(daemon, lambda: finished(daemon, job_id))
+    j = job(daemon, job_id)
+    assert (j.state, j.reason) == (State.FAILED, "killed: went over its 2G RAM reservation; resubmit with --mem 3G")
 
 
 def _launcher_finds(monkeypatch, job_id, **found):
@@ -559,7 +576,7 @@ def test_a_job_is_stopped_whole_once_one_of_its_processes_is_killed_at_its_ram_l
     _launcher_finds(monkeypatch, job_id, oom_killed=True, hit_limit=True)
     run_until(daemon, lambda: finished(daemon, job_id))  # its command would never end by itself
     j = job(daemon, job_id)
-    assert (j.state, j.reason) == (State.FAILED, "killed: went over its 2G RAM reservation")
+    assert (j.state, j.reason) == (State.FAILED, "killed: went over its 2G RAM reservation; resubmit with --mem 3G")
 
 
 def test_a_retry_job_stopped_that_way_runs_again_with_more_ram(daemon, tmp_path, monkeypatch):
@@ -576,6 +593,7 @@ def test_a_retry_job_stopped_that_way_runs_again_with_more_ram(daemon, tmp_path,
 
 def test_a_job_is_stopped_whole_when_the_machine_ran_out_and_killed_one_of_its_processes(daemon, tmp_path, monkeypatch):
     job_id, stat, go = _job_holding(daemon, tmp_path, monkeypatch, 2 * GiB, retry=False)
+    stat.write_text(f"anon {GiB}\nshmem 0\n")
     (stat.parent / "memory.events").write_text("oom 0\noom_kill 2\n")  # not at its own limit
     daemon.tick()
     assert job(daemon, job_id).stop_reason == "killed when the machine ran out of RAM"
@@ -583,6 +601,7 @@ def test_a_job_is_stopped_whole_when_the_machine_ran_out_and_killed_one_of_its_p
     run_until(daemon, lambda: finished(daemon, job_id))
     j = job(daemon, job_id)
     assert (j.state, j.reason) == (State.FAILED, "killed when the machine ran out of RAM")
+    assert j.peak_mem == GiB  # it never reached its own limit, and needs no more
 
 
 def test_a_job_that_exits_0_after_one_of_its_processes_was_killed_for_ram_has_failed(daemon, tmp_path, monkeypatch):
@@ -592,7 +611,7 @@ def test_a_job_that_exits_0_after_one_of_its_processes_was_killed_for_ram_has_fa
     _launcher_finds(monkeypatch, job_id, exit_code=0, oom_killed=True, hit_limit=True)
     run_until(daemon, lambda: finished(daemon, job_id))
     j = job(daemon, job_id)
-    assert (j.state, j.reason) == (State.FAILED, "killed: went over its 2G RAM reservation")
+    assert (j.state, j.reason) == (State.FAILED, "killed: went over its 2G RAM reservation; resubmit with --mem 3G")
 
 
 def test_a_job_being_cancelled_stays_cancelled_when_one_of_its_processes_is_killed_for_ram(daemon, tmp_path, monkeypatch):

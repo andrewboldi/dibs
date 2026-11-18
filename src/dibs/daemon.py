@@ -1059,6 +1059,9 @@ class Daemon:
         job.cpu_seconds = result.get("cpu_seconds")
         if job.peak_mem is None:  # never sampled while it ran: the launcher's figure is all there is
             job.peak_mem = result.get("peak_mem")
+        at_limit = bool(result.get("oom_killed")) and result.get("hit_limit") is not False
+        if at_limit:  # it reached its limit, maybe after dibs's last sample: that's what killed it (#127)
+            job.peak_mem = max(job.peak_mem or 0, job.request.mem)
         retry = self._retry_with(job, result) if job.cancel_requested is None else None
         if retry is not None:
             request, how, reason = retry
@@ -1078,6 +1081,8 @@ class Daemon:
             job.reason = _ram_kill_reason(job, result)
         else:
             job.reason = result.get("reason")
+        if at_limit and job.state == State.FAILED and (mem := self._more_ram(job)):
+            job.reason += f"; resubmit with --mem {format_size(mem)}"  # as a VRAM stop says its size
         self.store.update_job(job)
         self._terminated.discard(job.id)
         self._notify(job)
@@ -1102,11 +1107,15 @@ class Daemon:
             # if it had borrowed (#86).
             job.no_borrow = job.no_borrow or job.borrowed_ram
             return job.request, "without borrowing" if job.borrowed_ram else "", _ram_kill_reason(job, result)
-        if result.get("oom_killed"):
-            mem = math.ceil(max(job.peak_mem or 0, job.request.mem) * 1.25 / GiB) * GiB
-            if mem <= self.capacity.mem:
-                return replace(job.request, mem=mem), f"with --mem {format_size(mem)}", _ram_kill_reason(job, result)
+        if result.get("oom_killed") and (mem := self._more_ram(job)):
+            return replace(job.request, mem=mem), f"with --mem {format_size(mem)}", _ram_kill_reason(job, result)
         return None
+
+    def _more_ram(self, job: Job) -> int | None:
+        """The RAM to run a job killed at its RAM limit with: 25% more than it reached, rounded up to a
+        whole gigabyte (#84); None when the machine hasn't that much."""
+        mem = math.ceil(max(job.peak_mem or 0, job.request.mem) * 1.25 / GiB) * GiB
+        return mem if mem <= self.capacity.mem else None
 
     def _vram_text(self, vram: int) -> str:
         return "all" if self.capacity.gpus and vram >= max(g.vram for g in self.capacity.gpus) else format_size(vram)
