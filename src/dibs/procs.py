@@ -141,6 +141,42 @@ def big_programs(minimum: int) -> list[tuple[int, int]]:
 CGROUP_ROOT = "/sys/fs/cgroup"  # where cgroup v2 is mounted
 
 
+def cpu_rate(pid: int) -> float | None:
+    """The cores a process has kept busy on average since it started (CPU seconds per second)."""
+    fields, started = _stat_fields(pid), start_time(pid)
+    if not fields or started is None:
+        return None
+    return (int(fields[11]) + int(fields[12])) / _CLK_TCK / max(1e-3, time.time() - started)
+
+
+def cgroup_procs(cgroup_path: str) -> list[int]:
+    text = _read(f"{CGROUP_ROOT}{cgroup_path}/cgroup.procs") or ""
+    return [int(line) for line in text.split() if line.isdigit()]
+
+
+def pane_cpu(prefixes: tuple[str, ...]) -> dict[str, int]:
+    """The CPU time (µs) of each terminal pane's cgroup in this user's session, by cgroup path: the
+    scopes named with one of these prefixes, up to two levels below app.slice (#158)."""
+    uid = os.getuid()
+    base = f"/user.slice/user-{uid}.slice/user@{uid}.service/app.slice"
+
+    def dirs(path: str) -> list[str]:
+        try:
+            return [e.name for e in os.scandir(CGROUP_ROOT + path) if e.is_dir()]
+        except OSError:
+            return []
+
+    found = {}
+    for first in dirs(base):
+        for path in (f"{base}/{first}", *(f"{base}/{first}/{second}" for second in dirs(f"{base}/{first}"))):
+            leaf = path.rsplit("/", 1)[-1]
+            if leaf.startswith(prefixes) and leaf.endswith(".scope"):
+                usec = keyed_numbers(_read(f"{CGROUP_ROOT}{path}/cpu.stat")).get("usage_usec")
+                if usec is not None:
+                    found[path] = usec
+    return found
+
+
 def meminfo() -> tuple[int, int] | None:
     """The machine's RAM in bytes: (total, in use), in use being MemTotal - MemAvailable (file cache
     the kernel can drop counts as available). DIBS_MEMINFO points tests at a stand-in file."""

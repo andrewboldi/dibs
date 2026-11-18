@@ -22,6 +22,7 @@ from dataclasses import asdict, replace
 from collections.abc import Callable, Mapping
 
 from dibs import __version__, build_id, guard, launcher, procs
+from dibs.agents import PANE_SCOPES
 from dibs.gpu import GpuBackend, open_backend
 from dibs.machine import Config, ConfigError, build_capacity, detect_cpus, detect_mem, load_config
 from dibs.model import (
@@ -70,6 +71,10 @@ EARLY_STOP = 60.0  # seconds: a job stopped for VRAM sooner than this was likely
 ALIVE_EVERY = 60.0  # seconds: how often the daemon notes it's alive, so a reboot can be dated (#78)
 RECENT = 86400.0  # how far back `queue --all` looks
 STOPS_SHOWN = 3600.0  # how far back guard stops are shown
+PANE_EVERY = 15.0  # seconds between samples of terminals' CPU time (#158)
+HEAVY_FOR = 120.0  # a terminal that keeps HEAVY_SHARE of the cores busy this long gets its agent told
+HEAVY_SHARE = 1 / 6  # of the machine's cores, at least 2
+TELL_EVERY = 3600.0  # seconds: at most this often per terminal
 TOLD_WINDOW = 86400.0  # how far back a session is told, at its next dibs command, what the guard stopped (#135)
 WAIT_RECHECK = 5.0  # a long-polling wait re-checks its jobs at least this often
 LOG_MAX = 5 * 1024 * 1024
@@ -153,6 +158,7 @@ class Daemon:
         cpu_busy: Callable[[], float | None] = procs.cpu_busy_seconds,
         programs: Callable[[int], list[tuple[int, int]]] = lambda minimum: [],
         set_mem_limit: Callable[[Job, int], bool] | None = None,
+        panes: Callable[[], dict[str, int]] = lambda: {},
     ):
         self.paths = paths
         self.config = config
@@ -175,6 +181,12 @@ class Daemon:
         # Raises a running job's RAM limit (#155): None unless given, so only the real daemon (run), whose
         # jobs have systemd scopes, ever does. Tests pass a stand-in.
         self.set_mem_limit = set_mem_limit
+        # The CPU time (µs) of each terminal pane's cgroup, by path (#158): empty unless given, so only
+        # the real daemon (run) watches the real terminals.
+        self.panes = panes
+        self._pane_samples: dict[str, deque[tuple[float, int]]] = {}  # pane cgroup -> (time, CPU µs)
+        self._panes_at = -math.inf
+        self._told_panes: dict[str, float] = {}  # pane cgroup -> when its agent was last told
         self._beside: dict[int, tuple[float, float, float]] = {}  # job -> (time, machine busy, its own CPU)
         # For dibs top (#120): (time, machine busy, jobs' own CPU, the jobs, time asleep) samples, and
         # what programs outside dibs use: cores (None while unknown), RAM, and VRAM per GPU index.
@@ -770,7 +782,7 @@ class Daemon:
         self._watch_gpus(now)
         self.schedule()
         self._grow(now)  # after starting what can start: growth takes only RAM left unreserved
-        for watch in (self._watch_outside_cpu, self._watch_load):  # only shown by dibs top, after scheduling
+        for watch in (self._watch_outside_cpu, self._watch_load, self._watch_panes):  # only shown by dibs top, after scheduling
             try:
                 watch(now)
             except Exception:
@@ -916,11 +928,39 @@ class Daemon:
         told = float(self.store.get_meta(key) or 0.0)
         stops = [
             e for e in self.store.events(max(told, now - TOLD_WINDOW))
-            if e["kind"] == "stop" and e.get("session") == session and e["time"] > told and e.get("message")
+            if e["kind"] in ("stop", "heavy") and e.get("session") == session and e["time"] > told and e.get("message")
         ]  # fmt: skip
         if stops:
             self.store.set_meta(key, repr(stops[-1]["time"]))
-        return {"ok": True, "notices": [{"time": e["time"], "message": e["message"]} for e in stops]}
+        return {"ok": True, "notices": [{"time": e["time"], "message": e["message"], "kind": e["kind"]} for e in stops]}
+
+    def _watch_panes(self, now: float) -> None:
+        """Tell an agent when a program in its terminal keeps a sixth of the machine's cores busy outside
+        dibs for two minutes (#158), from each terminal pane's cgroup: at most once an hour per pane."""
+        if now - self._panes_at < PANE_EVERY:
+            return
+        self._panes_at = now
+        seen = self.panes()
+        for path in set(self._pane_samples) - set(seen):
+            del self._pane_samples[path]
+        heavy = max(2.0, len(self.capacity.cpus) * HEAVY_SHARE)
+        for path, usec in seen.items():
+            samples = self._pane_samples.setdefault(path, deque())
+            samples.append((now, usec))
+            while samples[0][0] < now - HEAVY_FOR - PANE_EVERY:
+                samples.popleft()
+            (t0, u0), (t1, u1) = samples[0], samples[-1]
+            if t1 - t0 < HEAVY_FOR or now - self._told_panes.get(path, -math.inf) < TELL_EVERY:
+                continue
+            cores = (u1 - u0) / 1e6 / (t1 - t0)
+            if cores < heavy:
+                continue
+            self._told_panes[path] = now
+            event = guard.heavy_notice(path, cores, t1 - t0)
+            if event is not None:
+                self.store.add_event("heavy", event, now)
+                log.info("told the agent in %s: %s kept %.0f cores busy outside dibs", path.rsplit("/", 1)[-1],
+                         event["command"], cores)  # fmt: skip
 
     def _relieve_shortage(self, now: float) -> None:
         """While the machine stays short of memory, stop one program per stretch of shortage: the largest
@@ -1441,7 +1481,8 @@ def run_daemon(env: Mapping[str, str] = os.environ) -> int:
         return 1
     use_systemd = launcher.systemd_available(env)
     daemon = Daemon(paths, config, capacity, backend, use_systemd=use_systemd, programs=procs.big_programs,
-                    set_mem_limit=launcher.set_memory_max if use_systemd else None)  # fmt: skip
+                    set_mem_limit=launcher.set_memory_max if use_systemd else None,
+                    panes=lambda: procs.pane_cpu(PANE_SCOPES))  # fmt: skip
     daemon.recover()
     gpus = ", ".join(f"GPU {g.index} {format_size(g.vram)}" for g in capacity.gpus) or "no GPUs"
     log.info(

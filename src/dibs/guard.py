@@ -248,6 +248,36 @@ def stop_for_ram(pid: int, held: int, available: int, total: int) -> dict | None
     return {"pid": pid, "command": argv, "ram": held, "session": session, "message": message}
 
 
+def heavy_message(pid: int, argv: Sequence[str], cores: int, seconds: float) -> str:
+    """What an agent is told when a program in its terminal kept many cores busy outside dibs (#158)."""
+    command = shlex.join(argv) if argv else "this process"
+    return (
+        f"dibs: `{command}` (pid {pid}) has kept about {cores} cores busy for {max(1, round(seconds / 60))} minutes "
+        "outside dibs, in your terminal.\n"
+        "dibs: CPU-heavy work goes through dibs, which gives it cores of its own: outside dibs it competes with "
+        "jobs for theirs, and jobs come first. Next time, queue it:\n"
+        f"dibs:   dibs run --cpus {cores} --mem SIZE --time ESTIMATE -- {command}\n"
+        "dibs: `dibs agent-help` explains how to size a request."
+    )
+
+
+def heavy_notice(cgroup_path: str, cores: float, seconds: float) -> dict | None:
+    """What to tell the agent whose terminal (a pane's cgroup) kept `cores` busy outside dibs: about the
+    busiest program in it that isn't the agent CLI. Nothing is stopped, and nothing is written into the
+    program's output, which may be data. None when there's no such program."""
+    pids = procs.cgroup_procs(cgroup_path)
+    rates = [(rate, pid) for pid in pids if not _is_agent(pid) and (rate := procs.cpu_rate(pid)) is not None]
+    if not rates:
+        return None
+    pid = max(rates)[1]
+    argv = procs.cmdline(pid) or [name for name in [procs.exe_name(pid)] if name]
+    # The agent's session, from a process of the pane that carries it (its tool commands do).
+    session = next((s for p in [pid, *pids] if (s := (procs.environ(p) or {}).get("DIBS_SESSION")
+                    or (procs.environ(p) or {}).get("CLAUDE_CODE_SESSION_ID"))), None) or _session_of(pid, {})  # fmt: skip
+    message = heavy_message(pid, argv, max(1, round(cores)), seconds)
+    return {"pid": pid, "command": argv, "cores": cores, "session": session, "message": message}
+
+
 def enforce(verdicts: Sequence[Verdict]) -> list[dict]:
     """Stop every process judged "stop" (and what it started), each once; returns one event per stop."""
     events, done = [], set()

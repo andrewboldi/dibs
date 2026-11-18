@@ -13,8 +13,9 @@ What dibs doesn't do, or does only partly. Each item says what happens and what 
 - **The guard has limits.**
   - A job that grabs GPU memory very fast can collide with another once before it's stopped.
   - CPU-heavy work outside dibs isn't stopped, since nothing reliably tells a heavy job from a
-    build or a test run, and RAM-heavy work isn't either while the machine has RAM to spare: dibs
-    only stops handing out the RAM it uses. When memory runs short, the guard stops the largest
+    build or a test run; when a terminal keeps a sixth of the cores busy for two minutes, its agent
+    is told instead (#158). RAM-heavy work isn't stopped either while the machine has RAM to spare:
+    dibs only stops handing out the RAM it uses. When memory runs short, the guard stops the largest
     program outside dibs, which can be a person's own program in a terminal; `guard_allow`
     exempts it by name. A swarm of small processes, none holding a tenth of the RAM, is left to
     the kernel.

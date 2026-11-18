@@ -716,3 +716,47 @@ def test_ram_stop_message_says_why_and_how_to_keep_it_from_happening_again():
         "dibs: Run every step that may need more than a few GB of RAM through dibs, not only GPU work. "
         "`dibs agent-help` explains how to choose N, --mem and ESTIMATE."
     )
+
+
+
+# Telling an agent about CPU-heavy work in its terminal (#158) ---------------------------------
+
+
+def test_an_agent_is_told_when_a_program_in_its_terminal_keeps_many_cores_busy(make_daemon, spawned, tmp_path, monkeypatch):
+    # A program run in an agent's terminal kept 13-15 cores busy outside dibs, and nothing told the agent.
+    state = {"now": time.time(), "usec": 0}
+    pane = "/app.slice/app-org.gnome.Terminal.slice/tmux-spawn-f3cc.scope"
+    d = make_daemon(clock=lambda: state["now"], panes=lambda: {pane: state["usec"]})
+    busy = spawned(SLEEPER, env={**CLEAN_ENV, "CLAUDE_CODE_SESSION_ID": "agent-9"})
+    scope = tmp_path / "cgroup" / pane.lstrip("/")
+    scope.mkdir(parents=True)
+    (scope / "cgroup.procs").write_text(f"{busy.pid}\n")
+    monkeypatch.setattr(procs, "CGROUP_ROOT", str(tmp_path / "cgroup"))
+    cores = len(d.capacity.cpus)
+
+    def busy_for(seconds):
+        for _ in range(seconds // 15):  # half the machine's cores busy
+            state["now"] += 15
+            state["usec"] += int(15 * 1e6 * cores / 2)
+            d.tick()
+
+    busy_for(60)
+    assert d.notices("agent-9", state["now"])["notices"] == []  # not on a minute's burst
+    busy_for(90)
+    told = d.notices("agent-9", state["now"])["notices"]
+    assert len(told) == 1, told
+    assert f"has kept about {cores // 2} cores busy" in told[0]["message"]
+    assert f"dibs run --cpus {cores // 2} --mem SIZE --time ESTIMATE -- {PY}" in told[0]["message"]
+    assert procs.alive(busy.pid)  # nothing is stopped
+    busy_for(150)
+    assert d.notices("agent-9", state["now"])["notices"] == []  # once an hour at most
+
+
+def test_a_terminal_busy_on_a_core_or_two_is_left_alone(make_daemon):
+    state = {"now": time.time(), "usec": 0}
+    d = make_daemon(clock=lambda: state["now"], panes=lambda: {"/app.slice/tmux-spawn-a.scope": state["usec"]})
+    for _ in range(12):
+        state["now"] += 15
+        state["usec"] += int(15 * 1e6 * 2)  # two cores
+        d.tick()
+    assert [e for e in d.store.events(0) if e["kind"] == "heavy"] == []

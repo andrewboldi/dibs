@@ -530,7 +530,9 @@ def _tell_stops(paths) -> None:
         return  # the command itself will say what's wrong
     for notice in notices:
         when = time.strftime("%H:%M", time.localtime(notice["time"]))
-        print(f"dibs: at {when}, the guard stopped a program of yours:\n{notice['message']}\n", file=sys.stderr)
+        what = ("a program in your terminal kept many cores busy outside dibs" if notice.get("kind") == "heavy"
+                else "the guard stopped a program of yours")  # fmt: skip
+        print(f"dibs: at {when}, {what}:\n{notice['message']}\n", file=sys.stderr)
 
 
 def main(argv: list[str] | None = None) -> int:
