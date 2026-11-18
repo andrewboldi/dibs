@@ -133,6 +133,10 @@ def test_agent_help_covers_the_essentials():
         assert phrase in AGENT_HELP, phrase
 
 
+def test_agent_help_explains_timing_runs():
+    assert "--exclusive" in AGENT_HELP and "timing run" in AGENT_HELP
+
+
 def test_agent_help_says_dibs_retries_resource_failures():
     # Issue #84: agents needn't resubmit, so they needn't pad requests either.
     for phrase in ("runs it again by itself", "--no-retry", "costs a retry, not your work"):

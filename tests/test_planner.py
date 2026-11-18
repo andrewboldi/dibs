@@ -18,8 +18,8 @@ def cap(cpus=8, mem=32 * GiB, gpus=(8 * GiB,)):
     )
 
 
-def req(cpus=1, mem=1 * GiB, gpus=0, vram=0, time=60.0):
-    return Request(cpus=cpus, mem=mem, gpus=gpus, vram=vram, time=time)
+def req(cpus=1, mem=1 * GiB, gpus=0, vram=0, time=60.0, exclusive=False):
+    return Request(cpus=cpus, mem=mem, gpus=gpus, vram=vram, time=time, exclusive=exclusive)
 
 
 ALL = dict(cpus=8, mem=32 * GiB, gpus=1, vram=8 * GiB)
@@ -251,3 +251,31 @@ def test_ram_used_outside_dibs_never_makes_a_job_unfit_for_the_machine():
              outside_mem=12 * GiB)
     reason = p.predictions[2].reason
     assert "can't fit this machine" not in reason and "12G in use outside dibs" in reason
+
+
+def test_an_exclusive_job_waits_until_no_other_job_runs():
+    # Issue #104: a timing run needs the machine to itself. It may wait; a job that can finish
+    # before it starts may still go first, and one that can't, waits.
+    c = cap(cpus=8, gpus=(8 * GiB,))
+    other = running(1, req(cpus=1, time=100.0), (0,))
+    timing = queued(2, req(cpus=2, time=50.0, exclusive=True), tag=NOW + 1)
+    short = queued(3, req(cpus=1, time=50.0), tag=NOW + 2)
+    long = queued(4, req(cpus=1, time=500.0), tag=NOW + 3)
+    p = plan(c, [other], [timing, short, long], NOW)
+    assert [s.job_id for s in p.starts] == [3]
+    assert p.predictions[2].start == NOW + 100 and p.predictions[2].reason == "needs the machine to itself (1 job running)"
+    assert p.predictions[4].start == NOW + 150
+
+
+def test_nothing_starts_beside_a_running_exclusive_job():
+    c = cap(cpus=8)
+    timing = running(1, req(cpus=2, time=100.0, exclusive=True), (0, 1))
+    p = plan(c, [timing], [queued(2, req(cpus=1, time=10.0))], NOW)
+    assert p.starts == []
+    assert (p.predictions[2].start, p.predictions[2].reason) == (NOW + 100, "waits for #1, which has the machine to itself")
+
+
+def test_an_exclusive_job_gets_only_the_cpus_and_gpus_it_asked_for():
+    c = cap(cpus=8, gpus=(8 * GiB, 8 * GiB))
+    p = plan(c, [], [queued(1, req(cpus=2, gpus=1, vram=2 * GiB, exclusive=True))], NOW)
+    assert p.starts == [Start(1, (0, 1), (0,))]

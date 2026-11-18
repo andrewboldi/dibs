@@ -55,6 +55,10 @@ holds) and plans with its highest value over the last two minutes, so a job does
 a busy program let go of for a moment. A job that doesn't fit beside it waits with a reason like
 `needs 12G RAM (10G free, 6G in use outside dibs)`.
 
+**Timing runs.** `--exclusive` gives a job the machine to itself, for benchmarks: it waits until no
+other job is running, and no job starts beside it. It is still pinned to its own `--cpus` and sees
+only its own GPUs; in the plan it holds everything.
+
 **The guard.** It stops GPU processes that aren't dibs jobs. It leaves alone other users'
 processes, programs listed in `guard_allow`, programs launched from the desktop, and work that was
 already running when it was switched on (including what that work starts later, like torchrun

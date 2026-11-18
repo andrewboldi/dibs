@@ -73,6 +73,7 @@ at the default it would have had, so compiled kernels aren't thrown away with ea
 A job that goes over its VRAM reservation into memory no other job has reserved keeps running. It
 is stopped only when its use exceeds the GPU's capacity minus the other jobs' reservations. While
 it borrows, the planner counts it at its actual use, so no job starts into the borrowed memory.
+Nothing borrows beside an exclusive job (section 12).
 
 ## 8. Why agents over-reserve: investigation
 
@@ -81,6 +82,7 @@ requests repeat round numbers or agent-help's example, whether agents shrink req
 seeing earlier runs, and how first runs differ from repeats. The findings shape agent-help's
 sizing advice and item 9. One cause is structural: a RAM kill costs the agent its whole run, so
 padding is rational; with item 4 the cost of a tight request is a retry, and agent-help can say so.
+Deliberate isolation for timing (section 12) is counted apart from padding.
 
 ## 9. Plan RAM by measured use
 
@@ -91,7 +93,8 @@ minutes. Each job's hard cap stays its reservation. Jobs started on RAM borrowed
 higher OOM score, so if several jobs grow at once and the machine runs out, the kernel kills a
 borrower first; dibs then retries it (item 4) at its full reservation, without borrowing.
 Borrowing stops while memory pressure (PSI) is high. A machine-wide kill is told apart from the
-job hitting its own limit by the scope's memory.events counters.
+job hitting its own limit by the scope's memory.events counters. No job borrows RAM beside an
+exclusive job (section 12), whose reservation is idle on purpose.
 
 ## 10. Momentum
 
@@ -110,3 +113,15 @@ user runs the command).
 Overestimating costs only the agent that does it (a later place in line, missed backfills), so
 estimates are not rescaled. At most, `dibs submit` shows the session how its recent jobs' run
 times compared with their estimates.
+
+## 12. A job with the machine to itself
+
+Added at the maintainer's request: some performance work times a job and reserves the whole
+machine so that nothing else disturbs the measurement. `--exclusive` says so. The job waits until
+no other job runs, and while it runs no job starts. In the plan it holds every CPU and all the
+VRAM, but it is pinned to and sees only what it asked for (its own --cpus and --vram), and its RAM
+is its own request: all the RAM can never be free while other programs use some. A job that can
+finish before it starts may still go first, as with any job. Borrowing (sections 7 and 9) never
+puts a job beside it, and the over-reservation investigation (section 8) counts it apart from
+padding. A follow-up has `dibs show` say how busy the machine was outside the job while it ran,
+so an agent can tell whether its timing was disturbed.

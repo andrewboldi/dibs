@@ -92,6 +92,10 @@ def build_parser() -> argparse.ArgumentParser:
         )  # fmt: skip
         s.add_argument("-n", "--name", help="a label for the job (default: the script or program name)")
         s.add_argument(
+            "--exclusive", action="store_true",
+            help="nothing else runs beside it (for timing runs); it waits until no other job runs",
+        )  # fmt: skip
+        s.add_argument(
             "--no-retry", action="store_true",
             help="don't run it again after it runs out of VRAM or RAM or a restart kills it (for commands that must not run twice)",
         )  # fmt: skip
@@ -161,7 +165,10 @@ def _submit_request(args, command: list[str]) -> dict:
         "replace": args.replace,
         "retry": not args.no_retry,
         "output": os.path.abspath(args.output) if args.output else None,
-        "request": {"cpus": args.cpus, "mem": args.mem, "vram": args.vram, "gpus": args.gpus, "time": args.time},
+        "request": {
+            "cpus": args.cpus, "mem": args.mem, "vram": args.vram, "gpus": args.gpus, "time": args.time,
+            "exclusive": args.exclusive,
+        },  # fmt: skip
     }
 
 

@@ -90,6 +90,10 @@ class _Profile:
         self.vram.insert(k + 1, list(self.vram[k]))
         return k + 1
 
+    def block(self, start: float, end: float) -> None:
+        """Nothing else fits over [start, end): an exclusive job has the machine (#104)."""
+        self.add(start, end, -_ALL, 0, {pos: -_ALL for pos in range(len(self.vram[0]))})
+
     def add(self, start: float, end: float, cpus: int, mem: int, vram: dict[int, int]) -> None:
         """Add (or, with negative amounts, take) resources over [start, end)."""
         first = self._boundary(start)
@@ -100,8 +104,9 @@ class _Profile:
             for pos, amount in vram.items():
                 self.vram[k][pos] += amount
 
-    def earliest(self, req: Request) -> tuple[float, tuple[int, ...]]:
-        """The earliest start at which req fits for its whole run, and the GPU positions to use."""
+    def earliest(self, req: Request, whole: tuple[int, list[int]] | None = None) -> tuple[float, tuple[int, ...]]:
+        """The earliest start at which req fits for its whole run, and the GPU positions to use. With
+        whole (every CPU and each GPU's VRAM), only when all of them are free: no other job runs."""
         n, k = len(self.times), 0
         while k < n:
             start = self.times[k]
@@ -109,7 +114,10 @@ class _Profile:
             low_vram = list(self.vram[k])
             j, short = k, False
             while j < n and self.times[j] < end:
-                if self.cpus[j] < req.cpus or self.mem[j] < req.mem:
+                cpus_needed = whole[0] if whole else req.cpus
+                if self.cpus[j] < cpus_needed or self.mem[j] < req.mem or (
+                    whole and any(free < total for free, total in zip(self.vram[j], whole[1]))
+                ):
                     short = True
                     break
                 low_vram = [min(a, b) for a, b in zip(low_vram, self.vram[j])]
@@ -125,6 +133,9 @@ class _Profile:
                 return start, tuple(sorted(pos for _, pos in eligible[: req.gpus]))
             k += 1
         raise AssertionError("a request that fits the machine must fit once everything ends")
+
+
+_ALL = 1 << 62  # more than any machine has: what an exclusive job takes from everyone else
 
 
 def _plural(n: int, word: str) -> str:
@@ -151,11 +162,16 @@ def plan(
     profile = _Profile(now, len(cpu_set) - len(busy_cpus), free_mem, free_vram)
 
     running_ends = {}
+    blocker = None  # a running job that has the machine to itself
     for r in running:
         end = expected_end(r, now)
         running_ends[r.job_id] = end
         released = {gpu_pos[g]: r.request.vram for g in r.gpu_ids if g in gpu_pos}
         profile.add(end, math.inf, sum(1 for c in r.cpu_ids if c in cpu_set), r.request.mem, released)
+        if r.request.exclusive:
+            profile.block(now, end)
+            blocker = r.job_id
+    whole = (len(cpu_set), [g.vram for g in capacity.gpus])
 
     order = sorted(queued, key=lambda q: (q.tag, q.submitted, q.job_id))
     placed: dict[int, tuple[float, float, tuple[int, ...]]] = {}
@@ -163,9 +179,12 @@ def plan(
     for q in order:
         if fits_machine(q.request, capacity) or q.request.mem > usable_mem:
             continue
-        start, positions = profile.earliest(q.request)
+        start, positions = profile.earliest(q.request, whole if q.request.exclusive else None)
         end = start + q.request.time
-        profile.add(start, end, -q.request.cpus, -q.request.mem, {p: -q.request.vram for p in positions})
+        if q.request.exclusive:
+            profile.block(start, end)
+        else:
+            profile.add(start, end, -q.request.cpus, -q.request.mem, {p: -q.request.vram for p in positions})
         gpu_ids = tuple(capacity.gpus[p].index for p in positions)
         placed[q.job_id] = (start, end, gpu_ids)
         if start == now:
@@ -189,7 +208,11 @@ def plan(
             continue
         start, end, gpu_ids = placed[q.job_id]
         reason = ""
-        if start > now:
+        if start > now and q.request.exclusive:
+            reason = f"needs the machine to itself ({_plural(len(running), 'job')} running)"
+        elif start > now and blocker is not None:
+            reason = f"waits for #{blocker}, which has the machine to itself"
+        elif start > now:
             reason = _reason(q, order, placed, now, now_cpus, now_mem, now_vram, outside_mem)
         predictions[q.job_id] = Prediction(q.job_id, position, start, end, gpu_ids, reason)
 
