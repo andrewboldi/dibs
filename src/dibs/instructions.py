@@ -101,6 +101,21 @@ when those resources are free, so jobs never crash each other by running out of 
 - `dibs show ID` has everything about one job; `dibs logs ID` prints its output (`-f` follows it).
 - Interrupting `dibs wait` or `dibs run` never cancels the job.
 
+## Momentum: rarely, and only with the user's yes
+
+Momentum lets one project's jobs go ahead for a few hours. It is for exceptional cases, when all
+three hold: your project is working better than expected, it is held up because another project's
+jobs hold the resources it needs, and you (or the user) have more experiments to run. Then ask the
+user first, in plain words about the project, for example: "We've been getting good results and I
+want to run more experiments, but project X is taking up most of the resources. Can I have a higher
+priority in the queue?" Only after the user says yes:
+
+    dibs momentum --for 6h --why "results beat the baseline; the user agreed to a boost"
+
+Never record it without the user's yes. dibs accepts it only while another project's jobs are
+holding yours up, and for one project at a time. While it lasts your jobs count as a quarter of
+their estimates, and it ends by itself; `dibs momentum --end` ends it early.
+
 ## Being a good neighbour
 
 - `dibs cancel ID` as soon as you no longer need a job, for example after finding a bug.

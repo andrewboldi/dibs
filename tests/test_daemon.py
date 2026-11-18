@@ -952,3 +952,52 @@ def test_render_estimate_feedback():
         "Your session's last 8 jobs ran a median 160% of their estimates: a longer --time keeps predictions right."
     )
     assert render_estimates({"jobs": 20, "median": 0.9}) == "" and render_estimates(None) == ""
+
+
+def test_momentum_moves_a_held_up_sessions_jobs_ahead_after_the_users_yes(make_daemon, tmp_path):
+    # Issue #94: for a project doing better than expected and held up by another project's jobs; the
+    # agent asks the user in plain words and records the grant only after the user's yes.
+    now = [1000.0]
+    d = make_daemon(clock=lambda: now[0], cap=capacity(cpus=[0]))
+    submit(d, tmp_path, ["sleep", "30"], session="other")  # another project holds the CPU
+    theirs = submit(d, tmp_path, [PY, "-c", "pass"], time_=600.0, session="other")
+    mine = submit(d, tmp_path, [PY, "-c", "pass"], time_=1200.0, session="s1")
+    assert job(d, mine).tag > job(d, theirs).tag
+    grant = {"session": "s1", "session_label": "proj·s1", "action": "grant", "seconds": 7200.0,
+             "why": "results beat the baseline and the user said yes"}  # fmt: skip
+    resp = d.momentum(grant)
+    assert resp["ok"], resp
+    assert job(d, mine).tag == 1000.0 + 300.0 < job(d, theirs).tag  # a quarter of its estimate now
+    later = submit(d, tmp_path, [PY, "-c", "pass"], time_=400.0, session="s1")
+    assert job(d, later).tag == 1000.0 + 300.0 + 100.0  # behind it, at a quarter, with no payback
+    assert d.snapshot()["momentum"]["label"] == "proj·s1"
+
+
+def test_momentum_is_only_for_a_session_another_project_holds_up(make_daemon, tmp_path):
+    now = [1000.0]
+    d = make_daemon(clock=lambda: now[0], cap=capacity(cpus=[0]))
+    ask = {"session": "s1", "action": "grant", "seconds": 3600.0, "why": "going well"}
+    resp = d.momentum(ask)
+    assert not resp["ok"] and "nothing of yours is waiting" in resp["error"]
+    submit(d, tmp_path, ["sleep", "30"], session="s1")  # its own job holds the CPU
+    submit(d, tmp_path, [PY, "-c", "pass"], time_=60.0, session="s1")
+    resp = d.momentum(ask)
+    assert not resp["ok"] and "only your own jobs" in resp["error"]
+    assert not d.momentum({**ask, "why": " "})["ok"]
+
+
+def test_one_project_has_momentum_at_a_time_and_it_runs_out(make_daemon, tmp_path):
+    now = [1000.0]
+    d = make_daemon(clock=lambda: now[0], cap=capacity(cpus=[0]))
+    submit(d, tmp_path, ["sleep", "30"], session="other")
+    submit(d, tmp_path, [PY, "-c", "pass"], time_=60.0, session="s1")
+    submit(d, tmp_path, [PY, "-c", "pass"], time_=60.0, session="s2")
+    assert d.momentum({"session": "s1", "action": "grant", "seconds": 3600.0, "why": "x"})["ok"]
+    resp = d.momentum({"session": "s2", "action": "grant", "seconds": 3600.0, "why": "y"})
+    assert not resp["ok"] and "already has momentum" in resp["error"]
+    now[0] += 3601
+    assert d.snapshot()["momentum"] is None
+    after = submit(d, tmp_path, [PY, "-c", "pass"], time_=400.0, session="s1")
+    assert job(d, after).tag - now[0] >= 400.0  # counted in full again
+    assert d.momentum({"session": "s2", "action": "grant", "seconds": 3600.0, "why": "y"})["ok"]
+    assert d.momentum({"action": "end"})["momentum"] is None and d.snapshot()["momentum"] is None

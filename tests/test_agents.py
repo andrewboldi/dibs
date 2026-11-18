@@ -133,6 +133,12 @@ def test_agent_help_covers_the_essentials():
         assert phrase in AGENT_HELP, phrase
 
 
+def test_agent_help_explains_momentum():
+    # Issue #94: rare, asked in plain words, recorded only after the user's yes.
+    for phrase in ("all\nthree hold", "Never record it without the user's yes", "dibs momentum --for"):
+        assert phrase in AGENT_HELP, phrase
+
+
 def test_agent_help_explains_timing_runs():
     assert "--exclusive" in AGENT_HELP and "timing run" in AGENT_HELP
 
