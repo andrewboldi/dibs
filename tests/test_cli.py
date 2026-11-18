@@ -243,6 +243,17 @@ def test_a_client_that_hangs_up_before_its_answer_leaves_the_daemon_running(dibs
     dibs("cancel", str(job_id), check=0)
 
 
+def test_submit_replace(dibs):
+    # Issue #93: cancel a waiting job and queue its replacement in one step.
+    first = js(dibs("submit", *RES, "--vram", "all", "--json", "--", "sleep", "30", check=0))["id"]
+    waiting = js(dibs("submit", *RES, "--vram", "all", "--json", "--", "sleep", "1", check=0))["id"]
+    out = dibs("submit", *RES, "--vram", "all", "--replace", str(waiting), "--", "sleep", "1", check=0).stdout
+    assert f"It replaces job {waiting}, which is cancelled." in out
+    assert js(dibs("show", str(waiting), "--json"))["state"] == "cancelled"
+    assert dibs("submit", *RES, "--replace", "99999", "--", "sleep", "1").returncode != 0
+    dibs("cancel", str(first), check=0)
+
+
 def test_session_from_claude_env(dibs):
     env = {"CLAUDE_CODE_SESSION_ID": "abcd1234-5678-90ab-cdef-1234567890ab"}
     job = js(dibs("submit", *RES, "--json", "--", "true", env=env, check=0))
