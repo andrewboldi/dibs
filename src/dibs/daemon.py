@@ -56,6 +56,7 @@ YOUNG = 600.0  # seconds: a job with no earlier runs counts at its whole RAM res
 PRESSURE_LIMIT = 10.0  # percent (PSI some avg10): above it, no job starts on borrowed RAM
 EVICT_PRESSURE = 40.0  # percent: memory pressure this high for EVICT_AFTER stops a borrower (#114)
 EVICT_AFTER = 10.0  # seconds
+SHORT_OF_RAM = 0.2  # share of the RAM: with less available, high pressure means the machine is short (#129)
 OUTSIDE_CPU_EVERY = 4.0  # seconds between samples of the CPU busy outside dibs jobs (#120)
 OUTSIDE_CPU_WINDOW = 15.0  # seconds the figure dibs top shows is averaged over
 LOAD_EVERY = 4.0  # seconds between samples of the machine's busy cores, for dibs top's load row (#122)
@@ -802,14 +803,14 @@ class Daemon:
             self._push_stop(job, now)
 
     def _give_back_borrowed(self, now: float) -> None:
-        """While jobs run on borrowed RAM and memory pressure stays high, stop the most recently started
-        borrower and run it again within RAM nobody reserved (#114). The kernel's OOM killer acts only
-        after minutes of thrashing; one more after each further stretch of pressure."""
+        """While jobs run on borrowed RAM and the machine stays short of memory, stop the most recently
+        started borrower and run it again within RAM nobody reserved (#114). The kernel's OOM killer acts
+        only after minutes of thrashing; one more after each further stretch of shortage."""
         borrowers = [
             j for j in self.store.jobs([State.RUNNING])
             if j.borrowed_ram and j.stop_requested is None and j.cancel_requested is None
         ]  # fmt: skip
-        if not borrowers or self.pressure() < EVICT_PRESSURE:
+        if not borrowers or self.pressure() < EVICT_PRESSURE or not self._short_of_ram():
             self._pressured_since = None
             return
         if self._pressured_since is None:
@@ -825,6 +826,13 @@ class Daemon:
         log.info("job %d %s", job.id, job.stop_reason)
         self._push_stop(job, now)
         self._pressured_since = now
+
+    def _short_of_ram(self) -> bool:
+        """Whether little of the machine's RAM is available. Pressure alone doesn't say so: one job
+        stalling inside itself, at its own limit or while the kernel compacts memory for huge pages,
+        raises it with most of the RAM free (#129). Unreadable, it leaves the pressure to decide."""
+        info = self._meminfo()
+        return info is None or info[0] - info[1] < info[0] * SHORT_OF_RAM
 
     def _watch_beside(self, now: float) -> None:
         """Beside an exclusive job (a timing run), sample the CPU other programs keep busy, so dibs show

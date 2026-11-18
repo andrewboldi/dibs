@@ -97,9 +97,11 @@ than its reservation. A job with no history counts at its full reservation for i
 minutes. Each job's hard cap stays its reservation. Jobs started on RAM borrowed this way get a
 higher OOM score, so if several jobs grow at once and the machine runs out, the kernel kills a
 borrower first; dibs then retries it (item 4) at its full reservation, without borrowing.
-Borrowing stops while memory pressure (PSI) is high. A machine-wide kill is told apart from the
-job hitting its own limit by the scope's memory.events counters. No job borrows RAM beside an
-exclusive job (section 12), whose reservation is idle on purpose.
+Borrowing stops while memory pressure (PSI) is high. When pressure stays high while less than a
+fifth of the RAM is available, dibs stops the newest borrower itself (#114); pressure with RAM to
+spare is one job stalling inside itself and stops nothing (#129). A machine-wide kill is told
+apart from the job hitting its own limit by the scope's memory.events counters. No job borrows RAM
+beside an exclusive job (section 12), whose reservation is idle on purpose.
 
 ## 10. Momentum
 
