@@ -75,11 +75,12 @@ def expected_end(job: Running, now: float) -> float:
 class _Profile:
     """Free resources over time, as a step function: segment k covers [times[k], times[k+1])."""
 
-    def __init__(self, now: float, cpus: int, mem: int, vram: list[int]):
+    def __init__(self, now: float, cpus: int, mem: int, vram: list[int], jobs: list[int] | None = None):
         self.times = [now]
         self.cpus = [cpus]
         self.mem = [mem]
         self.vram = [list(vram)]
+        self.jobs = [list(jobs) if jobs is not None else [0] * len(vram)]  # jobs on each GPU (#146)
 
     def _boundary(self, t: float) -> int:
         """Make t the start of a segment (t >= times[0]) and return that segment's index."""
@@ -90,14 +91,16 @@ class _Profile:
         self.cpus.insert(k + 1, self.cpus[k])
         self.mem.insert(k + 1, self.mem[k])
         self.vram.insert(k + 1, list(self.vram[k]))
+        self.jobs.insert(k + 1, list(self.jobs[k]))
         return k + 1
 
     def block(self, start: float, end: float) -> None:
         """Nothing else fits over [start, end): an exclusive job has the machine (#104)."""
         self.add(start, end, -_ALL, 0, {pos: -_ALL for pos in range(len(self.vram[0]))})
 
-    def add(self, start: float, end: float, cpus: int, mem: int, vram: dict[int, int]) -> None:
-        """Add (or, with negative amounts, take) resources over [start, end)."""
+    def add(self, start: float, end: float, cpus: int, mem: int, vram: dict[int, int], jobs: int = 0) -> None:
+        """Add (or, with negative amounts, take) resources over [start, end); jobs: how many jobs that
+        puts on (or takes off) each GPU in vram."""
         first = self._boundary(start)
         last = len(self.times) if end == math.inf else self._boundary(end)
         for k in range(first, last):
@@ -105,6 +108,7 @@ class _Profile:
             self.mem[k] += mem
             for pos, amount in vram.items():
                 self.vram[k][pos] += amount
+                self.jobs[k][pos] += jobs
 
     def earliest(self, req: Request, whole: tuple[int, list[int]] | None = None) -> tuple[float, tuple[int, ...]]:
         """The earliest start at which req fits for its whole run, and the GPU positions to use. With
@@ -114,6 +118,7 @@ class _Profile:
             start = self.times[k]
             end = start + req.time
             low_vram = list(self.vram[k])
+            most_jobs = list(self.jobs[k])
             j, short = k, False
             while j < n and self.times[j] < end:
                 cpus_needed = whole[0] if whole else req.cpus
@@ -123,6 +128,7 @@ class _Profile:
                     short = True
                     break
                 low_vram = [min(a, b) for a, b in zip(low_vram, self.vram[j])]
+                most_jobs = [max(a, b) for a, b in zip(most_jobs, self.jobs[j])]
                 j += 1
             if short:
                 # Every start up to segment j overlaps it, so none of them fit either.
@@ -130,9 +136,11 @@ class _Profile:
                 continue
             if req.gpus == 0:
                 return start, ()
-            eligible = sorted((free, pos) for pos, free in enumerate(low_vram) if free >= req.vram)
+            # The GPUs with the fewest jobs over its run, since jobs on one GPU share its compute (#146);
+            # then the least room that fits, keeping a big GPU for big jobs.
+            eligible = sorted((most_jobs[pos], free, pos) for pos, free in enumerate(low_vram) if free >= req.vram)
             if len(eligible) >= req.gpus:
-                return start, tuple(sorted(pos for _, pos in eligible[: req.gpus]))
+                return start, tuple(sorted(pos for _, _, pos in eligible[: req.gpus]))
             k += 1
         raise AssertionError("a request that fits the machine must fit once everything ends")
 
@@ -154,6 +162,7 @@ def plan(
 
     busy_cpus = {c for r in running for c in r.cpu_ids if c in cpu_set}
     free_vram = [g.vram for g in capacity.gpus]
+    on_gpu = [0] * len(capacity.gpus)
     usable_mem = capacity.mem - outside_mem
     free_mem = usable_mem
     for r in running:
@@ -161,7 +170,8 @@ def plan(
         for g in r.gpu_ids:
             if g in gpu_pos:
                 free_vram[gpu_pos[g]] -= r.request.vram
-    profile = _Profile(now, len(cpu_set) - len(busy_cpus), free_mem, free_vram)
+                on_gpu[gpu_pos[g]] += 1
+    profile = _Profile(now, len(cpu_set) - len(busy_cpus), free_mem, free_vram, on_gpu)
 
     running_ends = {}
     blocker = None  # a running job that has the machine to itself
@@ -169,7 +179,7 @@ def plan(
         end = expected_end(r, now)
         running_ends[r.job_id] = end
         released = {gpu_pos[g]: r.request.vram for g in r.gpu_ids if g in gpu_pos}
-        profile.add(end, math.inf, sum(1 for c in r.cpu_ids if c in cpu_set), r.request.mem, released)
+        profile.add(end, math.inf, sum(1 for c in r.cpu_ids if c in cpu_set), r.request.mem, released, jobs=-1)
         if r.request.exclusive:
             profile.block(now, end)
             blocker = r.job_id
@@ -186,7 +196,7 @@ def plan(
         if q.request.exclusive:
             profile.block(start, end)
         else:
-            profile.add(start, end, -q.request.cpus, -q.request.mem, {p: -q.request.vram for p in positions})
+            profile.add(start, end, -q.request.cpus, -q.request.mem, {p: -q.request.vram for p in positions}, jobs=1)
         gpu_ids = tuple(capacity.gpus[p].index for p in positions)
         placed[q.job_id] = (start, end, gpu_ids)
         if start == now:
