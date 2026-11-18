@@ -37,6 +37,7 @@ class Request:
     gpus: int  # how many GPUs
     vram: int  # bytes on each GPU it uses
     time: float  # estimated run time, seconds
+    exclusive: bool = False  # nothing else runs beside it, e.g. for timing (#104)
 
 
 class State(StrEnum):
@@ -201,7 +202,7 @@ def resolve_request(raw: Mapping[str, Any], cap: Capacity) -> Request:
     elif gpus is None:
         gpus = 1
 
-    req = Request(cpus=cpus, mem=mem, gpus=gpus, vram=vram, time=float(time))
+    req = Request(cpus=cpus, mem=mem, gpus=gpus, vram=vram, time=float(time), exclusive=raw.get("exclusive") is True)
     problem = fits_machine(req, cap)
     if problem:
         raise RequestError(problem)

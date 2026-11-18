@@ -260,6 +260,17 @@ def test_submit_no_retry(dibs):
     assert js(dibs("submit", *RES, "--no-retry", "--json", "--", "true", check=0))["retry"] is False
 
 
+def test_submit_exclusive(dibs):
+    # Issue #104: a timing run gets the machine to itself, and says so.
+    busy = js(dibs("submit", *RES, "--json", "--", "sleep", "30", check=0))["id"]
+    timing = js(dibs("submit", *RES, "--exclusive", "--json", "--", "true", check=0))
+    assert timing["request"]["exclusive"] is True and timing["state"] == "queued"
+    assert timing["waiting_for"] == "needs the machine to itself (1 job running)"
+    assert "(alone)" in dibs("queue", check=0).stdout
+    assert "with the machine to itself" in dibs("show", str(timing["id"]), check=0).stdout
+    dibs("cancel", str(busy), str(timing["id"]), check=0)
+
+
 def test_session_from_claude_env(dibs):
     env = {"CLAUDE_CODE_SESSION_ID": "abcd1234-5678-90ab-cdef-1234567890ab"}
     job = js(dibs("submit", *RES, "--json", "--", "true", env=env, check=0))
