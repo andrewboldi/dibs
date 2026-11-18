@@ -46,8 +46,9 @@ when those resources are free, so jobs never crash each other by running out of 
   set to N.
 - `--mem SIZE`: RAM, like 16G or 512M. Where the system allows it, a job that goes over is killed,
   all of it, even when only one of its processes went over.
-  While a running job uses less than it reserved, dibs may start --retry jobs in the difference; if
-  the machine then runs short, a job started that way is the one stopped, and dibs runs it again.
+  While a running job uses less than it reserved, dibs may start other jobs in the difference; if
+  the machine then runs short, a job started that way is the one stopped: with --retry dibs runs it
+  again, otherwise it fails with a note to resubmit it.
 - `--vram SIZE`: GPU memory on each GPU it uses. Leave it out for a CPU-only job, which then
   can't see any GPU. A job may use more VRAM than it reserved while nobody else needs that memory,
   but it is stopped as soon as it reaches memory another job reserved.
@@ -92,8 +93,8 @@ when those resources are free, so jobs never crash each other by running out of 
   is stopped for going over its VRAM reservation, killed at its RAM limit, or lost when the machine
   restarts, dibs runs it again by itself, up to twice, with more VRAM or RAM when that was the
   cause, keeping its id and its place in line; `dibs wait` keeps waiting, and `dibs show ID` lists
-  the tries. Only --retry jobs may start on RAM other jobs reserved but aren't using, since dibs may
-  have to stop them to give it back.
+  the tries. That includes a job dibs started early in RAM other jobs reserved but weren't using and
+  then had to stop to give it back.
 - Without --retry (or once it has run out of retries), such a job fails with a reason that ends with
   the --vram or --mem to resubmit with: use that, not the same request again.
 

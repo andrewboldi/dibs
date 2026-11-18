@@ -33,8 +33,9 @@ stays in its terminal's scope and is still stopped. A config setting switches th
 ## 4. Retry jobs that failed for resource reasons
 
 Revised 2026-11-18 (#116): retries are the agent's choice. Only jobs submitted with `--retry`, which
-the agent marks as safe to run again from the start, are retried, and only they may start on
-borrowed RAM (section 9). Others fail with the reason and the size to resubmit with, as before.
+the agent marks as safe to run again from the start, are retried. Revised again the same day (#148):
+any job may start on borrowed RAM (section 9); if dibs has to stop one to give the RAM back, a
+`--retry` job runs again and any other fails with a note to resubmit it. Others fail with the reason and the size to resubmit with, as before.
 
 
 Agents shouldn't spend effort working out why a job didn't run; dibs should handle it. When a job
@@ -96,7 +97,8 @@ of earlier runs of the same command, plus headroom (25% or 1G, whichever is more
 than its reservation. A job with no history counts at its full reservation for its first ten
 minutes. Each job's hard cap stays its reservation. Jobs started on RAM borrowed this way get a
 higher OOM score, so if several jobs grow at once and the machine runs out, the kernel kills a
-borrower first; dibs then retries it (item 4) at its full reservation, without borrowing.
+borrower first; dibs then retries it (item 4) at its full reservation, without borrowing, if it
+has `--retry`, and any other borrower fails with a note to resubmit it (#148).
 Borrowing stops while memory pressure (PSI) is high. When pressure stays high while less than a
 fifth of the RAM is available, dibs stops the newest borrower itself (#114); pressure with RAM to
 spare is one job stalling inside itself and stops nothing (#129). A machine-wide kill is told

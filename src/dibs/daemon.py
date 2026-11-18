@@ -669,13 +669,14 @@ class Daemon:
         current, running, queued = self._plan(now)
         by_id = {j.id: j for j in queued}
         # RAM nobody has reserved: a job that needs more starts on RAM other jobs reserved but aren't
-        # using, as a borrower (#86), which a job retried after the machine ran out may not do.
+        # using, as a borrower (#86), which a job retried after the machine ran out may not do. Any
+        # job may borrow (#148): --retry decides whether one dibs has to stop runs again.
         unreserved = self.capacity.mem - self._outside_mem(now, running) - sum(j.request.mem for j in running)
         for start in current.starts:
             job = by_id[start.job_id]
             borrowed = job.request.mem > unreserved
-            if borrowed and (job.no_borrow or not job.retry):
-                continue  # dibs may have to stop a borrower, so only a job safe to run again may borrow (#116)
+            if borrowed and job.no_borrow:
+                continue
             unreserved -= job.request.mem
             job.borrowed_ram = borrowed
             job.cpu_ids, job.gpu_ids = list(start.cpu_ids), list(start.gpu_ids)
@@ -1168,6 +1169,9 @@ class Daemon:
             job.reason = result.get("reason")
         if at_limit and job.state == State.FAILED and (mem := self._more_ram(job)):
             job.reason += f"; resubmit with --mem {format_size(mem)}"  # as a VRAM stop says its size
+        lost_borrowing = job.evicted or (result.get("oom_killed") and result.get("hit_limit") is False and job.borrowed_ram)
+        if job.state == State.FAILED and lost_borrowing and not job.retry:  # dibs chose to start it there (#148)
+            job.reason += "; resubmit it, or submit it with --retry so dibs runs it again by itself"
         self.store.update_job(job)
         self._terminated.discard(job.id)
         self._notify(job)

@@ -66,8 +66,8 @@ only its own GPUs; in the plan it holds everything.
 **RAM by use.** Agents reserve a median 2-4 times the RAM their jobs use, and each job keeps its own
 reservation as a hard cap. To let others use what sits idle, dibs plans with what a running job
 uses: the larger of its peak so far and earlier runs' peak, plus 25% or 1G, never more than it
-reserved. Only jobs submitted with `--retry` start in the RAM this frees, since dibs may have to stop
-them. A job with no earlier runs counts at its whole reservation for its first ten minutes,
+reserved. Any job may start in the RAM this frees (#148); if dibs has to stop it, a job submitted with
+`--retry` runs again by itself and any other fails with a note to resubmit. A job with no earlier runs counts at its whole reservation for its first ten minutes,
 and an exclusive job always does. A job that starts only thanks to this is marked as borrowing and
 runs with a high OOM score. If memory pressure (PSI some avg10) stays above 40% for 10 seconds
 while less than a fifth of the RAM is available, dibs stops a program itself rather than
