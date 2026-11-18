@@ -683,6 +683,26 @@ def test_the_agent_is_told_of_a_gpu_stop_at_its_next_dibs_command(world, spawned
     assert len(told) == 1 and "it used 3.1G on GPU 0 outside dibs" in told[0]["message"]
 
 
+def test_a_program_an_agent_runs_under_is_never_stopped_for_ram(short_world, spawned, tmp_path):
+    # Issue #141: stopping a program kills everything it started. The tmux server sits in a terminal
+    # tab's scope and starts every pane, so stopping it would kill every agent on the machine.
+    d, state, run, place = short_world()
+    (tmp_path / "claude").write_text("import time\ntime.sleep(60)\n")
+    server = spawned(
+        [PY, "-c", f"import subprocess, time; subprocess.Popen([{PY!r}, {str(tmp_path / 'claude')!r}]); time.sleep(60)"],
+        env=CLEAN_ENV,
+    )
+    agent = wait_for(lambda: next(iter(procs.descendants(server.pid)), None))
+    wait_for(lambda: (procs.cmdline(agent) or ["", ""])[1:2] == [str(tmp_path / "claude")])
+    script = spawned(SLEEPER, env=CLEAN_ENV)
+    place(server.pid), place(agent), place(script.pid)
+    state["programs"] = [(server.pid, 9 * GiB), (script.pid, 3 * GiB)]
+    run(18)
+    assert script.wait(timeout=5) == -9
+    assert procs.alive(server.pid) and procs.alive(agent)
+    procs.stop_with_message([agent], None)
+
+
 def test_ram_stop_message_says_why_and_how_to_keep_it_from_happening_again():
     text = guard.ram_stop_message(4121, ["python", "prepare.py", "--shards", "8"], int(14.1 * GiB),
                                   int(0.8 * GiB), int(30.6 * GiB))  # fmt: skip

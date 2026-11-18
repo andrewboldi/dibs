@@ -140,7 +140,8 @@ RAM and swap (#135). While the machine is short of memory (the test in section 9
 the largest program outside dibs that holds a tenth of the RAM or more, before the newest borrower,
 one per stretch of shortage. It leaves alone what the GPU guard leaves alone (other users,
 allowlisted names, desktop apps, programs older than the guard and what they start), the agent
-CLIs themselves, and jobs, which hold the RAM they reserved. The program's output gets what it
+CLIs themselves and any program an agent runs under, such as the tmux server (stopping a program
+stops what it started, #141), and jobs, which hold the RAM they reserved. The program's output gets what it
 held, why it was stopped, and the `dibs run --mem` command that keeps it from happening again, and
 agents' instructions say that every RAM-heavy step goes through dibs, not only the GPU step.
 `guard = "warn"` only logs it.
