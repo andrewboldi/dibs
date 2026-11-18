@@ -600,6 +600,7 @@ class Daemon:
             job_of_pid=job_of_pid,
             mode=self.config.guard,
             allow=self.config.guard_allow,
+            desktop=self.config.guard_desktop,
             since=self.guard_since,
             my_uid=os.getuid(),
             parents=self.guard_parents,

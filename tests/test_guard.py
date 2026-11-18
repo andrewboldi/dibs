@@ -120,6 +120,38 @@ def test_allowlisted_left_alone(world, spawned):
     assert procs.alive(p.pid) and outside(d) == {p.pid: "allowlisted"}
 
 
+APP_SLICE = "/user.slice/user-1000.slice/user@1000.service/app.slice/"
+
+
+@pytest.mark.parametrize(
+    "scope,config,left_alone",
+    [
+        # Issue #92: the guard stopped a screen recorder the user launched from the desktop
+        ("app-gnome-com.obsproject.Studio-3016784.scope", Config(), True),
+        ("app-org.kde.kdenlive@3f2a1b.service", Config(), True),
+        # where agents run: terminals, tmux, and editors with a built-in terminal
+        ("tmux-spawn-f3ccf531-0060-48f4-920d-4dd6eefb12fe.scope", Config(), False),
+        ("app-org.gnome.Terminal.slice/vte-spawn-1b2c.scope", Config(), False),
+        ("app-gnome-org.gnome.Terminal-4410.scope", Config(), False),
+        ("app-org.kde.konsole@a1b2.service", Config(), False),
+        ("app-gnome-code-insiders-5120.scope", Config(), False),
+        ("app-gnome-com.obsproject.Studio-3016784.scope", Config(guard_desktop=False), False),
+    ],
+)
+def test_programs_launched_from_the_desktop_are_left_alone(world, spawned, monkeypatch, scope, config, left_alone):
+    d, backend = world(config)
+    p = spawned(["sleep", "60"])
+    real_cgroup = procs.cgroup
+    monkeypatch.setattr(procs, "cgroup", lambda pid: APP_SLICE + scope if pid == p.pid else real_cgroup(pid))
+    backend.procs = [GpuProcess(p.pid, 0, 10 * 1024 * 1024)]
+    d.tick()
+    if left_alone:
+        assert procs.alive(p.pid) and outside(d) == {p.pid: "launched from the desktop"}
+    else:
+        p.wait(timeout=10)
+        assert not procs.alive(p.pid)
+
+
 def test_preexisting_left_alone(make_daemon, spawned):
     p = spawned(["sleep", "60"])  # already running when dibs starts
     time.sleep(0.05)

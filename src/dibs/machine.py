@@ -23,6 +23,7 @@ class Config:
     keep_days: int = 14
     guard: str = "all"
     guard_allow: tuple[str, ...] = ()
+    guard_desktop: bool = True  # leave alone GPU programs launched from the desktop (#92)
     agent_files: tuple[str, ...] = ()  # more instructions files for dibs setup (agent CLIs it doesn't know)
 
 
@@ -80,6 +81,10 @@ def load_config(path: Path) -> Config:
                     "config setting 'guard_allow' must be a list of program names, like [\"ollama\"]"
                 )
             fields[key] = tuple(value)
+        elif key == "guard_desktop":
+            if not isinstance(value, bool):
+                raise ConfigError("config setting 'guard_desktop' must be true or false")
+            fields[key] = value
         elif key == "agent_files":
             if not isinstance(value, list) or not all(isinstance(s, str) and s for s in value):
                 raise ConfigError(
