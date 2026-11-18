@@ -154,15 +154,19 @@ def keyed_numbers(text: str | None) -> dict[str, int]:
     return stat
 
 
-def memory_in_use(cgroup_path: str) -> tuple[int, int] | None:
+def memory_in_use(cgroup_path: str) -> tuple[int, int, tuple[int, int]] | None:
     """What a cgroup's processes hold (anon + shmem), leaving out the file cache that memory.current
     and memory.peak also count: the kernel drops that cache when memory runs short. With it, the
-    shmem part: files in /dev/shm or a RAM-backed /tmp, and other shared memory."""
+    shmem part (files in /dev/shm or a RAM-backed /tmp, and shared memory its processes map, such as
+    buffers pinned for GPU transfers), and how much of that part they had mapped, at least and at
+    most: memory.stat counts it in file_mapped together with the other files they map (#132)."""
     stat = keyed_numbers(_read(f"{CGROUP_ROOT}{cgroup_path}/memory.stat"))
     if "anon" not in stat:
         return None
     shmem = stat.get("shmem", 0)
-    return stat["anon"] + shmem, shmem
+    mapped, other_files = stat.get("file_mapped", 0), max(0, stat.get("file", 0) - shmem)
+    most = min(shmem, mapped)
+    return stat["anon"] + shmem, shmem, (min(most, max(0, mapped - other_files)), most)
 
 
 def oom_kills(events: str | None) -> tuple[int, bool]:

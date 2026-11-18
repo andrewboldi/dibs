@@ -495,10 +495,11 @@ def test_ram_a_finished_job_is_letting_go_of_is_not_counted_as_outside(make_daem
     assert job(d, second).state != State.QUEUED, json.dumps(d.show(second)["job"])
 
 
-def _killed_for_ram_holding(d, tmp_path, monkeypatch, mem, anon, shmem):
-    """A job that held this much (anon, shmem) at its last sample, then was killed at its RAM limit."""
+def _killed_for_ram_holding(d, tmp_path, monkeypatch, mem, anon, shmem, file=4 * GiB, mapped=None):
+    """A job that held this much (anon, shmem) at its last sample, then was killed at its RAM limit.
+    mapped is memory.stat's file_mapped: the file cache its processes map, shared memory included."""
     job_id, stat, go = _job_holding(d, tmp_path, monkeypatch, mem, retry=False)
-    stat.write_text(f"anon {anon}\nfile {4 * GiB}\nshmem {shmem}\n")
+    stat.write_text(f"anon {anon}\nfile {file}\nshmem {shmem}\n" + ("" if mapped is None else f"file_mapped {mapped}\n"))
     d.tick()
     real_read_exit = launcher.read_exit
     monkeypatch.setattr(
@@ -518,7 +519,30 @@ def test_a_ram_kill_says_when_most_of_the_ram_was_shared_memory(daemon, tmp_path
     assert killed.peak_shmem == int(5.4 * gib)
     assert killed.reason == (
         "killed: went over its 10G RAM reservation "
-        "(5.4G of it was files in /dev/shm or a RAM-backed /tmp, or other shared memory); resubmit with --mem 13G"
+        "(5.4G of it was files in /dev/shm or a RAM-backed /tmp); resubmit with --mem 13G"
+    )
+
+
+def test_a_ram_kill_says_when_its_shared_memory_was_mapped_by_its_processes(daemon, tmp_path, monkeypatch):
+    # Issue #132, the kernel's figures at a real kill: all 6.5G of shared memory was mapped by the job's
+    # processes, as buffers pinned for GPU transfers are, with no files in RAM. The reason blamed files
+    # in a RAM-backed /tmp, and pointing TMPDIR at a disk wouldn't have helped.
+    killed = _killed_for_ram_holding(
+        daemon, tmp_path, monkeypatch, 12 * GiB, 5868503040, 6968758272, file=6968762368, mapped=6970818560
+    )
+    assert killed.reason == (
+        "killed: went over its 12G RAM reservation (6.5G of it was shared memory its processes mapped, "
+        "such as buffers for GPU transfers or between worker processes); resubmit with --mem 15G"
+    )
+
+
+def test_a_ram_kill_names_both_kinds_of_shared_memory_when_the_counters_cant_tell(daemon, tmp_path, monkeypatch):
+    # 4G shared and 2G of other file cache, with 3G of the two mapped: 1-3G of the shared memory was.
+    killed = _killed_for_ram_holding(daemon, tmp_path, monkeypatch, 10 * GiB, 5 * GiB, 4 * GiB, file=6 * GiB, mapped=3 * GiB)
+    assert killed.reason == (
+        "killed: went over its 10G RAM reservation (4G of it was files in /dev/shm or a RAM-backed /tmp, "
+        "or shared memory its processes mapped, such as buffers for GPU transfers or between worker processes); "
+        "resubmit with --mem 13G"
     )
 
 

@@ -80,6 +80,7 @@ class Job:
     peak_vram: int | None = None
     peak_mem: int | None = None
     peak_shmem: int | None = None  # the shared memory in peak_mem: files in /dev/shm or a RAM-backed /tmp, and the like
+    peak_shmem_mapped: list[int] | None = None  # how much of peak_shmem its processes had mapped: at least, at most
     cpu_seconds: float | None = None  # CPU time the job used, from its scope
     sleep_at_start: float | None = None  # the machine's time asleep since boot (procs.slept) when the job started
     asleep: float = 0.0  # how long the machine slept while the job ran (set when it ends); run times leave it out
