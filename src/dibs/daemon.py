@@ -259,6 +259,7 @@ class Daemon:
             tag=compute_tag(now, counted, backlog, priority, carried),
             priority=priority,
             plain_tag=compute_tag(now, counted, backlog),
+            own_time=counted,
             retry=req.get("retry") is True,  # the agent's choice: only it knows the job is safe to repeat (#116)
             owed_carried=carried,
             owed_left=left,
@@ -379,6 +380,7 @@ class Daemon:
             j.tag = max(j.submitted, j.tag - pull)
             if j.plain_tag is not None:
                 j.plain_tag = max(j.submitted, j.plain_tag - pull)
+            j.own_time = max(0.0, (j.own_time if j.own_time is not None else j.request.time) - pull)
             self.store.update_job(j)
         log.info("momentum for %s until %s: %s", grant["label"], time.strftime("%H:%M", time.localtime(grant["until"])), why)
         self.schedule()
@@ -403,6 +405,31 @@ class Daemon:
         self.schedule()
         return {"ok": True, "cancelled": cancelled, "errors": errors}
 
+    def _reline(self, session: str) -> None:
+        """Line a session's waiting jobs up again by submit()'s rules, in the order they came, behind its
+        jobs still waiting only: one that started or was cancelled no longer holds back those after it,
+        so a busy session's line can't run hours ahead of the clock (#150). Places only move earlier."""
+        own = sorted((j for j in self.store.jobs([State.QUEUED]) if j.session == session), key=lambda j: (j.submitted, j.id))
+        lined: list[Job] = []
+        new: dict[int, list[float]] = {}  # job id -> [tag, plain tag]
+        for j in own:
+            counted = j.own_time if j.own_time is not None else j.request.time
+            backlog = [new[r.id][1] for r in lined if r.priority >= j.priority]
+            start = max([j.submitted, *backlog])
+            for r in lined:  # it goes ahead of the session's lower-priority jobs, which move back by its estimate
+                if r.priority < j.priority and new[r.id][1] > start:
+                    new[r.id][0] += counted
+                    new[r.id][1] += counted
+            new[j.id] = [compute_tag(j.submitted, counted, backlog, j.priority, j.owed_carried),
+                         compute_tag(j.submitted, counted, backlog)]  # fmt: skip
+            lined.append(j)
+        for j in own:
+            tag, plain = new[j.id]
+            tag, plain = min(tag, j.tag), min(plain, j.plain_tag if j.plain_tag is not None else plain)
+            if (tag, plain) != (j.tag, j.plain_tag):
+                j.tag, j.plain_tag = tag, plain
+                self.store.update_job(j)
+
     def _cancel_job(self, job: Job, now: float) -> bool:
         """Cancel one job without scheduling: a queued one ends now, a running one is asked to stop.
         False if it had already ended."""
@@ -412,6 +439,7 @@ class Daemon:
             # It never ran: it hands back what it carried and takes back what it left (#90).
             self._add_owed(job.session, job.owed_carried - job.owed_left, now)
             self._notify(job)
+            self._reline(job.session)
             return True
         if job.state == State.RUNNING:
             if job.cancel_requested is None:
@@ -668,6 +696,7 @@ class Daemon:
         now = self.clock()
         current, running, queued = self._plan(now)
         by_id = {j.id: j for j in queued}
+        started: set[str] = set()
         # RAM nobody has reserved: a job that needs more starts on RAM other jobs reserved but aren't
         # using, as a borrower (#86), which a job retried after the machine ran out may not do. Any
         # job may borrow (#148): --retry decides whether one dibs has to stop runs again.
@@ -681,6 +710,7 @@ class Daemon:
             job.borrowed_ram = borrowed
             job.cpu_ids, job.gpu_ids = list(start.cpu_ids), list(start.gpu_ids)
             job.started, job.state = now, State.RUNNING
+            started.add(job.session)  # it left the queue, launched or not
             job.sleep_at_start = self.slept()
             self._settle_priority(job, now)
             self.store.update_job(job)
@@ -695,6 +725,8 @@ class Daemon:
                 self._notify(job)
                 continue
             self.store.update_job(job)
+        for session in started:  # the jobs that lined up behind the ones that started move up (#150)
+            self._reline(session)
 
     def tick(self) -> None:
         """Called about once a second: notice finished jobs, push stops along, start what can start."""

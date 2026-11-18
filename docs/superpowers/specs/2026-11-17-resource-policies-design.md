@@ -154,3 +154,13 @@ systemd's default `OOMPolicy=stop` stops a whole scope when the kernel's OOM kil
 processes, and tmux and VTE terminals run each pane in a scope of its own, so the agent died with
 its program (#134). `dibs setup` writes drop-ins setting `OOMPolicy=continue` for `tmux-spawn-*.scope`
 and `vte-spawn-*.scope`, as dibs's job scopes already have; `dibs setup --undo` removes them.
+
+## 15. Line up only behind jobs still waiting
+
+A session's new job lined up behind its session's waiting jobs, and their places never moved when
+the jobs ahead of them started or were cancelled, so a busy session's line ran hours ahead of the
+clock (one job's place was 10.6 hours after it came) and every newer job of another session went
+ahead of it. The maintainer picked the fix (#150): when one of a session's waiting jobs starts or is
+cancelled, its still-waiting jobs line up again by submit's rules, in the order they came. A job
+still runs after its session's earlier jobs of the same priority, a higher priority still goes ahead
+of the session's lower ones, and a place only ever moves earlier.
