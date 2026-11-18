@@ -102,8 +102,10 @@ stops the largest program outside dibs that holds a tenth of the RAM or more, wr
 output what it held, why it was stopped and the `dibs run --mem` command that keeps it from
 happening again. Left running, such a program stalls everything for minutes until the kernel's
 OOM killer kills whatever is largest, a job or the program itself, and systemd may then stop the
-terminal it ran in, the agent with it. It leaves alone what it leaves alone on the GPU, and the
-agent CLIs themselves; a job is never stopped this way, since it holds the RAM it reserved. Only
+terminal it ran in, the agent with it. It leaves alone what it leaves alone on the GPU, the agent
+CLIs themselves, and any program an agent runs under (the tmux server, a pane's shell), since
+stopping a program stops what it started; a job is never stopped this way, since it holds the RAM
+it reserved. Only
 programs where agents work qualify: in a tmux or VTE terminal pane (`tmux-spawn-*`, `vte-spawn-*`
 scopes), or started by an agent CLI, as in an editor's terminal; snap apps, the desktop shell and
 user services never do. A note in a stopped program's output can be lost (a pipe through `grep`, a

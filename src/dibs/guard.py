@@ -160,12 +160,17 @@ def ram_hog(
 ) -> tuple[int, int, str] | None:
     """The program to stop while the machine is short of memory, as (pid, RAM it holds, "stop" or
     "warn"): the largest one outside dibs that holds at least `minimum` bytes and runs where agents
-    work, leaving alone the agent CLIs themselves and what the GPU guard leaves alone."""
+    work, leaving alone the agent CLIs themselves, programs an agent runs under (stopping a program
+    stops what it started), and what the GPU guard leaves alone."""
+    cmap: dict[int, list[int]] | None = None
     for pid, held in sorted(programs, key=lambda p: -p[1]):
         if held < minimum:
             break
         if mode == "off" or in_dibs(pid) or _is_agent(pid) or not _where_agents_run(pid):
             continue
+        cmap = procs.children_map() if cmap is None else cmap
+        if any(_is_agent(child) for child in procs.descendants(pid, cmap)):
+            continue  # stopping it would stop the agent under it: the tmux server, a pane's shell (#141)
         kind = _judge(pid, mode, allow, since, my_uid, parents, instance, desktop)
         if kind in ("stop", "warn"):
             return pid, held, kind
