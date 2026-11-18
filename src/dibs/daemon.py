@@ -54,6 +54,8 @@ RETENTION_EVERY = 3600.0
 MAX_RETRIES = 2  # runs again after a resource failure, at most (#84)
 YOUNG = 600.0  # seconds: a job with no earlier runs counts at its whole RAM reservation this long (#86)
 PRESSURE_LIMIT = 10.0  # percent (PSI some avg10): above it, no job starts on borrowed RAM
+EVICT_PRESSURE = 40.0  # percent: memory pressure this high for EVICT_AFTER stops a borrower (#114)
+EVICT_AFTER = 10.0  # seconds
 MOMENTUM_SHARE = 0.25  # under momentum, a session's jobs count as this share of their estimates (#94)
 MOMENTUM_MAX = 12 * 3600.0  # seconds a grant may last
 EARLY_STOP = 60.0  # seconds: a job stopped for VRAM sooner than this was likely still growing (#80)
@@ -135,6 +137,7 @@ class Daemon:
         self.clock = clock
         self.slept = slept
         self.pressure = pressure
+        self._pressured_since: float | None = None  # when memory pressure rose above EVICT_PRESSURE
         self.cpu_busy = cpu_busy
         self._beside: dict[int, tuple[float, float, float]] = {}  # job -> (time, machine busy, its own CPU)
         ensure_dirs(paths)
@@ -676,6 +679,7 @@ class Daemon:
             else:
                 self._push_stop(job, now)
         self._watch_memory()
+        self._give_back_borrowed(now)
         self._watch_beside(now)
         self._watch_gpus(now)
         self.schedule()
@@ -747,6 +751,31 @@ class Daemon:
             if held is not None and (job.peak_mem is None or held[0] > job.peak_mem):
                 job.peak_mem, job.peak_shmem = held
                 self.store.update_job(job)
+
+    def _give_back_borrowed(self, now: float) -> None:
+        """While jobs run on borrowed RAM and memory pressure stays high, stop the most recently started
+        borrower and run it again within RAM nobody reserved (#114). The kernel's OOM killer acts only
+        after minutes of thrashing; one more after each further stretch of pressure."""
+        borrowers = [
+            j for j in self.store.jobs([State.RUNNING])
+            if j.borrowed_ram and j.stop_requested is None and j.cancel_requested is None
+        ]  # fmt: skip
+        if not borrowers or self.pressure() < EVICT_PRESSURE:
+            self._pressured_since = None
+            return
+        if self._pressured_since is None:
+            self._pressured_since = now
+            return
+        if now - self._pressured_since < EVICT_AFTER:
+            return
+        job = max(borrowers, key=lambda j: (j.started or 0, j.id))
+        job.evicted = True
+        job.stop_reason = "stopped to give back borrowed RAM: the machine was short of memory"
+        job.stop_requested = now
+        self.store.update_job(job)
+        log.info("job %d %s", job.id, job.stop_reason)
+        self._push_stop(job, now)
+        self._pressured_since = now
 
     def _watch_beside(self, now: float) -> None:
         """Beside an exclusive job (a timing run), sample the CPU other programs keep busy, so dibs show
@@ -953,7 +982,15 @@ class Daemon:
     def _retry_with(self, job: Job, result: dict) -> tuple[Request, str, str] | None:
         """For a job that failed for a resource reason and may run again: the request to run it with,
         how (after "retrying") and why. None when it isn't such a failure, or it can't fit."""
-        if not job.retry or len(job.attempts) >= MAX_RETRIES:
+        if not job.retry:
+            return None
+        if job.evicted or (result.get("oom_killed") and result.get("hit_limit") is False and job.borrowed_ram):
+            # It ran on borrowed RAM, dibs's choice rather than the job's, so it's always queued again,
+            # outside the retry limit: it then can't borrow, so this happens once (#114).
+            job.no_borrow = True
+            reason = job.stop_reason if job.evicted else _ram_kill_reason(job, result)
+            return job.request, "without borrowing", reason
+        if len(job.attempts) >= MAX_RETRIES:
             return None
         if job.stop_reason and job.retry_vram and job.retry_vram > job.request.vram:
             return replace(job.request, vram=job.retry_vram), f"with --vram {self._vram_text(job.retry_vram)}", job.stop_reason
@@ -992,7 +1029,7 @@ class Daemon:
         job.cpu_ids, job.gpu_ids = [], []
         job.shim_pid = job.shim_ticks = job.unit = None
         job.stop_reason = job.stop_requested = job.retry_vram = None
-        job.borrowed_ram = False
+        job.borrowed_ram = job.evicted = False
         job.peak_mem = job.peak_shmem = job.peak_vram = None
         job.sleep_at_start, job.asleep = None, 0.0
         with contextlib.suppress(FileNotFoundError):

@@ -43,9 +43,10 @@ What dibs doesn't do, or does only partly. Each item says what happens and what 
   sleep every queued job has waited its estimate, so newer jobs can't pass any of them. A job dibs
   was stopping when the machine went to sleep is killed as soon as it wakes.
 - **RAM is planned by use, so the machine can run short.** dibs lets jobs start in RAM other jobs
-  reserved but aren't using. If those jobs then grow toward their reservations together, the
-  machine runs out: the kernel then kills a job that started this way (it runs with a high OOM
-  score), and dibs runs it again within RAM nobody reserved, so its work so far is lost.
+  reserved but aren't using. If those jobs (or programs outside dibs) then grow, the machine runs
+  short: dibs stops the newest job that started this way once memory pressure stays high, or the
+  kernel kills it first (it runs with a high OOM score), and dibs runs it again within RAM nobody
+  reserved, so its work so far is lost.
   `borrow_ram = false` plans by reservations only.
 - **Jobs' environments are stored.** To run a job with the submitter's virtualenv and settings,
   dibs keeps its environment, which can include API keys, in `~/.local/state/dibs/dibs.db`. Only
