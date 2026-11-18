@@ -695,6 +695,7 @@ class Daemon:
             else:
                 self._push_stop(job, now)
         self._watch_memory()
+        self._stop_ram_killed(now)
         self._give_back_borrowed(now)
         self._watch_beside(now)
         self._watch_gpus(now)
@@ -774,6 +775,31 @@ class Daemon:
             if held is not None and (job.peak_mem is None or held[0] > job.peak_mem):
                 job.peak_mem, job.peak_shmem = held
                 self.store.update_job(job)
+
+    def _ram_kills(self, job: Job) -> tuple[int, bool]:
+        """How many of a running job's processes the kernel killed for lack of RAM, read from its own
+        scope, and whether at the job's own limit; none when dibs can't see them."""
+        cg = procs.cgroup(job.shim_pid) if job.unit and job.shim_pid else None
+        if not cg or not cg.endswith(f"/{job.unit}.scope"):
+            return 0, False
+        return procs.oom_kills(procs._read(f"{procs.CGROUP_ROOT}{cg}/memory.events"))
+
+    def _stop_ram_killed(self, now: float) -> None:
+        """Stop the rest of a job once the kernel has killed one of its processes for lack of RAM (#125).
+        The kernel kills only the process that went over, and the job's scope lives on so its launcher
+        can report: a parent waiting on a killed worker, like a Python process pool, would wait forever
+        and keep the job's reservation."""
+        for job in self.store.jobs([State.RUNNING]):
+            if job.stop_reason is not None or job.cancel_requested is not None:
+                continue  # already on its way out, for its own reason
+            kills, at_limit = self._ram_kills(job)
+            if not kills:
+                continue
+            job.stop_reason = _ram_kill_reason(job, {"hit_limit": at_limit})
+            job.stop_requested = now
+            self.store.update_job(job)
+            log.info("job %d %s; stopping the rest of it", job.id, job.stop_reason)
+            self._push_stop(job, now)
 
     def _give_back_borrowed(self, now: float) -> None:
         """While jobs run on borrowed RAM and memory pressure stays high, stop the most recently started
@@ -1040,8 +1066,8 @@ class Daemon:
             return
         if job.cancel_requested is not None:
             job.state = State.CANCELLED
-        elif job.exit_code == 0 and job.stop_reason is None:
-            job.state = State.DONE
+        elif job.exit_code == 0 and job.stop_reason is None and not result.get("oom_killed"):
+            job.state = State.DONE  # a process killed for RAM failed it even if the rest exited 0 (#125)
         else:
             job.state = State.FAILED
         if job.stop_reason:

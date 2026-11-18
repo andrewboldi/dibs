@@ -33,6 +33,11 @@ What dibs doesn't do, or does only partly. Each item says what happens and what 
 - **A busy desktop leaves jobs less RAM.** dibs doesn't hand out the RAM other programs use, so with
   a browser holding 12G, jobs share what's left. Close programs to give it back; jobs already
   running keep their reservations.
+- **One process over the RAM limit ends the whole job.** When the kernel kills one of a job's
+  processes for lack of RAM, dibs stops the rest, so a parent waiting on a killed worker can't hang
+  for hours holding the job's reservation. A job built to carry on without a killed process (a sweep
+  that skips a failed trial) fails too. Reserve for the job's peak across all its processes, or run
+  such pieces as jobs of their own.
 - **Files in a folder kept in RAM count as RAM.** What a job writes to /dev/shm, or to /tmp where
   /tmp is a tmpfs, counts against its RAM reservation; a job killed at its limit says so when such
   files were a big part of it. Each job's TMPDIR is a folder of its own that dibs deletes when the job

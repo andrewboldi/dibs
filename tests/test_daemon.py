@@ -385,6 +385,15 @@ def test_memory_stat_parsing():
     assert procs.keyed_numbers(None) == {}
 
 
+def test_memory_events_parsing():
+    # How many of a cgroup's processes the kernel killed for RAM, and whether it reached its own limit.
+    assert procs.oom_kills("low 0\nhigh 0\nmax 3178\noom 170\noom_kill 11\noom_group_kill 0\n") == (11, True)
+    assert procs.oom_kills("oom 0\noom_kill 2\n") == (2, False)  # the machine ran out, not its own limit
+    assert procs.oom_kills("oom 4\noom_kill 0\n") == (0, True)  # at its limit, but the kernel reclaimed enough
+    assert procs.oom_kills("oom_kill x\n") == (0, False)
+    assert procs.oom_kills(None) == (0, False)
+
+
 def test_ram_used_outside_dibs_is_held_back_for_a_few_minutes(make_daemon, tmp_path):
     # Issue #30: the daemon measures the RAM in use outside its jobs and plans with its peak over the
     # last few minutes, so a job doesn't start into RAM a busy program let go of for a moment.
@@ -518,6 +527,99 @@ def test_a_ram_kill_with_little_shared_memory_says_only_that_it_went_over(daemon
     gib = 1 << 30
     killed = _killed_for_ram_holding(daemon, tmp_path, monkeypatch, 8 * gib, int(7.8 * gib), int(0.1 * gib))
     assert killed.reason == "killed: went over its 8G RAM reservation"
+
+
+def _launcher_finds(monkeypatch, job_id, **found):
+    """Add to a job's first report what its launcher reads in its scope's memory.events as it ends. The
+    tests' scopes are plain folders, which a launcher never reads."""
+    real_read_exit = launcher.read_exit
+    seen = []
+
+    def read_exit(paths, i):
+        r = real_read_exit(paths, i)
+        if r and i == job_id and not seen:
+            seen.append(True)
+            return {**r, **found}
+        return r
+
+    monkeypatch.setattr(launcher, "read_exit", read_exit)
+
+
+def test_a_job_is_stopped_whole_once_one_of_its_processes_is_killed_at_its_ram_limit(daemon, tmp_path, monkeypatch):
+    # Issue #125: the kernel kills only the process that went over, and the job's scope lives on so its
+    # launcher can report. A job whose pool waited on its killed workers sat at 0 CPU for three hours.
+    job_id, stat, go = _job_holding(daemon, tmp_path, monkeypatch, 2 * GiB, retry=False)
+    events = stat.parent / "memory.events"
+    events.write_text("low 0\nhigh 0\nmax 40\noom 3\noom_kill 0\n")
+    daemon.tick()
+    assert job(daemon, job_id).stop_requested is None  # it reached its limit, but nothing was killed
+    events.write_text("low 0\nhigh 0\nmax 41\noom 4\noom_kill 1\n")
+    daemon.tick()
+    assert job(daemon, job_id).stop_reason == "killed: went over its 2G RAM reservation"
+    _launcher_finds(monkeypatch, job_id, oom_killed=True, hit_limit=True)
+    run_until(daemon, lambda: finished(daemon, job_id))  # its command would never end by itself
+    j = job(daemon, job_id)
+    assert (j.state, j.reason) == (State.FAILED, "killed: went over its 2G RAM reservation")
+
+
+def test_a_retry_job_stopped_that_way_runs_again_with_more_ram(daemon, tmp_path, monkeypatch):
+    # The same retry, for the same reason, as when the process killed was the job's own command.
+    job_id, stat, go = _job_holding(daemon, tmp_path, monkeypatch, 2 * GiB, retry=True)
+    (stat.parent / "memory.events").write_text("oom 1\noom_kill 1\n")
+    _launcher_finds(monkeypatch, job_id, oom_killed=True, hit_limit=True)
+    run_until(daemon, lambda: job(daemon, job_id).attempts)
+    j = job(daemon, job_id)
+    assert j.request.mem == 3 * GiB
+    assert [a["reason"] for a in j.attempts] == ["killed: went over its 2G RAM reservation; retrying with --mem 3G"]
+    go.touch()
+
+
+def test_a_job_is_stopped_whole_when_the_machine_ran_out_and_killed_one_of_its_processes(daemon, tmp_path, monkeypatch):
+    job_id, stat, go = _job_holding(daemon, tmp_path, monkeypatch, 2 * GiB, retry=False)
+    (stat.parent / "memory.events").write_text("oom 0\noom_kill 2\n")  # not at its own limit
+    daemon.tick()
+    assert job(daemon, job_id).stop_reason == "killed when the machine ran out of RAM"
+    _launcher_finds(monkeypatch, job_id, oom_killed=True, hit_limit=False)
+    run_until(daemon, lambda: finished(daemon, job_id))
+    j = job(daemon, job_id)
+    assert (j.state, j.reason) == (State.FAILED, "killed when the machine ran out of RAM")
+
+
+def test_a_job_that_exits_0_after_one_of_its_processes_was_killed_for_ram_has_failed(daemon, tmp_path, monkeypatch):
+    # Issue #125: such a job was recorded as done, with the reason "killed: went over its RAM
+    # reservation". Part of its work was killed, and dibs stops the rest when it sees the kill first.
+    job_id = submit(daemon, tmp_path, [PY, "-c", "pass"], mem=2 * GiB)
+    _launcher_finds(monkeypatch, job_id, exit_code=0, oom_killed=True, hit_limit=True)
+    run_until(daemon, lambda: finished(daemon, job_id))
+    j = job(daemon, job_id)
+    assert (j.state, j.reason) == (State.FAILED, "killed: went over its 2G RAM reservation")
+
+
+def test_a_job_being_cancelled_stays_cancelled_when_one_of_its_processes_is_killed_for_ram(daemon, tmp_path, monkeypatch):
+    job_id, stat, go = _job_holding(daemon, tmp_path, monkeypatch, 2 * GiB, retry=True)
+    daemon.cancel([job_id])
+    (stat.parent / "memory.events").write_text("oom 1\noom_kill 1\n")
+    _launcher_finds(monkeypatch, job_id, oom_killed=True, hit_limit=True)
+    run_until(daemon, lambda: finished(daemon, job_id))
+    j = job(daemon, job_id)
+    assert (j.state, j.reason, j.attempts) == (State.CANCELLED, "cancelled", [])
+
+
+def test_memory_events_dibs_cant_read_stop_nothing(daemon, tmp_path, monkeypatch):
+    job_id, stat, go = _job_holding(daemon, tmp_path, monkeypatch, 2 * GiB)
+    events = stat.parent / "memory.events"
+    for garbled in (b"oom_kill many\noom ?\n", b"oom_kill\n", b"oom 1\noom_kill \xff\xfe1\n"):
+        events.write_bytes(garbled)
+        daemon.tick()
+    events.unlink()
+    events.mkdir()  # can't be read as a file
+    daemon.tick()
+    assert job(daemon, job_id).stop_requested is None
+    other = submit(daemon, tmp_path, [PY, "-c", "pass"])
+    run_until(daemon, lambda: finished(daemon, other))  # and scheduling went on
+    go.touch()
+    run_until(daemon, lambda: finished(daemon, job_id))
+    assert job(daemon, job_id).state == State.DONE
 
 
 def test_time_the_machine_slept_is_not_run_time(make_daemon, tmp_path, monkeypatch):

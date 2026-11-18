@@ -388,7 +388,9 @@ plainly.
   mechanism: run the shim inside the scope and pass `-p OOMPolicy=continue` (without it, systemd
   stops the whole scope after the OOM kill and the shim dies with SIGTERM before it can report);
   after the command exits, the shim reads its own cgroup's `memory.events` (`oom_kill 1`) and
-  `memory.peak`. Never use `RLIMIT_AS`: CUDA reserves huge virtual address ranges and breaks under
+  `memory.peak`. The kernel kills only the process that went over, so the daemon also reads each
+  running job's `memory.events` and stops the rest of the job once it shows a kill (#125); otherwise
+  a parent waiting on a killed worker hangs. Never use `RLIMIT_AS`: CUDA reserves huge virtual address ranges and breaks under
   it. Without systemd (containers, macOS, some CI): RAM is not enforced, and `dibs info` says so.
 - **VRAM (watched, not capped).** Consumer NVIDIA GPUs have no per-process VRAM limit. dibs polls
   the GPUs' compute processes about once a second (section 10.4 on how), maps pids to jobs (via the

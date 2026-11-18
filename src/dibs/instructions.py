@@ -39,7 +39,8 @@ when those resources are free, so jobs never crash each other by running out of 
 
 - `--cpus N`: CPU cores. The job is pinned to exactly these, and OMP_NUM_THREADS and friends are
   set to N.
-- `--mem SIZE`: RAM, like 16G or 512M. Where the system allows it, a job that goes over is killed.
+- `--mem SIZE`: RAM, like 16G or 512M. Where the system allows it, a job that goes over is killed,
+  all of it, even when only one of its processes went over.
   While a running job uses less than it reserved, dibs may start --retry jobs in the difference; if
   the machine then runs short, a job started that way is the one stopped, and dibs runs it again.
 - `--vram SIZE`: GPU memory on each GPU it uses. Leave it out for a CPU-only job, which then

@@ -131,12 +131,8 @@ def main(argv: list[str]) -> int:
     if in_scope:
         usage = procs.keyed_numbers(_cgroup_file("cpu.stat")).get("usage_usec")
         cpu_seconds = usage / 1e6 if usage is not None else None
-        for line in (_cgroup_file("memory.events") or "").splitlines():
-            key, _, count = line.partition(" ")
-            if key == "oom_kill" and count.strip() not in ("", "0"):
-                oom_killed = True
-            if key == "oom" and count.strip() not in ("", "0"):
-                hit_limit = True  # its own limit; an OOM kill without this was the machine running out
+        kills, hit_limit = procs.oom_kills(_cgroup_file("memory.events"))
+        oom_killed = kills > 0  # hit_limit False: the machine ran out, not the job's own limit
         peak = _cgroup_file("memory.peak")
         if peak and peak.strip().isdigit():
             # memory.peak counts file cache; take off what's still cached, like the daemon's samples
