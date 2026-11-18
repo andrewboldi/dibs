@@ -684,13 +684,13 @@ def test_submit_tells_the_session_how_its_estimates_compared(daemon, tmp_path):
     assert "estimates" not in daemon.submit(req(tmp_path, [PY, "-c", "pass"], session="s2"))  # too few to say
 
 
-def _borrowing(make_daemon, tmp_path, monkeypatch, *, ran, pressure=0.0, config=None):
+def _borrowing(make_daemon, tmp_path, monkeypatch, *, ran, pressure=0.0, config=None, now=None):
     """Job A reserves 12G of 16G and has used 2G after `ran` seconds; job B then asks for 8G."""
     from dibs.machine import Config
 
-    now = [time.time()]
+    now = now or [time.time()]
     d = make_daemon(config=config or Config(), clock=lambda: now[0], meminfo=lambda: (16 * GiB, 2 * GiB),
-                    pressure=lambda: pressure)  # fmt: skip
+                    pressure=pressure if callable(pressure) else (lambda: pressure))  # fmt: skip
     a, stat, go = _job_holding(d, tmp_path, monkeypatch, 12 * GiB)
     stat.write_text(f"anon {2 * GiB}\nshmem 0\n")
     now[0] += 1
@@ -750,6 +750,48 @@ def test_a_borrower_killed_when_the_machine_ran_out_is_retried_without_borrowing
     )
     d.tick()
     assert job(d, b).state == State.QUEUED  # 8G doesn't fit beside A's 12G without borrowing
+    go.touch()
+
+
+def test_a_borrower_killed_for_borrowing_is_retried_even_out_of_retries(make_daemon, tmp_path, monkeypatch):
+    # Issue #114: dibs chose to start it on borrowed RAM, so the kill isn't the job's to pay for.
+    d, a, b, go = _borrowing(make_daemon, tmp_path, monkeypatch, ran=700)
+    j = job(d, b)
+    j.attempts = [{"reason": "an earlier try"}, {"reason": "another"}]
+    d.store.update_job(j)
+    real_read_exit = launcher.read_exit
+
+    def read_exit(paths, i):
+        r = real_read_exit(paths, i)
+        return {**r, "exit_code": 137, "oom_killed": True, "hit_limit": False} if r and i == b else r
+
+    monkeypatch.setattr(launcher, "read_exit", read_exit)
+    run_until(d, lambda: len(job(d, b).attempts) == 3)
+    assert (job(d, b).state, job(d, b).no_borrow) == (State.QUEUED, True)
+    go.touch()
+
+
+def test_under_memory_pressure_dibs_gives_borrowed_ram_back(make_daemon, tmp_path, monkeypatch):
+    # Issue #114: the machine thrashed for five minutes before the kernel's OOM killer acted. Under
+    # sustained pressure dibs stops the newest borrower itself and runs it again without borrowing.
+    level, now = [0.0], [time.time()]
+    d, a, b, go = _borrowing(make_daemon, tmp_path, monkeypatch, ran=700, pressure=lambda: level[0], now=now)
+    assert job(d, b).borrowed_ram
+    level[0] = 60.0
+    d.tick()
+    now[0] += 5.0
+    d.tick()
+    assert job(d, b).stop_requested is None  # not on a moment's pressure
+    now[0] += 6.0
+    d.tick()
+    assert job(d, b).stop_reason == "stopped to give back borrowed RAM: the machine was short of memory"
+    run_until(d, lambda: job(d, b).attempts)
+    j = job(d, b)
+    assert (j.state, j.no_borrow) == (State.QUEUED, True)
+    assert j.attempts[0]["reason"] == (
+        "stopped to give back borrowed RAM: the machine was short of memory; retrying without borrowing"
+    )
+    assert not job(d, a).stop_requested  # the job that reserved the RAM keeps running
     go.touch()
 
 
