@@ -54,6 +54,8 @@ RETENTION_EVERY = 3600.0
 MAX_RETRIES = 2  # runs again after a resource failure, at most (#84)
 YOUNG = 600.0  # seconds: a job with no earlier runs counts at its whole RAM reservation this long (#86)
 PRESSURE_LIMIT = 10.0  # percent (PSI some avg10): above it, no job starts on borrowed RAM
+MOMENTUM_SHARE = 0.25  # under momentum, a session's jobs count as this share of their estimates (#94)
+MOMENTUM_MAX = 12 * 3600.0  # seconds a grant may last
 EARLY_STOP = 60.0  # seconds: a job stopped for VRAM sooner than this was likely still growing (#80)
 ALIVE_EVERY = 60.0  # seconds: how often the daemon notes it's alive, so a reboot can be dated (#78)
 RECENT = 86400.0  # how far back `queue --all` looks
@@ -209,7 +211,9 @@ class Daemon:
         backlog = [j.plain_tag if j.plain_tag is not None else j.tag for j in own if j.priority >= priority]
         start = max([now, *backlog])
         passed = [j for j in own if j.priority < priority and (j.plain_tag if j.plain_tag is not None else j.tag) > start]
-        carried, left = self._owed(session, now), next_owed(request.time, priority)
+        momentum = self._momentum(now)
+        counted = request.time * (MOMENTUM_SHARE if momentum and momentum["session"] == session else 1.0)
+        carried, left = self._owed(session, now), next_owed(counted, priority)
         job = Job(
             id=0,
             name=req.get("name") or default_name(argv),
@@ -220,9 +224,9 @@ class Daemon:
             session=session,
             session_label=req.get("session_label") or session[:4],
             submitted=now,
-            tag=compute_tag(now, request.time, backlog, priority, carried),
+            tag=compute_tag(now, counted, backlog, priority, carried),
             priority=priority,
-            plain_tag=compute_tag(now, request.time, backlog),
+            plain_tag=compute_tag(now, counted, backlog),
             retry=req.get("retry") is not False,
             owed_carried=carried,
             owed_left=left,
@@ -233,9 +237,9 @@ class Daemon:
         self.store.add_job(job)
         self.store.set_meta(f"owed:{session}", json.dumps({"owed": left, "time": now}))
         for j in passed:  # zero-sum within the session: the jobs it went ahead of move back by its estimate
-            j.tag += request.time
+            j.tag += counted
             if j.plain_tag is not None:
-                j.plain_tag += request.time
+                j.plain_tag += counted
             self.store.update_job(j)
         self.paths.job_dir(job.id).mkdir(mode=0o700, parents=True, exist_ok=True)
         if not job.output:
@@ -300,6 +304,54 @@ class Daemon:
             if j.session != job.session
         )
 
+    def _momentum(self, now: float) -> dict | None:
+        """The current momentum grant, if one hasn't run out (#94)."""
+        grant = json.loads(self.store.get_meta("momentum") or "null")
+        return grant if grant and now < grant["until"] else None
+
+    def momentum(self, req: dict) -> dict:
+        """Momentum (#94): for a project working better than expected and held up by another project's
+        jobs, after the user's yes. While it lasts, the session's jobs count as a quarter of their
+        estimates, with no payback; one project at a time. Actions: show, grant, end."""
+        now = self.clock()
+        current = self._momentum(now)
+        action = req.get("action") or "show"
+        if action == "show":
+            return {"ok": True, "momentum": current}
+        if action == "end":
+            self.store.set_meta("momentum", "null")
+            if current:
+                self.store.add_event("momentum", {**current, "ended": now}, now)
+            return {"ok": True, "momentum": None}
+        session = req.get("session") or "unknown"
+        why, seconds = (req.get("why") or "").strip(), req.get("seconds")
+        if not why:
+            return _rejected("say why in a sentence: what is going better than expected, and that the user agreed")
+        if isinstance(seconds, bool) or not isinstance(seconds, (int, float)) or not 60 <= seconds <= MOMENTUM_MAX:
+            return _rejected("momentum lasts from a minute to 12 hours")
+        if current and current["session"] != session:
+            until = time.strftime("%H:%M", time.localtime(current["until"]))
+            return _rejected(f"another project already has momentum ({current['label']}, until {until})")
+        _, running, queued = self._plan(now)
+        mine = [j for j in queued if j.session == session]
+        if not mine:
+            return _rejected("momentum is for a project held up by others: nothing of yours is waiting")
+        if not any(j.session != session for j in running):
+            return _rejected("momentum is for a project held up by others: only your own jobs are running")
+        grant = {"session": session, "label": req.get("session_label") or session[:4], "granted": now,
+                 "until": now + float(seconds), "why": why}  # fmt: skip
+        self.store.set_meta("momentum", json.dumps(grant))
+        self.store.add_event("momentum", grant, now)
+        for j in mine:  # its waiting jobs count as a quarter of their estimates from now on
+            pull = (1 - MOMENTUM_SHARE) * j.request.time
+            j.tag = max(j.submitted, j.tag - pull)
+            if j.plain_tag is not None:
+                j.plain_tag = max(j.submitted, j.plain_tag - pull)
+            self.store.update_job(j)
+        log.info("momentum for %s until %s: %s", grant["label"], time.strftime("%H:%M", time.localtime(grant["until"])), why)
+        self.schedule()
+        return {"ok": True, "momentum": grant}
+
     def _owed(self, session: str, now: float) -> float:
         """What the session's previous job left it (see model.next_owed), if it was within OWED_FOR."""
         entry = json.loads(self.store.get_meta(f"owed:{session}") or "{}")
@@ -363,6 +415,7 @@ class Daemon:
             "jobs": [self._view(j, now, current) for j in jobs],
             "capacity": self._capacity(),
             "guard": {"mode": self.config.guard, "stopped": stopped, "outside": self.outside},
+            "momentum": self._momentum(now),
         }
 
     def info(self) -> dict:
@@ -466,6 +519,8 @@ class Daemon:
                 return await self._wait([int(i) for i in request["ids"]], request.get("timeout"))
             if op == "info":
                 return self.info()
+            if op == "momentum":
+                return self.momentum(request)
             if op == "shutdown":
                 if self._stop is not None:
                     self._stop.set()

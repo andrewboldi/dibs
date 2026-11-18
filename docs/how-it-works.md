@@ -68,6 +68,12 @@ runs with a high OOM score: if the machine runs out of RAM after all, the kernel
 than anything else, and dibs runs it again within RAM nobody reserved. No job starts this way while
 the machine is short of memory (PSI some avg10 above 10%). `borrow_ram = false` turns it off.
 
+**Momentum.** For a project working better than expected and held up by another project's jobs,
+the user can agree to a boost: the agent asks them in plain words and, after their yes, records it
+with `dibs momentum --for 6h --why "…"`. dibs accepts it only while another project's jobs are in
+the way, for one project at a time; the project's jobs then count as a quarter of their estimates,
+with no payback, until it runs out. `dibs queue` shows it, and every grant is logged.
+
 **The guard.** It stops GPU processes that aren't dibs jobs. It leaves alone other users'
 processes, programs listed in `guard_allow`, programs launched from the desktop, and work that was
 already running when it was switched on (including what that work starts later, like torchrun

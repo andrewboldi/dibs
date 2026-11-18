@@ -187,6 +187,12 @@ def guard_lines(guard: dict, now: float) -> list[str]:
     return lines
 
 
+def render_momentum(grant: dict | None, now: float) -> str:
+    if not grant:
+        return "No project has momentum."
+    return f"Momentum: {grant['label']} until {when(grant['until'], now)}: {grant['why']}"
+
+
 def render_queue(snapshot: dict, *, color: bool) -> str:
     now = snapshot["now"]
     header = ["JOB", "STATE", "SESSION", "NAME", "CPU", "RAM", "VRAM", "EST", "WHEN"]
@@ -222,6 +228,8 @@ def render_queue(snapshot: dict, *, color: bool) -> str:
             lines.append("  ".join([*cells, r[-1]]).rstrip())
     else:
         lines.append("Nothing running or queued.")
+    if momentum := snapshot.get("momentum"):  # #94
+        lines += ["", render_momentum(momentum, now)]
     extra = guard_lines(snapshot.get("guard", {}), now)
     if extra:
         lines += ["", *extra]

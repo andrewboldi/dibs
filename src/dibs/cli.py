@@ -107,6 +107,15 @@ def build_parser() -> argparse.ArgumentParser:
         if name == "submit":
             s.add_argument("--json", action="store_true", help="print the job as JSON")
 
+    m = sub.add_parser(
+        "momentum", help="show, record or end momentum: a rare boost for a project, after the user's yes",
+        description="Momentum is for a project working better than expected and held up by another project's jobs, "
+        "with more experiments to run. Ask the user first; record it only after they say yes.",
+    )  # fmt: skip
+    m.add_argument("--for", dest="duration", type=_duration, metavar="DURATION", help="record it for this long, like 6h")
+    m.add_argument("--why", help="what is going better than expected, and that the user agreed")
+    m.add_argument("--end", action="store_true", help="end it now")
+
     q = sub.add_parser("queue", aliases=["q"], help="running and queued jobs, with predicted start times")
     q.add_argument("--all", action="store_true", help="also show jobs that finished in the last day")
     q.add_argument("--mine", action="store_true", help="only this session's jobs")
@@ -253,6 +262,22 @@ def cmd_run(args, paths: Paths, command: list[str]) -> int:
     if finished["state"] != "done":
         print(f"dibs: {render.finished_line(finished)}", file=sys.stderr)
     return render.exit_code(finished)
+
+
+def cmd_momentum(args, paths: Paths, _) -> int:
+    client = dc.Client(paths)
+    if args.end:
+        client.call("momentum", action="end")
+        print("Momentum ended.")
+        return 0
+    if args.duration is None:
+        print(render.render_momentum(client.call("momentum", action="show")["momentum"], time.time()))
+        return 0
+    session, label = dc.current_session(os.environ, os.getcwd())
+    grant = client.call("momentum", action="grant", session=session, session_label=label,
+                        seconds=args.duration, why=args.why)["momentum"]  # fmt: skip
+    print(f"{grant['label']} has momentum until {render.when(grant['until'], time.time())}.")
+    return 0
 
 
 def cmd_queue(args, paths: Paths, _) -> int:
@@ -473,6 +498,7 @@ HANDLERS = {
     "run": cmd_run,
     "queue": cmd_queue,
     "q": cmd_queue,
+    "momentum": cmd_momentum,
     "show": cmd_show,
     "status": cmd_show,
     "wait": cmd_wait,

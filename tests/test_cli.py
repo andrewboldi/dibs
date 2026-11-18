@@ -275,6 +275,19 @@ def test_submit_exclusive(dibs):
     dibs("cancel", str(busy), str(timing["id"]), check=0)
 
 
+def test_momentum_command(dibs):
+    # Issue #94
+    out = dibs("momentum", check=0).stdout
+    assert "No project has momentum." in out
+    busy = js(dibs("submit", *RES, "--cpus", "all", "--json", "--", "sleep", "30", env={"DIBS_SESSION": "other"}, check=0))["id"]
+    mine = js(dibs("submit", *RES, "--json", "--", "true", env={"DIBS_SESSION": "s1"}, check=0))["id"]
+    out = dibs("momentum", "--for", "2h", "--why", "beats the baseline; the user said yes", env={"DIBS_SESSION": "s1"}, check=0).stdout
+    assert "has momentum until" in out
+    assert "Momentum:" in dibs("queue", check=0).stdout
+    dibs("momentum", "--end", check=0)
+    dibs("cancel", str(busy), str(mine), check=0)
+
+
 def test_session_from_claude_env(dibs):
     env = {"CLAUDE_CODE_SESSION_ID": "abcd1234-5678-90ab-cdef-1234567890ab"}
     job = js(dibs("submit", *RES, "--json", "--", "true", env=env, check=0))
