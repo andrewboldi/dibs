@@ -59,7 +59,9 @@ when those resources are free, so jobs never crash each other by running out of 
 - `--name LABEL` to label it, `-o FILE` to write its output somewhere you choose.
 - `--exclusive` for a timing run (a benchmark): nothing else runs beside the job, so other jobs can't
   disturb the measurement. It waits until no other job is running, so use it only when you need
-  the timing. --cpus, --mem and --vram still say what the job itself gets.
+  the timing. --cpus, --mem and --vram still say what the job itself gets. Programs outside dibs can
+  still run: `dibs show ID` says how busy they kept the machine beside it, so you can rerun a timing
+  that was disturbed.
 - `--replace ID` to change a job that's still waiting (a smaller request, a fixed command): dibs
   cancels ID and queues the new job in one step. Cancelling first and then submitting can let
   another job start in the gap and keep the resources.

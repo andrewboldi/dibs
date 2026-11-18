@@ -165,6 +165,16 @@ def memory_in_use(cgroup_path: str) -> tuple[int, int] | None:
     return stat["anon"] + shmem, shmem
 
 
+def cpu_busy_seconds() -> float | None:
+    """CPU time the whole machine has spent busy since boot, in core-seconds (from /proc/stat)."""
+    for line in (_read("/proc/stat") or "").splitlines():
+        if line.startswith("cpu "):
+            fields = [int(x) for x in line.split()[1:]]
+            user, nice, system, _idle, _iowait, irq, softirq, steal = (fields + [0] * 8)[:8]
+            return (user + nice + system + irq + softirq + steal) / os.sysconf("SC_CLK_TCK")
+    return None
+
+
 def memory_pressure() -> float:
     """The share of the last 10 s in which some task waited for memory, in percent (PSI, "some
     avg10"); 0 where the kernel doesn't report it."""
