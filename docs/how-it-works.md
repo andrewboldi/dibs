@@ -28,7 +28,8 @@ estimate is assumed to need another 10% of it (at least a minute), and nothing i
 running long: the estimate only orders the queue. `dibs top` draws the timeline live. Its meters
 show, for CPU, RAM and each GPU, what jobs reserved (in their colours), what programs outside dibs
 use (grey) and what's free, and its load row the machine's busy cores over the last 10 minutes. RAM in use outside dibs is never handed out; CPU busy outside dibs is
-only shown, since dibs still starts a job on cores another program keeps busy.
+only shown, since dibs still starts a job on cores another program keeps busy: the job's threads
+then come first on them (#152).
 
 **Priority.** `--priority N` (1 to 10, default 5) lets an agent say a job is urgent. A higher
 priority makes the job count as shorter in line (at 10, a tenth of its estimate), so it goes ahead
@@ -43,7 +44,7 @@ that always picks 10 gains nothing after its first job. What a session owes laps
 
 | | How | Where |
 |---|---|---|
-| CPU cores | pinned to its cores; `OMP_NUM_THREADS` and the like set to match | Linux |
+| CPU cores | pinned to its cores, with first claim on them (its scope's `CPUWeight` is 1000, other programs' 100); `OMP_NUM_THREADS` and the like set to match | Linux (first claim: systemd user session) |
 | RAM | its own systemd scope with `MemoryMax` and no swap; going over kills the job, not its neighbours, and when the kernel kills only one of its processes, dibs stops the rest within a second or two (with `--retry`, dibs runs it again with more) | systemd user session |
 | VRAM | watched every second; a job may borrow VRAM nobody reserved, and one that reaches another job's is stopped, with the reason (with `--retry`, run again with more) | NVIDIA (NVML or nvidia-smi), AMD (amd-smi) |
 | Which GPUs | `CUDA_VISIBLE_DEVICES` (NVIDIA) or `ROCR_VISIBLE_DEVICES` (AMD) shows a job only its GPUs, and none to a job without `--vram` | |
