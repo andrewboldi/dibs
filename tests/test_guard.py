@@ -600,15 +600,15 @@ def test_in_warn_mode_a_big_program_is_only_logged(short_world, spawned):
 
 
 def test_ram_stop_message_says_why_and_how_to_keep_it_from_happening_again():
-    text = guard.ram_stop_message(4121, ["python", "align.py", "--reads", "r.jsonl"], int(14.1 * GiB),
+    text = guard.ram_stop_message(4121, ["python", "prepare.py", "--shards", "8"], int(14.1 * GiB),
                                   int(0.8 * GiB), int(30.6 * GiB))  # fmt: skip
     assert text == (
-        "dibs: stopped `python align.py --reads r.jsonl` (pid 4121): it held 14.1G of RAM outside dibs while "
+        "dibs: stopped `python prepare.py --shards 8` (pid 4121): it held 14.1G of RAM outside dibs while "
         "the machine was running out of memory (819M of 30.6G left).\n"
         "dibs: Programs outside dibs get no RAM set aside, so left running it would have stalled every program "
         "here until the kernel killed it, or something else.\n"
         "dibs: So it doesn't happen again, run it as a job: a job gets the RAM it reserves.\n"
-        "dibs:   dibs run --cpus N --mem 16G --time ESTIMATE -- python align.py --reads r.jsonl\n"
+        "dibs:   dibs run --cpus N --mem 16G --time ESTIMATE -- python prepare.py --shards 8\n"
         "dibs: Run every step that may need more than a few GB of RAM through dibs, not only GPU work. "
         "`dibs agent-help` explains how to choose N, --mem and ESTIMATE."
     )
