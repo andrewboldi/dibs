@@ -47,9 +47,10 @@ when those resources are free, so jobs never crash each other by running out of 
   shorter jobs go first, and once a job's place in line comes due (at the default priority, after
   waiting its estimate) newer jobs can't pass it. Nothing is ever stopped for running longer than its estimate.
 - `--priority N`: 1 to 10, default 5. A higher priority makes the job count as shorter in line, so
-  it goes ahead sooner; your session's next job pays that time back. Keep 5 unless a person is
-  waiting on this job right now (then 8-10), or nobody is waiting at all (then lower, which earns
-  your next job a head start).
+  it goes ahead sooner, including ahead of your own waiting jobs of lower priority (that part is
+  free). When it goes ahead of another agent's job, your session's later jobs pay that time back.
+  Keep 5 unless a person is waiting on this job right now (then 8-10), or nobody is waiting at all
+  (then lower, which earns your next job a head start for as long as this one waited).
 - `all` works for --cpus, --mem and --vram when a job needs the whole machine or a whole GPU.
 - `--name LABEL` to label it, `-o FILE` to write its output somewhere you choose.
 - `--exclusive` for a timing run (a benchmark): nothing else runs beside the job, so other jobs can't

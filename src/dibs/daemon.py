@@ -24,6 +24,7 @@ from dibs import __version__, build_id, guard, launcher, procs
 from dibs.gpu import GpuBackend, open_backend
 from dibs.machine import Config, ConfigError, build_capacity, detect_cpus, detect_mem, load_config
 from dibs.model import (
+    CREDIT_MAX,
     TERMINAL,
     Capacity,
     Job,
@@ -178,12 +179,13 @@ class Daemon:
             self._cancel_job(replaced, now)
         session = req.get("session") or "unknown"
         # The session's queued jobs' priority-5 places: lining up behind boosted tags would pass each
-        # boost down the line, and the time a job saved would never be paid back.
-        backlog = [
-            j.plain_tag if j.plain_tag is not None else j.tag
-            for j in self.store.jobs([State.QUEUED])
-            if j.session == session
-        ]
+        # boost down the line, and the time a job saved would never be paid back. Only those of at
+        # least its priority: it goes ahead of the session's own lower-priority jobs (#91).
+        own = [j for j in self.store.jobs([State.QUEUED]) if j.session == session]
+        backlog = [j.plain_tag if j.plain_tag is not None else j.tag for j in own if j.priority >= priority]
+        start = max([now, *backlog])
+        passed = [j for j in own if j.priority < priority and (j.plain_tag if j.plain_tag is not None else j.tag) > start]
+        carried, left = self._owed(session, now), next_owed(request.time, priority)
         job = Job(
             id=0,
             name=req.get("name") or default_name(argv),
@@ -194,15 +196,22 @@ class Daemon:
             session=session,
             session_label=req.get("session_label") or session[:4],
             submitted=now,
-            tag=compute_tag(now, request.time, backlog, priority, self._owed(session, now)),
+            tag=compute_tag(now, request.time, backlog, priority, carried),
             priority=priority,
             plain_tag=compute_tag(now, request.time, backlog),
             retry=req.get("retry") is not False,
+            owed_carried=carried,
+            owed_left=left,
             state=State.QUEUED,
             output=output or "",
         )
         self.store.add_job(job)
-        self.store.set_meta(f"owed:{session}", json.dumps({"owed": next_owed(request.time, priority), "time": now}))
+        self.store.set_meta(f"owed:{session}", json.dumps({"owed": left, "time": now}))
+        for j in passed:  # zero-sum within the session: the jobs it went ahead of move back by its estimate
+            j.tag += request.time
+            if j.plain_tag is not None:
+                j.plain_tag += request.time
+            self.store.update_job(j)
         self.paths.job_dir(job.id).mkdir(mode=0o700, parents=True, exist_ok=True)
         if not job.output:
             job.output = str(self.paths.job_dir(job.id) / "output.log")
@@ -224,6 +233,38 @@ class Daemon:
         response["earlier"] = [job_to_dict(j) for j in earlier[:3]]
         response["earlier_match"] = match
         return response
+
+    def _add_owed(self, session: str, delta: float, now: float) -> None:
+        if delta:
+            owed = max(-CREDIT_MAX, self._owed(session, now) + delta)
+            self.store.set_meta(f"owed:{session}", json.dumps({"owed": owed, "time": now}))
+
+    def _settle_priority(self, job: Job, now: float) -> None:
+        """When a job starts, settle its priority against how long it really waited (#90, #91): debt it
+        carried is paid only by waiting, and the rest rolls on to the session's next job; credit for a
+        lowered priority counts only as far as it waited; and a boost that passed no other session's
+        job costs nothing."""
+        if job.owed_settled:
+            return
+        job.owed_settled = True
+        waited = max(0.0, now - job.submitted)
+        delta = 0.0
+        if job.owed_carried > 0:
+            delta += job.owed_carried - min(job.owed_carried, waited)
+        if job.owed_left < 0:
+            delta += -job.owed_left - min(-job.owed_left, waited)
+        if job.owed_left > 0 and not self._passed_another_session(job):
+            delta -= job.owed_left
+        self._add_owed(job.session, delta, now)
+
+    def _passed_another_session(self, job: Job) -> bool:
+        """Whether another session's job is still waiting that, without priorities, would have gone first."""
+        mine = job.plain_tag if job.plain_tag is not None else job.tag
+        return any(
+            (j.plain_tag if j.plain_tag is not None else j.tag) < mine
+            for j in self.store.jobs([State.QUEUED])
+            if j.session != job.session
+        )
 
     def _owed(self, session: str, now: float) -> float:
         """What the session's previous job left it (see model.next_owed), if it was within OWED_FOR."""
@@ -250,6 +291,8 @@ class Daemon:
         if job.state == State.QUEUED:
             job.state, job.ended, job.reason = State.CANCELLED, now, "cancelled"
             self.store.update_job(job)
+            # It never ran: it hands back what it carried and takes back what it left (#90).
+            self._add_owed(job.session, job.owed_carried - job.owed_left, now)
             self._notify(job)
             return True
         if job.state == State.RUNNING:
@@ -474,6 +517,7 @@ class Daemon:
             job.cpu_ids, job.gpu_ids = list(start.cpu_ids), list(start.gpu_ids)
             job.started, job.state = now, State.RUNNING
             job.sleep_at_start = self.slept()
+            self._settle_priority(job, now)
             self.store.update_job(job)
             try:
                 job.shim_pid, job.shim_ticks, job.unit = launcher.launch(

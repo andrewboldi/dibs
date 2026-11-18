@@ -88,6 +88,9 @@ class Job:
     retry: bool = True  # dibs may run it again after a resource failure (#84)
     attempts: list[dict] = field(default_factory=list)  # earlier runs that failed for a resource reason
     retry_vram: int | None = None  # the VRAM a stop for going over the reservation advises
+    owed_carried: float = 0.0  # what its session owed (or was owed) when it was submitted, in its place
+    owed_left: float = 0.0  # what it left its session's next job: payback for a boost, credit for less
+    owed_settled: bool = False  # whether the two were settled against its real wait, when it started
 
 
 class RequestError(ValueError):
