@@ -11,12 +11,14 @@ panel: rounded panels with their titles in the borders, like btop.
   meter. A load row is a sparkline of the machine's busy cores over the last 10 minutes, the newest
   on the right. The clock is in the top border; the GPU name and the guard mode are in the bottom
   border.
-- **running N**: one row per job: its id, name, session (on terminals of 114 columns or more), CPUs,
+- **running N**: one row per job: its id, name (as wide as the longest shown, 13 to 24 characters as
+  the width allows, #143), session (on terminals of 114 columns or more), CPUs,
   RAM and VRAM under labels in the panel's top border, when it ends, and a bar of its time so far
   against its estimate. A job past its estimate gets a full bar and "over by X", in gold.
 - **waiting N**: the same columns and when it starts, then its slot on the plan's timeline, whose
-  time axis is the panel's top border, then why it waits. The reason leaves out the RAM in use
-  outside dibs, which the mem meter already shows.
+  time axis is the panel's top border, then why it waits, in a few words: "needs RAM, VRAM" (its
+  sizes are in its row, and the meters say what's in use) or "behind #918", the job ahead in line it
+  would delay (#143). dibs queue keeps the planner's full sentence.
 - **guard**: what the guard stopped or left alone, only when there is something.
 - Panels that can't show every job say "N more" in their bottom border.
 

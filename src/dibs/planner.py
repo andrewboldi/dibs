@@ -53,6 +53,8 @@ class Prediction:
     end: float | None
     gpu_ids: tuple[int, ...]
     reason: str  # why it isn't starting now; "" if it is
+    lacks: tuple[str, ...] = ()  # what it waits for, in a word each: CPUs, RAM, VRAM, GPUs (#143)
+    behind: int | None = None  # the job ahead in line it would delay by starting now (#143)
 
 
 @dataclass(frozen=True)
@@ -203,35 +205,40 @@ def plan(
             )
             continue
         if q.job_id not in placed:  # waits for programs outside dibs to free RAM
-            reason = _reason(q, order, placed, now, now_cpus, now_mem, now_vram, outside_mem)
-            predictions[q.job_id] = Prediction(q.job_id, position, None, None, (), reason)
+            reason, lacks, behind = _reason(q, order, placed, now, now_cpus, now_mem, now_vram, outside_mem)
+            predictions[q.job_id] = Prediction(q.job_id, position, None, None, (), reason, lacks, behind)
             continue
         start, end, gpu_ids = placed[q.job_id]
-        reason = ""
+        reason, lacks, behind = "", (), None
         if start > now and q.request.exclusive:
             reason = f"needs the machine to itself ({_plural(len(running), 'job')} running)"
         elif start > now and blocker is not None:
             reason = f"waits for #{blocker}, which has the machine to itself"
         elif start > now:
-            reason = _reason(q, order, placed, now, now_cpus, now_mem, now_vram, outside_mem)
-        predictions[q.job_id] = Prediction(q.job_id, position, start, end, gpu_ids, reason)
+            reason, lacks, behind = _reason(q, order, placed, now, now_cpus, now_mem, now_vram, outside_mem)
+        predictions[q.job_id] = Prediction(q.job_id, position, start, end, gpu_ids, reason, lacks, behind)
 
     return Plan(starts, predictions, running_ends)
 
 
-def _reason(q, order, placed, now, free_cpus, free_mem, free_vram, outside_mem=0) -> str:
+def _reason(q, order, placed, now, free_cpus, free_mem, free_vram, outside_mem=0) -> tuple[str, tuple[str, ...], int | None]:
+    """Why a queued job isn't starting now, and the same in a word or two for dibs top: what it lacks,
+    and the job ahead in line it would delay."""
     req = q.request
-    short = []
+    short, lacks = [], []
     if req.cpus > free_cpus:
         short.append(f"{_plural(req.cpus, 'CPU')} ({max(free_cpus, 0)} free)")
+        lacks.append("CPUs")
     if req.mem > free_mem:
         outside = f", {format_size(outside_mem)} in use outside dibs" if outside_mem else ""
         left = format_size_against(max(free_mem, 0), req.mem)
         short.append(f"{format_size(req.mem)} RAM ({left} free{outside})")
+        lacks.append("RAM")
     if req.gpus:
         roomy = sum(1 for free in free_vram if free >= req.vram)
         if roomy < req.gpus:
             vram = format_size(req.vram)
+            lacks.append("GPUs" if req.gpus > 1 else "VRAM")
             if req.gpus > 1:
                 short.append(f"{req.gpus} GPUs with {vram} VRAM free ({roomy} {'has' if roomy == 1 else 'have'} it)")
             else:
@@ -239,12 +246,12 @@ def _reason(q, order, placed, now, free_cpus, free_mem, free_vram, outside_mem=0
                 where = f"{most} free" if len(free_vram) == 1 else f"at most {most} free on one GPU"
                 short.append(f"{vram} VRAM ({where})")
     if short:
-        return "needs " + ", ".join(short)
+        return "needs " + ", ".join(short), tuple(lacks), None
     for ahead in order:
         if ahead is q:
             break
         if ahead.job_id in placed:
             start, _, _ = placed[ahead.job_id]
             if now < start < now + req.time:
-                return f"would delay #{ahead.job_id}, which is ahead in line"
-    return "waiting for a job ahead in line"
+                return f"would delay #{ahead.job_id}, which is ahead in line", (), ahead.job_id
+    return "waiting for a job ahead in line", (), None

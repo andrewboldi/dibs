@@ -1287,6 +1287,8 @@ class Daemon:
                 predicted_start=p.start if p else None,
                 predicted_end=p.end if p else None,
                 waiting_for=p.reason if p else "",
+                lacks=list(p.lacks) if p else [],
+                behind=p.behind if p else None,
             )
         elif job.state == State.RUNNING:
             started = (job.started or now) + self._asleep(job)
