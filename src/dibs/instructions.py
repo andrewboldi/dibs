@@ -47,6 +47,7 @@ when those resources are free, so jobs never crash each other by running out of 
 - `--time DURATION`: your honest estimate, like 90s, 20m or 1h30m. It only decides the order:
   shorter jobs go first, and once a job's place in line comes due (at the default priority, after
   waiting its estimate) newer jobs can't pass it. Nothing is ever stopped for running longer than its estimate.
+  `dibs submit` tells you when your session's recent jobs ran well under or over their estimates.
 - `--priority N`: 1 to 10, default 5. A higher priority makes the job count as shorter in line, so
   it goes ahead sooner, including ahead of your own waiting jobs of lower priority (that part is
   free). When it goes ahead of another agent's job, your session's later jobs pay that time back.

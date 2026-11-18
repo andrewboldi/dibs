@@ -218,6 +218,8 @@ def cmd_submit(args, paths: Paths, command: list[str]) -> int:
             print(f"It replaces job {response['replaced']}, which is cancelled.")
         if earlier:
             print(render.render_earlier(earlier, match))
+        if line := render.render_estimates(response.get("estimates")):
+            print(line)
     return 0
 
 
@@ -230,6 +232,8 @@ def cmd_run(args, paths: Paths, command: list[str]) -> int:
         print(f"It replaces job {response['replaced']}, which is cancelled.", file=sys.stderr)
     if response.get("earlier"):
         print(render.render_earlier(response["earlier"], response.get("earlier_match", "command")), file=sys.stderr)
+    if line := render.render_estimates(response.get("estimates")):
+        print(line, file=sys.stderr)
     try:
         finished = _follow(client, job["id"], job["output"], 0, sys.stdout.buffer)
     except KeyboardInterrupt:

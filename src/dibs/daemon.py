@@ -14,6 +14,7 @@ import math
 import os
 import shutil
 import signal
+import statistics
 import sys
 import time
 from collections import deque
@@ -239,6 +240,15 @@ class Daemon:
             match = "script"
         response["earlier"] = [job_to_dict(j) for j in earlier[:3]]
         response["earlier_match"] = match
+        # How the session's recent estimates compared with real run times (#95): feedback only, the
+        # estimate is never rescaled.
+        ratios = [
+            (j.ended - j.started - j.asleep) / j.request.time
+            for j in self.store.finished_since(now - 86400)
+            if j.session == session and j.state == State.DONE and j.started and j.ended and j.request.time > 0
+        ]
+        if len(ratios) >= 5:
+            response["estimates"] = {"jobs": len(ratios), "median": statistics.median(ratios)}
         return response
 
     def _add_owed(self, session: str, delta: float, now: float) -> None:

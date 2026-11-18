@@ -110,6 +110,19 @@ def render_earlier(earlier: list[dict], match: str = "command") -> str:
     return "\n".join(lines)
 
 
+def render_estimates(estimates: dict | None) -> str:
+    """A line on how the session's recent jobs ran against their estimates, when they're well off (#95)."""
+    if not estimates:
+        return ""
+    median, n = estimates["median"], estimates["jobs"]
+    head = f"Your session's last {n} jobs ran a median {median:.0%} of their estimates"
+    if median < 0.5:
+        return f"{head}: a closer --time gets jobs started sooner."
+    if median > 1.25:
+        return f"{head}: a longer --time keeps predictions right."
+    return ""
+
+
 def render_submit(job: dict, now: float) -> str:
     name, job_id = f"Job {job['id']} ({job['name']})", job["id"]
     if job["state"] == "running":
