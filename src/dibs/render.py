@@ -255,6 +255,8 @@ def render_show(job: dict, now: float) -> str:
             rows.append(("ended", f"{clock(job['ended'], now)}{ran}{code}"))
         if job.get("reason"):
             rows.append(("reason", job["reason"]))
+    for i, attempt in enumerate(job.get("attempts") or [], 1):  # runs that failed for a resource reason (#84)
+        rows.append((f"try {i}", attempt.get("reason") or ""))
     peaks = []
     if job.get("peak_vram") is not None and job["request"]["vram"]:
         peaks.append(f"VRAM {format_size(job['peak_vram'])} of {format_size(job['request']['vram'])}")

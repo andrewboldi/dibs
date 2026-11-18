@@ -70,8 +70,13 @@ when those resources are free, so jobs never crash each other by running out of 
 - `dibs show ID` lists a job's peak VRAM and RAM, and `dibs submit` shows what earlier runs of the
   same command in the same folder used. Size the next run from those: the peaks plus a little
   headroom (going over VRAM stops the job), and the CPUs it kept busy.
-- A job stopped for going over its VRAM reservation has a reason saying so, ending with the --vram
-  to resubmit with: use that, not the same request again.
+- If a job is stopped for going over its VRAM reservation, killed at its RAM limit, or lost when
+  the machine restarts, dibs runs it again by itself, up to twice, with more VRAM or RAM when that
+  was the cause, keeping its id and its place in line. `dibs wait` keeps waiting through that, and
+  `dibs show ID` lists the tries. So ask for what the job really needs: a request that turns out too
+  small costs a retry, not your work. Add `--no-retry` for a command that must not run twice.
+- When it has run out of retries, the reason ends with the --vram to resubmit with: use that, not
+  the same request again.
 
 ## Waiting and checking
 

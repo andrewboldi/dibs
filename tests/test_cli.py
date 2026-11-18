@@ -254,6 +254,12 @@ def test_submit_replace(dibs):
     dibs("cancel", str(first), check=0)
 
 
+def test_submit_no_retry(dibs):
+    # Issue #84: retries are on unless a job opts out.
+    assert js(dibs("submit", *RES, "--json", "--", "true", check=0))["retry"] is True
+    assert js(dibs("submit", *RES, "--no-retry", "--json", "--", "true", check=0))["retry"] is False
+
+
 def test_session_from_claude_env(dibs):
     env = {"CLAUDE_CODE_SESSION_ID": "abcd1234-5678-90ab-cdef-1234567890ab"}
     job = js(dibs("submit", *RES, "--json", "--", "true", env=env, check=0))
