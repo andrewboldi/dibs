@@ -30,6 +30,10 @@ def dibs(dibs_env, tmp_path):
     run.env = dibs_env
     yield run
     run("daemon", "stop")
+    from dibs import launcher
+    from dibs.paths import get_paths
+
+    launcher.sweep_job_tmps(get_paths(dibs_env), keep=())  # jobs the stopped daemon never saw end
 
 
 def js(result):

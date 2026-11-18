@@ -581,6 +581,7 @@ class Daemon:
                     self._lose(job, ended, "lost: the machine restarted while it ran", asleep=slept)
             elif not (job.shim_pid and procs.alive(job.shim_pid, job.shim_ticks)):
                 self._lose(job, now, "lost: its process ended while dibs was not running")
+        launcher.sweep_job_tmps(self.paths, keep={j.id for j in self.store.jobs([State.RUNNING])})
 
     def _find_launcher(self, job: Job) -> tuple[int, int | None, str | None] | None:
         """The live launcher of a job whose pid was never recorded, found by its command line
@@ -741,6 +742,7 @@ class Daemon:
             self._terminated.add(job.id)
 
     def _finish(self, job: Job, result: dict, now: float) -> None:
+        launcher.remove_job_tmp(self.paths, job.id)
         if job.sleep_at_start is not None:  # counted to the command's exit, so a later sleep isn't added
             slept = result.get("slept")
             job.asleep = max(0.0, (slept if slept is not None else self.slept()) - job.sleep_at_start)
@@ -814,6 +816,7 @@ class Daemon:
         job.sleep_at_start, job.asleep = None, 0.0
         with contextlib.suppress(FileNotFoundError):
             (self.paths.job_dir(job.id) / "exit.json").unlink()
+        launcher.remove_job_tmp(self.paths, job.id)  # the next try starts with an empty one
         with contextlib.suppress(OSError), open(job.output, "a") as f:
             f.write(f"\ndibs: {reason} (try {len(job.attempts) + 1} of {MAX_RETRIES + 1})\n")
         self.store.update_job(job)
@@ -830,6 +833,7 @@ class Daemon:
         return f" ({last[:200]})" if last else ""
 
     def _lose(self, job: Job, now: float, reason: str, asleep: float | None = None) -> None:
+        launcher.remove_job_tmp(self.paths, job.id)
         job.asleep = self._asleep(job) if asleep is None else asleep
         job.state, job.ended, job.reason = State.FAILED, now, reason
         self.store.update_job(job)

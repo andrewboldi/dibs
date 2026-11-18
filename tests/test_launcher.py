@@ -18,7 +18,8 @@ PY = sys.executable
 def paths(tmp_path):
     p = get_paths({"DIBS_HOME": str(tmp_path / "home"), "HOME": str(tmp_path)})
     ensure_dirs(p)
-    return p
+    yield p
+    launcher.sweep_job_tmps(p, keep=())  # launched without a daemon to delete their temp folders
 
 
 _ids = iter(range(1, 10_000))
@@ -88,6 +89,17 @@ def test_job_env_sets_gpu_threads_and_ids(paths):
     assert env["DIBS_VRAM"] == str(6 * GiB) and env["DIBS_MEM"] == str(1 * GiB)
     assert env["DIBS_CPUS"] == "4" and env["DIBS_GPUS"] == "0"
     assert env["PATH"] == "/usr/bin"
+
+
+def test_job_env_points_temp_files_at_the_jobs_own_folder(paths, tmp_path):
+    # Issue #89: a killed job's scratch files in a RAM-backed /tmp kept holding RAM after it ended.
+    job = make_job(paths, ["true"], env={"PATH": "/usr/bin", "USER": "ann"})
+    env = launcher.job_env(job, "abcd1234", tmp=tmp_path / "dibs-abcd1234-job-7")
+    assert env["TMPDIR"] == env["TMP"] == env["TEMP"] == str(tmp_path / "dibs-abcd1234-job-7")
+    assert env["TORCHINDUCTOR_CACHE_DIR"] == str(tmp_path / "torchinductor_ann")  # its usual place, kept across jobs
+    mine = make_job(paths, ["true"], env={"TMPDIR": "/big/disk", "TORCHINDUCTOR_CACHE_DIR": "/cache"})
+    env = launcher.job_env(mine, "abcd1234", tmp=tmp_path / "dibs-abcd1234-job-8")
+    assert env["TMPDIR"] == "/big/disk" and "TMP" not in env and env["TORCHINDUCTOR_CACHE_DIR"] == "/cache"
 
 
 def test_job_env_hides_gpus_and_keeps_submitter_threads(paths):
