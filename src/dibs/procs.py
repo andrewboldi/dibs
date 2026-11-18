@@ -165,6 +165,13 @@ def memory_in_use(cgroup_path: str) -> tuple[int, int] | None:
     return stat["anon"] + shmem, shmem
 
 
+def oom_kills(events: str | None) -> tuple[int, bool]:
+    """From a cgroup's memory.events: how many of its processes the kernel killed for lack of RAM, and
+    whether the cgroup reached its own limit. A kill without that was the machine running out."""
+    stat = keyed_numbers(events)
+    return stat.get("oom_kill", 0), stat.get("oom", 0) > 0
+
+
 def cpu_busy_seconds() -> float | None:
     """CPU time the whole machine has spent busy since boot, in core-seconds (from /proc/stat)."""
     for line in (_read("/proc/stat") or "").splitlines():
