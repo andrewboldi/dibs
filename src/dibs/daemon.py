@@ -58,6 +58,8 @@ EVICT_PRESSURE = 40.0  # percent: memory pressure this high for EVICT_AFTER stop
 EVICT_AFTER = 10.0  # seconds
 OUTSIDE_CPU_EVERY = 4.0  # seconds between samples of the CPU busy outside dibs jobs (#120)
 OUTSIDE_CPU_WINDOW = 15.0  # seconds the figure dibs top shows is averaged over
+LOAD_EVERY = 4.0  # seconds between samples of the machine's busy cores, for dibs top's load row (#122)
+LOAD_WINDOW = 600.0  # seconds of them kept
 MOMENTUM_SHARE = 0.25  # under momentum, a session's jobs count as this share of their estimates (#94)
 MOMENTUM_MAX = 12 * 3600.0  # seconds a grant may last
 EARLY_STOP = 60.0  # seconds: a job stopped for VRAM sooner than this was likely still growing (#80)
@@ -148,6 +150,8 @@ class Daemon:
         self._outside_cpu: float | None = None
         self._shown_outside_mem = 0
         self._outside_vram: dict[str, int] = {}
+        self._load: deque[tuple[float, float, float]] = deque()  # (time, machine busy core-seconds, time asleep)
+        self._display_failed: set[str] = set()  # display-only watchers that raised, logged once each
         ensure_dirs(paths)
         self.store = Store(paths.db)
         self.closed = False
@@ -432,6 +436,7 @@ class Daemon:
             "momentum": self._momentum(now),
             # What programs outside dibs use, for dibs top (#120); the RAM is what _plan just subtracted.
             "outside": {"cpus": self._outside_cpu, "mem": self._shown_outside_mem, "vram": dict(self._outside_vram)},
+            "load": {"every": LOAD_EVERY, "cores": self._load_history()},
         }
 
     def info(self) -> dict:
@@ -692,9 +697,15 @@ class Daemon:
         self._watch_memory()
         self._give_back_borrowed(now)
         self._watch_beside(now)
-        self._watch_outside_cpu(now)
         self._watch_gpus(now)
         self.schedule()
+        for watch in (self._watch_outside_cpu, self._watch_load):  # only shown by dibs top, after scheduling
+            try:
+                watch(now)
+            except Exception:
+                if watch.__name__ not in self._display_failed:
+                    self._display_failed.add(watch.__name__)
+                    log.exception("%s failed; dibs top won't show it", watch.__name__)
         if now - self._last_retention >= RETENTION_EVERY:
             self._retention(now)
         if now - self._last_alive >= ALIVE_EVERY:
@@ -849,6 +860,26 @@ class Daemon:
             self._outside_cpu = None
             return
         self._outside_cpu = max(0.0, (busy - first[1]) - (sample[2] - first[2])) / (now - first[0])
+
+    def _watch_load(self, now: float) -> None:
+        """Keep the machine's busy core-seconds every LOAD_EVERY seconds over LOAD_WINDOW, for dibs top's
+        load row (#122). Its own samples: they don't reset when jobs start or end."""
+        if self._load and now - self._load[-1][0] < LOAD_EVERY:
+            return
+        busy = self.cpu_busy()
+        if busy is None:
+            return
+        self._load.append((now, busy, self.slept()))
+        while len(self._load) > LOAD_WINDOW / LOAD_EVERY + 1:
+            self._load.popleft()
+
+    def _load_history(self) -> list[float | None]:
+        """Busy cores between consecutive samples, oldest first; None for an interval the machine slept."""
+        samples = list(self._load)
+        return [
+            None if s1 - s0 > 1.0 or t1 <= t0 else max(0.0, (b1 - b0) / (t1 - t0))
+            for (t0, b0, s0), (t1, b1, s1) in zip(samples, samples[1:])
+        ]
 
     def _job_of(self, pid: int, shims: dict[int, int], units: dict[str, int]) -> int | None:
         """The running job a process belongs to: by its systemd scope, else by its shim ancestor."""
