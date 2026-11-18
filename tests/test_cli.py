@@ -258,10 +258,11 @@ def test_submit_replace(dibs):
     dibs("cancel", str(first), check=0)
 
 
-def test_submit_no_retry(dibs):
-    # Issue #84: retries are on unless a job opts out.
-    assert js(dibs("submit", *RES, "--json", "--", "true", check=0))["retry"] is True
-    assert js(dibs("submit", *RES, "--no-retry", "--json", "--", "true", check=0))["retry"] is False
+def test_submit_retry_is_opt_in(dibs):
+    # Issue #116: only the agent knows whether its job is safe to run again from the start.
+    assert js(dibs("submit", *RES, "--json", "--", "true", check=0))["retry"] is False
+    assert js(dibs("submit", *RES, "--retry", "--json", "--", "true", check=0))["retry"] is True
+    assert js(dibs("submit", *RES, "--no-retry", "--json", "--", "true", check=0))["retry"] is False  # still accepted
 
 
 def test_submit_exclusive(dibs):

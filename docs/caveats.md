@@ -19,9 +19,10 @@ What dibs doesn't do, or does only partly. Each item says what happens and what 
     not to.
 - **Going over the VRAM reservation into another job's memory stops the job, at once and without a
   grace margin.** A job may borrow VRAM that no job reserved and no other program uses; it is
-  stopped only when it reaches memory another job holds. dibs then runs it again with the advised size, as it does a job
-  killed at its RAM limit or by a restart, up to twice and keeping its place in line, but the work
-  the stopped run did is lost unless the job saves and resumes it. Reserve the peak plus some
+  stopped only when it reaches memory another job holds. With `--retry`, dibs then runs it again with
+  the advised size, as it does a job killed at its RAM limit or by a restart, up to twice and keeping
+  its place in line, but from the start: the work the stopped run did is lost unless the job saves
+  and resumes it. Without `--retry`, the agent resubmits. Reserve the peak plus some
   headroom. `dibs submit` shows what earlier runs of the same command used.
 - **Estimates only order the queue.** Nothing stops a job for running past its estimate, so
   predictions are only as good as the estimates. An agent that underestimates on purpose would get

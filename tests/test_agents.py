@@ -149,8 +149,8 @@ def test_agent_help_explains_priority_reordering():
 
 
 def test_agent_help_says_dibs_retries_resource_failures():
-    # Issue #84: agents needn't resubmit, so they needn't pad requests either.
-    for phrase in ("runs it again by itself", "--no-retry", "costs a retry, not your work"):
+    # Issues #84, #116: retries are the agent's choice, for jobs safe to run again from the start.
+    for phrase in ("--retry", "safe to run again from the start", "runs it again by itself"):
         assert phrase in AGENT_HELP, phrase
 
 

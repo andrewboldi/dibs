@@ -233,7 +233,7 @@ class Daemon:
             tag=compute_tag(now, counted, backlog, priority, carried),
             priority=priority,
             plain_tag=compute_tag(now, counted, backlog),
-            retry=req.get("retry") is not False,
+            retry=req.get("retry") is True,  # the agent's choice: only it knows the job is safe to repeat (#116)
             owed_carried=carried,
             owed_left=left,
             history_mem=self._history_mem(cwd, list(argv)),
@@ -642,8 +642,8 @@ class Daemon:
         for start in current.starts:
             job = by_id[start.job_id]
             borrowed = job.request.mem > unreserved
-            if borrowed and job.no_borrow:
-                continue
+            if borrowed and (job.no_borrow or not job.retry):
+                continue  # dibs may have to stop a borrower, so only a job safe to run again may borrow (#116)
             unreserved -= job.request.mem
             job.borrowed_ram = borrowed
             job.cpu_ids, job.gpu_ids = list(start.cpu_ids), list(start.gpu_ids)

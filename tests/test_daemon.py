@@ -620,7 +620,7 @@ def _oom_on_first_exit(monkeypatch, job_id):
 
 def test_a_job_killed_at_its_ram_limit_is_retried_with_more_ram(daemon, tmp_path, monkeypatch):
     # Issue #84: 25% more, rounded up to a whole gigabyte, with the same id and place in line.
-    job_id = submit(daemon, tmp_path, [PY, "-c", "pass"], mem=2 * GiB)
+    job_id = submit(daemon, tmp_path, [PY, "-c", "pass"], mem=2 * GiB, retry=True)
     _oom_on_first_exit(monkeypatch, job_id)
     run_until(daemon, lambda: job(daemon, job_id).state == State.DONE)
     j = job(daemon, job_id)
@@ -629,15 +629,16 @@ def test_a_job_killed_at_its_ram_limit_is_retried_with_more_ram(daemon, tmp_path
 
 
 def test_a_ram_kill_is_not_retried_when_more_ram_wont_fit(daemon, tmp_path, monkeypatch):
-    job_id = submit(daemon, tmp_path, [PY, "-c", "pass"], mem=14 * GiB)  # 17.5G won't fit in 16G
+    job_id = submit(daemon, tmp_path, [PY, "-c", "pass"], mem=14 * GiB, retry=True)  # 17.5G won't fit in 16G
     _oom_on_first_exit(monkeypatch, job_id)
     run_until(daemon, lambda: finished(daemon, job_id))
     j = job(daemon, job_id)
     assert (j.state, j.reason, j.attempts) == (State.FAILED, "killed: went over its 14G RAM reservation", [])
 
 
-def test_no_retry_opts_a_job_out(daemon, tmp_path, monkeypatch):
-    job_id = submit(daemon, tmp_path, [PY, "-c", "pass"], mem=2 * GiB, retry=False)
+def test_a_job_submitted_without_retry_is_not_run_again(daemon, tmp_path, monkeypatch):
+    # Issue #116: a command that isn't safe to repeat must not run twice; the agent opts in.
+    job_id = submit(daemon, tmp_path, [PY, "-c", "pass"], mem=2 * GiB)
     _oom_on_first_exit(monkeypatch, job_id)
     run_until(daemon, lambda: finished(daemon, job_id))
     assert (job(daemon, job_id).state, job(daemon, job_id).attempts) == (State.FAILED, [])
@@ -646,7 +647,7 @@ def test_no_retry_opts_a_job_out(daemon, tmp_path, monkeypatch):
 def test_dibs_show_lists_the_tries_that_failed_for_a_resource_reason(daemon, tmp_path, monkeypatch):
     from dibs.render import render_show
 
-    job_id = submit(daemon, tmp_path, [PY, "-c", "pass"], mem=2 * GiB)
+    job_id = submit(daemon, tmp_path, [PY, "-c", "pass"], mem=2 * GiB, retry=True)
     _oom_on_first_exit(monkeypatch, job_id)
     run_until(daemon, lambda: job(daemon, job_id).state == State.DONE)
     text = render_show(daemon.show(job_id)["job"], time.time())
@@ -684,7 +685,7 @@ def test_submit_tells_the_session_how_its_estimates_compared(daemon, tmp_path):
     assert "estimates" not in daemon.submit(req(tmp_path, [PY, "-c", "pass"], session="s2"))  # too few to say
 
 
-def _borrowing(make_daemon, tmp_path, monkeypatch, *, ran, pressure=0.0, config=None, now=None):
+def _borrowing(make_daemon, tmp_path, monkeypatch, *, ran, pressure=0.0, config=None, now=None, retry=True):
     """Job A reserves 12G of 16G and has used 2G after `ran` seconds; job B then asks for 8G."""
     from dibs.machine import Config
 
@@ -697,7 +698,7 @@ def _borrowing(make_daemon, tmp_path, monkeypatch, *, ran, pressure=0.0, config=
     d.tick()
     now[0] += ran
     d.tick()
-    b = submit(d, tmp_path, [PY, "-c", "import time; time.sleep(3)"], mem=8 * GiB)
+    b = submit(d, tmp_path, [PY, "-c", "import time; time.sleep(3)"], mem=8 * GiB, retry=retry)
     d.tick()
     return d, a, b, go
 
@@ -708,6 +709,14 @@ def test_ram_a_running_job_does_not_use_can_go_to_another_job(make_daemon, tmp_p
     d, a, b, go = _borrowing(make_daemon, tmp_path, monkeypatch, ran=700)
     assert job(d, b).state == State.RUNNING and job(d, b).borrowed_ram
     assert not job(d, a).borrowed_ram
+    go.touch()
+
+
+def test_a_job_without_retry_never_starts_on_borrowed_ram(make_daemon, tmp_path, monkeypatch):
+    # Issue #116: dibs may have to stop a borrower to give the RAM back, and only a job its agent
+    # marked as safe to run again may be stopped that way.
+    d, a, b, go = _borrowing(make_daemon, tmp_path, monkeypatch, ran=700, retry=False)
+    assert job(d, b).state == State.QUEUED
     go.touch()
 
 

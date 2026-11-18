@@ -296,7 +296,7 @@ def test_a_job_stopped_for_vram_is_retried_with_the_advised_size(world, tmp_path
     # stop advises, with the same id and place in line, so its agent needn't work out what happened.
     d, backend = world()
     _neighbour(d, tmp_path, 2 * GiB, [PY, "-c", "import time; time.sleep(2)"])  # leaves soon after the stop
-    job_id = _gpu_job(d, tmp_path, 6 * GiB, [PY, "-c", "import time; time.sleep(1.5)"])
+    job_id = _gpu_job(d, tmp_path, 6 * GiB, [PY, "-c", "import time; time.sleep(1.5)"], retry=True)
     tag = d.store.get_job(job_id).tag
     backend.procs = [GpuProcess(_job_python_pid(d, job_id), 0, 6 * GiB + MiB)]
     run_until(d, lambda: d.store.get_job(job_id).attempts)
@@ -314,7 +314,7 @@ def test_a_job_stopped_for_vram_is_retried_with_the_advised_size(world, tmp_path
 def test_a_job_is_retried_at_most_twice(world, tmp_path):
     d, backend = world()
     _neighbour(d, tmp_path, 2 * GiB)
-    job_id = _gpu_job(d, tmp_path, 6 * GiB, [PY, "-c", "import time; time.sleep(30)"])
+    job_id = _gpu_job(d, tmp_path, 6 * GiB, [PY, "-c", "import time; time.sleep(30)"], retry=True)
     pid = _job_python_pid(d, job_id)
     j = d.store.get_job(job_id)
     j.attempts = [{"reason": "an earlier try"}, {"reason": "another"}]  # retried twice already
