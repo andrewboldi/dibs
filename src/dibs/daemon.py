@@ -46,6 +46,7 @@ OWED_FOR = 86400.0  # seconds: what a session owes (or is owed) for its prioriti
 OUTSIDE_WINDOW = 120.0  # seconds: RAM in use outside dibs counts as its peak over this long
 JOBS_RAM_WINDOW = 10.0  # seconds: RAM dibs jobs hold counts as its peak over this long, when taken off the in-use total
 RETENTION_EVERY = 3600.0
+EARLY_STOP = 60.0  # seconds: a job stopped for VRAM sooner than this was likely still growing (#80)
 ALIVE_EVERY = 60.0  # seconds: how often the daemon notes it's alive, so a reboot can be dated (#78)
 RECENT = 86400.0  # how far back `queue --all` looks
 STOPS_SHOWN = 3600.0  # how far back guard stops are shown
@@ -601,10 +602,13 @@ class Daemon:
                 gpu, used = over[0]
                 reserved = job.request.vram if gpu in job.gpu_ids else 0
                 total = next((g.vram for g in self.capacity.gpus if g.index == gpu), None)
-                ask = vram_to_ask(max(used, job.peak_vram or 0), total)
+                early = now - (job.started or now) - self._asleep(job) < EARLY_STOP
+                ask = vram_to_ask(max(used, job.peak_vram or 0), total, early=early)
                 job.stop_reason = (
                     f"stopped: used {format_size_against(used, reserved)} VRAM on GPU {gpu}, "
-                    f"reserved {format_size(reserved)}; resubmit with --vram {ask}"
+                    f"reserved {format_size(reserved)}"
+                    + (", in its first minute, so it was likely still growing" if early else "")
+                    + f"; resubmit with --vram {ask}"
                 )
                 job.stop_requested = now
                 changed = True
