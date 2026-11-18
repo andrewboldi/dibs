@@ -27,7 +27,7 @@ nobody starved, and anything that takes the GPU behind the queue's back is stopp
 Code, Codex, opencode, pi and Gemini CLI how to use it.
 
 <p align="center">
-  <img src="assets/demo.gif" alt="dibs top above, agents below. A training job takes the GPU; a fine-tune that needs the whole GPU queues behind it; a short eval queued next goes ahead of the fine-tune; then a script started without dibs is stopped within a second, with a note in its output saying how to queue it." width="820">
+  <img src="assets/demo.gif" alt="dibs top above, an agent's shell below. Meters show what jobs reserved and what programs outside dibs use, and a load row fills in. A training job takes the GPU; a fine-tune that needs the whole GPU queues behind it; a short eval queued next goes ahead of the fine-tune; then a script started without dibs is stopped within a second, with a note in its output saying how to queue it." width="820">
 </p>
 
 ## What it adds to Slurm
