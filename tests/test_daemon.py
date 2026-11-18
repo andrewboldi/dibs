@@ -762,6 +762,66 @@ def test_the_job_after_a_boosted_one_lands_later_by_the_time_saved(make_daemon, 
     assert job(d, second).tag == 1600.0 + 270.0  # its priority-5 place, plus the 270 s the first saved
 
 
+def test_a_higher_priority_passes_its_own_sessions_lower_priority_jobs(make_daemon, tmp_path):
+    # Issue #91: a job resubmitted at priority 7 still lined up behind its own session's queued
+    # 2.5-hour job. Reordering one's own jobs is zero-sum: the jobs it passes move back by its estimate.
+    now = [1000.0]
+    d = make_daemon(clock=lambda: now[0], cap=capacity(cpus=[0]))
+    submit(d, tmp_path, ["sleep", "30"], session="blocker")
+    long = submit(d, tmp_path, [PY, "-c", "pass"], time_=9000.0, session="s1")
+    urgent = submit(d, tmp_path, [PY, "-c", "pass"], time_=600.0, session="s1", priority=7)
+    assert job(d, urgent).plain_tag == 1000.0 + 600.0  # no longer behind its own long job
+    assert job(d, urgent).tag < job(d, long).tag
+    assert (job(d, long).plain_tag, job(d, long).tag) == (10600.0, 10600.0)  # moved back by 600 s
+    same = submit(d, tmp_path, [PY, "-c", "pass"], time_=60.0, session="s1", priority=5)
+    assert job(d, same).plain_tag == 10600.0 + 60.0  # equal priority still lines up behind
+
+
+def test_a_boost_that_passed_nobody_costs_nothing(make_daemon, tmp_path):
+    # Issue #91: with nobody else waiting, the boost moved nothing, so the next job owes nothing.
+    now = [1000.0]
+    d = make_daemon(clock=lambda: now[0])
+    urgent = submit(d, tmp_path, [PY, "-c", "pass"], time_=600.0, session="s1", priority=10)
+    run_until(d, lambda: finished(d, urgent))
+    after = submit(d, tmp_path, [PY, "-c", "pass"], time_=300.0, session="s1")
+    assert job(d, after).tag == 1000.0 + 300.0
+
+
+def test_a_throwaway_low_priority_job_cancelled_at_once_earns_no_credit(make_daemon, tmp_path):
+    # Issue #90: a priority-1 job cancelled at once gave the session's next job an hour's head start.
+    now = [1000.0]
+    d = make_daemon(clock=lambda: now[0], cap=capacity(cpus=[0]))
+    submit(d, tmp_path, ["sleep", "30"], session="other")
+    dummy = submit(d, tmp_path, [PY, "-c", "pass"], time_=1200.0, session="gamer", priority=1)
+    d.cancel([dummy])
+    real = submit(d, tmp_path, [PY, "-c", "pass"], time_=1200.0, session="gamer")
+    assert job(d, real).tag == 1000.0 + 1200.0
+
+
+def test_a_throwaway_job_that_starts_at_once_does_not_absorb_a_debt(make_daemon, tmp_path):
+    # Issue #90: after a priority-10 job, a 1-second job took its debt and started at once on a free
+    # CPU, so the debt was never paid. Debt is paid by waiting; what isn't paid rolls on.
+    now = [1000.0]
+    d = make_daemon(clock=lambda: now[0], cap=capacity(cpus=[0, 1]))
+    submit(d, tmp_path, ["sleep", "30"], session="other")  # holds one CPU
+    submit(d, tmp_path, [PY, "-c", "pass"], cpus=2, time_=1200.0, session="other")  # waits for both
+    submit(d, tmp_path, [PY, "-c", "pass"], cpus=2, time_=7200.0, session="g2", priority=10)
+    absorber = submit(d, tmp_path, [PY, "-c", "pass"], cpus=1, time_=1.0, session="g2")
+    run_until(d, lambda: finished(d, absorber))
+    nxt = submit(d, tmp_path, [PY, "-c", "pass"], cpus=2, time_=1200.0, session="g2")
+    assert job(d, nxt).tag - job(d, nxt).plain_tag == 6480.0  # the 108 min the boost saved
+
+
+def test_a_lowered_priority_earns_credit_only_for_time_it_waited(make_daemon, tmp_path):
+    # Issue #90: a priority-3 job that started at once gave up nothing, so it earns nothing.
+    now = [1000.0]
+    d = make_daemon(clock=lambda: now[0])
+    low = submit(d, tmp_path, [PY, "-c", "pass"], time_=1800.0, session="s1", priority=3)
+    run_until(d, lambda: finished(d, low))
+    nxt = submit(d, tmp_path, [PY, "-c", "pass"], time_=300.0, session="s1")
+    assert job(d, nxt).tag == 1000.0 + 300.0
+
+
 def test_submit_falls_back_to_earlier_runs_of_the_same_script(daemon, tmp_path):
     (tmp_path / "train.py").write_text("import sys\n")
     first = submit(daemon, tmp_path, [PY, "train.py", "--lr", "1"])
