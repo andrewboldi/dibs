@@ -318,3 +318,17 @@ def test_job_env_for_nvidia_leaves_rocm_variables_alone(paths):
     env = launcher.job_env(job, "abcd1234")
     assert env["CUDA_VISIBLE_DEVICES"] == "0"
     assert "ROCR_VISIBLE_DEVICES" not in env
+
+
+def test_a_jobs_scope_gives_it_first_claim_on_its_cores():
+    # Issue #152: pinning kept a job on its cores but not other programs off them; reserved cores did
+    # 14.5 cores of work, 7.7 of it for programs outside dibs.
+    assert "CPUWeight=1000" in launcher.scope_properties(GiB)
+
+
+@needs_systemd
+def test_a_job_runs_with_first_claim_on_its_cores(paths):
+    code = "cg = open('/proc/self/cgroup').read().split('::')[1].strip(); print(open(f'/sys/fs/cgroup{cg}/cpu.weight').read())"
+    job = run(paths, make_job(paths, [PY, "-c", code]), use_systemd=True)
+    wait_exit(paths, job)
+    assert output(job).strip() == "1000"

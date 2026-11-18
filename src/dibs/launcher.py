@@ -42,10 +42,15 @@ def systemd_available(env: Mapping[str, str] = os.environ) -> bool:
     return _systemd
 
 
+JOB_CPU_WEIGHT = 1000  # systemd's default is 100: on contended cores a job's threads come first (#152)
+
+
 def scope_properties(mem: int) -> list[str]:
     """What a job's scope gets. The probe asks for exactly these, so an older systemd that doesn't
-    know one of them means running without systemd, not every job failing to launch."""
-    return ["-p", f"MemoryMax={mem}", "-p", "MemorySwapMax=0", "-p", "OOMPolicy=continue"]
+    know one of them means running without systemd, not every job failing to launch. A job is pinned
+    to its cores, but pinning doesn't keep other programs off them; the weight gives it first claim."""
+    return ["-p", f"MemoryMax={mem}", "-p", "MemorySwapMax=0", "-p", "OOMPolicy=continue",
+            "-p", f"CPUWeight={JOB_CPU_WEIGHT}"]  # fmt: skip
 
 
 def _probe_systemd() -> bool:
