@@ -765,6 +765,8 @@ class Daemon:
     def recover(self) -> None:
         """After a (re)start: finish jobs that ended meanwhile, adopt the ones still running."""
         now = self.clock()
+        for session in {j.session for j in self.store.jobs([State.QUEUED])}:
+            self._reline(session)  # places an older dibs set, before #150, stay until a job starts
         # The daemon's last note before it stopped; on another boot, the machine restarted since.
         alive = json.loads(self.store.get_meta("alive") or "{}")
         rebooted = bool(alive) and alive.get("boot") != procs.boot_id()
