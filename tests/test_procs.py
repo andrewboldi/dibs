@@ -1,4 +1,5 @@
 import os
+import os
 import subprocess
 import sys
 import time
@@ -245,3 +246,12 @@ def test_memory_pressure_reads_psi(monkeypatch):
     assert procs.memory_pressure() == 12.5
     monkeypatch.setattr(procs, "_read", lambda path, binary=False: None)
     assert procs.memory_pressure() == 0.0
+
+
+def test_cpu_busy_seconds_reads_proc_stat(monkeypatch):
+    # Issue #112: busy = user + nice + system + irq + softirq + steal, in clock ticks.
+    stat = "cpu  1000 200 300 50000 400 10 20 5 0 0\ncpu0 1 2 3 4 5 6 7 8 0 0\n"
+    monkeypatch.setattr(procs, "_read", lambda path, binary=False: stat if path == "/proc/stat" else None)
+    assert procs.cpu_busy_seconds() == (1000 + 200 + 300 + 10 + 20 + 5) / os.sysconf("SC_CLK_TCK")
+    monkeypatch.setattr(procs, "_read", lambda path, binary=False: None)
+    assert procs.cpu_busy_seconds() is None

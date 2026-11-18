@@ -18,14 +18,14 @@ from dibs.units import GiB
 PY = sys.executable
 
 
-def req(cwd, argv, *, cpus=1, mem=1 * GiB, vram=None, time_=60.0, session="s1", **extra):
+def req(cwd, argv, *, cpus=1, mem=1 * GiB, vram=None, time_=60.0, session="s1", exclusive=False, **extra):
     return {
         "argv": list(argv),
         "cwd": str(cwd),
         "env": dict(os.environ),
         "session": session,
         "session_label": f"proj·{session[:4]}",
-        "request": {"cpus": cpus, "mem": mem, "vram": vram, "gpus": None, "time": time_},
+        "request": {"cpus": cpus, "mem": mem, "vram": vram, "gpus": None, "time": time_, "exclusive": exclusive},
         **extra,
     }
 
@@ -1001,3 +1001,28 @@ def test_one_project_has_momentum_at_a_time_and_it_runs_out(make_daemon, tmp_pat
     assert job(d, after).tag - now[0] >= 400.0  # counted in full again
     assert d.momentum({"session": "s2", "action": "grant", "seconds": 3600.0, "why": "y"})["ok"]
     assert d.momentum({"action": "end"})["momentum"] is None and d.snapshot()["momentum"] is None
+
+
+def test_dibs_show_says_how_busy_the_machine_was_beside_a_timing_run(make_daemon, tmp_path, monkeypatch):
+    # Issue #112: nothing else from dibs runs beside an exclusive job, but other programs can still
+    # disturb its timing. dibs samples the CPU in use outside it and dibs show reports it.
+    from dibs.render import render_show
+
+    now, busy = [time.time()], [0.0]
+    d = make_daemon(clock=lambda: now[0], cpu_busy=lambda: busy[0])
+    job_id, stat, go = _job_holding(d, tmp_path, monkeypatch, GiB, exclusive=True)
+    cpu = stat.parent / "cpu.stat"
+    used = 0.0
+    for others in (0.5, 1.5, 0.5, 0.5):  # cores other programs keep busy over each 5 s
+        cpu.write_text(f"usage_usec {int(used * 1e6)}\n")
+        d.tick()
+        now[0] += 5.0
+        used += 2 * 5.0  # the job itself keeps 2 cores busy
+        busy[0] += (2 + others) * 5.0
+    cpu.write_text(f"usage_usec {int(used * 1e6)}\n")
+    d.tick()
+    j = job(d, job_id)
+    assert (round(j.background["mean"], 2), round(j.background["max"], 2)) == (0.75, 1.5)
+    text = render_show(d.show(job_id)["job"], now[0])
+    assert re.search(r"beside it +other programs kept 0.8 cores busy on average, at most 1.5", text), text
+    go.touch()

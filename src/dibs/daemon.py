@@ -122,6 +122,7 @@ class Daemon:
         meminfo: Callable[[], tuple[int, int] | None] = procs.meminfo,
         slept: Callable[[], float] = procs.slept,
         pressure: Callable[[], float] = procs.memory_pressure,
+        cpu_busy: Callable[[], float | None] = procs.cpu_busy_seconds,
     ):
         self.paths = paths
         self.config = config
@@ -134,6 +135,8 @@ class Daemon:
         self.clock = clock
         self.slept = slept
         self.pressure = pressure
+        self.cpu_busy = cpu_busy
+        self._beside: dict[int, tuple[float, float, float]] = {}  # job -> (time, machine busy, its own CPU)
         ensure_dirs(paths)
         self.store = Store(paths.db)
         self.closed = False
@@ -673,6 +676,7 @@ class Daemon:
             else:
                 self._push_stop(job, now)
         self._watch_memory()
+        self._watch_beside(now)
         self._watch_gpus(now)
         self.schedule()
         if now - self._last_retention >= RETENTION_EVERY:
@@ -743,6 +747,35 @@ class Daemon:
             if held is not None and (job.peak_mem is None or held[0] > job.peak_mem):
                 job.peak_mem, job.peak_shmem = held
                 self.store.update_job(job)
+
+    def _watch_beside(self, now: float) -> None:
+        """Beside an exclusive job (a timing run), sample the CPU other programs keep busy, so dibs show
+        can say whether its timing was disturbed (#112): the machine's busy cores minus its own."""
+        for job in self.store.jobs([State.RUNNING]):
+            if not job.request.exclusive or not (job.unit and job.shim_pid):
+                continue
+            cg = procs.cgroup(job.shim_pid)
+            busy = self.cpu_busy()
+            if not cg or not cg.endswith(f"/{job.unit}.scope") or busy is None:
+                continue
+            usage = procs.keyed_numbers(procs._read(f"{procs.CGROUP_ROOT}{cg}/cpu.stat")).get("usage_usec")
+            if usage is None:
+                continue
+            own = usage / 1e6
+            last = self._beside.get(job.id)
+            if last is not None and now - last[0] < 4.0:
+                continue
+            self._beside[job.id] = (now, busy, own)
+            if last is None:
+                continue
+            others = max(0.0, (busy - last[1]) - (own - last[2])) / (now - last[0])
+            stats = dict(job.background or {"seconds": 0.0, "core_seconds": 0.0, "max": 0.0})
+            stats["seconds"] += now - last[0]
+            stats["core_seconds"] += others * (now - last[0])
+            stats["max"] = max(stats["max"], others)
+            stats["mean"] = stats["core_seconds"] / stats["seconds"]
+            job.background = stats
+            self.store.update_job(job)
 
     def _job_of(self, pid: int, shims: dict[int, int], units: dict[str, int]) -> int | None:
         """The running job a process belongs to: by its systemd scope, else by its shim ancestor."""

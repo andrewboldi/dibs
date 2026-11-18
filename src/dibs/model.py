@@ -94,6 +94,7 @@ class Job:
     history_mem: int | None = None  # the peak RAM of earlier runs of the same command, at submit (#86)
     borrowed_ram: bool = False  # this run started on RAM other jobs reserved but weren't using
     no_borrow: bool = False  # must start within RAM nobody reserved (after the machine ran out once)
+    background: dict | None = None  # beside an exclusive job: other programs' CPU use, mean and max cores (#112)
 
 
 class RequestError(ValueError):

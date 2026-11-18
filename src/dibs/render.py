@@ -278,6 +278,9 @@ def render_show(job: dict, now: float) -> str:
             rows.append(("ended", f"{clock(job['ended'], now)}{ran}{code}"))
         if job.get("reason"):
             rows.append(("reason", job["reason"]))
+    if job.get("background"):  # beside a timing run (#112)
+        b = job["background"]
+        rows.append(("beside it", f"other programs kept {b['mean']:.1f} cores busy on average, at most {b['max']:.1f}"))
     if state == "running" and job.get("borrowed_ram"):  # #86
         rows.append(("RAM", "started on RAM other jobs reserved but weren't using"))
     for i, attempt in enumerate(job.get("attempts") or [], 1):  # runs that failed for a resource reason (#84)
