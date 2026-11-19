@@ -50,6 +50,26 @@ def _home_path(home: Path, name: str) -> Path:
     return home / name if not os.path.isabs(name) else Path(name)
 
 
+def session_names(home: Path) -> dict[str, str]:
+    """Each agent session's own name, where its CLI records one, for dibs top's panels (#167): Claude
+    Code keeps a file per running session in ~/.claude/sessions, with the session id dibs stores with
+    each job and the name the user knows the session by. Files that can't be read, or that don't hold
+    a session id and a name, are skipped; a session named in two files takes the newer one's name."""
+    found: dict[str, tuple[float, str]] = {}
+    for path in (home / ".claude" / "sessions").glob("*.json"):
+        try:
+            data, when = json.loads(path.read_text()), path.stat().st_mtime
+        except (OSError, ValueError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        session, name = data.get("sessionId"), data.get("name")
+        if isinstance(session, str) and isinstance(name, str) and name.strip():
+            if session not in found or when > found[session][0]:
+                found[session] = (when, name.strip())
+    return {session: name for session, (_, name) in found.items()}
+
+
 def tmp_in_ram(mounts: Path = Path("/proc/self/mounts")) -> bool:
     """Whether /tmp is a tmpfs, kept in RAM: the last mount on /tmp in the mount table decides, since
     a later mount hides an earlier one. False where there is no mount table to read, as on macOS."""
