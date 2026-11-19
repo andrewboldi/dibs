@@ -40,6 +40,12 @@ class GpuBackend(Protocol):
         """Compute processes on every GPU, or None if they can't be seen."""
         ...
 
+    def graphics_processes(self) -> list[GpuProcess] | None:
+        """Processes holding a graphics context (EGL, OpenGL) on every GPU, or None if they can't be
+        seen. A job that renders on the GPU holds VRAM only this list shows (#173). Only NVML reports
+        them; the other backends return none."""
+        ...
+
 
 class NoGpuBackend:
     name = "none"
@@ -49,6 +55,9 @@ class NoGpuBackend:
         return []
 
     def processes(self) -> list[GpuProcess] | None:
+        return []
+
+    def graphics_processes(self) -> list[GpuProcess] | None:
         return []
 
 
@@ -108,15 +117,19 @@ class NvmlBackend:
         return gpus
 
     def processes(self) -> list[GpuProcess] | None:
+        return self._running(self._lib.nvmlDeviceGetComputeRunningProcesses_v3)
+
+    def graphics_processes(self) -> list[GpuProcess] | None:
+        return self._running(self._lib.nvmlDeviceGetGraphicsRunningProcesses_v3)
+
+    def _running(self, query) -> list[GpuProcess] | None:
         found = []
         for index, handle in enumerate(self._devices()):
             size = 64
             while True:
                 count = ctypes.c_uint(size)
                 infos = (_ProcessInfo * size)()
-                rc = self._lib.nvmlDeviceGetComputeRunningProcesses_v3(
-                    handle, ctypes.byref(count), infos
-                )
+                rc = query(handle, ctypes.byref(count), infos)
                 if rc == _NVML_ERROR_INSUFFICIENT_SIZE:
                     size = count.value + 16
                     continue
@@ -176,6 +189,9 @@ class SmiBackend:
             amount = None if not used.isdigit() else int(used) * MiB
             found.append(GpuProcess(int(pid), self._uuid_to_index[uuid], amount))
         return found
+
+    def graphics_processes(self) -> list[GpuProcess] | None:
+        return []  # nvidia-smi has a query for compute processes only
 
 
 # --- AMD: the amd-smi command line -------------------------------------------------------------
@@ -394,6 +410,9 @@ class AmdSmiBackend:
         if self._known:
             found = [p for p in found if p.gpu_index in self._known]
         return [p for p in found if _holds_kfd(p.pid)]
+
+    def graphics_processes(self) -> list[GpuProcess] | None:
+        return []  # amd-smi lists graphics clients, but processes() keeps compute ones only (/dev/kfd)
 
 
 def open_backend(env: Mapping[str, str] = os.environ) -> GpuBackend:

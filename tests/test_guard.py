@@ -113,6 +113,63 @@ def test_job_process_untouched(world, tmp_path):
     assert d.store.events(0) == [] and outside(d) == {}
 
 
+def submit_sleeper(d, tmp_path, vram):
+    """A running job's sleeper process, as the job and its pid."""
+    resp = d.submit(
+        {
+            "argv": SLEEPER,
+            "cwd": str(tmp_path),
+            "env": dict(os.environ),
+            "session": "s",
+            "request": {"cpus": 1, "mem": GiB, "vram": vram, "gpus": None, "time": 60},
+        }
+    )
+    job = d.store.get_job(resp["job"]["id"])
+    pid = wait_for(lambda: next((p for p in launcher.job_pids(job) if (procs.cmdline(p) or [""])[0] == PY), None))
+    return job, pid
+
+
+def test_graphics_vram_counts_toward_a_jobs_peak(world, tmp_path):
+    """A job that renders through EGL or OpenGL holds VRAM that only the graphics-process list shows
+    (#173). It counts toward the job's peak, even when the job has no compute process at all."""
+    d, backend = world()
+    job, pid = submit_sleeper(d, tmp_path, vram=GiB)
+    backend.graphics = [GpuProcess(pid, 0, 543 * MiB)]
+    d.tick()
+    assert procs.alive(pid)
+    assert d.store.get_job(job.id).peak_vram == 543 * MiB
+
+
+def test_a_process_with_both_kinds_of_context_counts_once(world, tmp_path):
+    d, backend = world()
+    job, pid = submit_sleeper(d, tmp_path, vram=2 * GiB)
+    backend.procs = [GpuProcess(pid, 0, GiB)]
+    backend.graphics = [GpuProcess(pid, 0, GiB)]
+    d.tick()
+    assert d.store.get_job(job.id).peak_vram == GiB
+
+
+def test_graphics_vram_only_counts_toward_peaks(world, tmp_path):
+    """The VRAM watch still holds jobs to their reservations by compute use alone: whether it should
+    hold rendering jobs too is a separate choice (#173)."""
+    d, backend = world()
+    job, pid = submit_sleeper(d, tmp_path, vram=0)
+    backend.graphics = [GpuProcess(pid, 0, 300 * MiB)]
+    d.tick()
+    assert procs.alive(pid)
+    after = d.store.get_job(job.id)
+    assert after.stop_reason is None and after.peak_vram == 300 * MiB
+
+
+def test_graphics_process_outside_dibs_left_alone(world, spawned):
+    """Desktop programs render on the GPU too: the guard never sees graphics processes."""
+    d, backend = world()
+    p = spawned(SLEEPER)
+    backend.graphics = [GpuProcess(p.pid, 0, GiB)]
+    d.tick()
+    assert procs.alive(p.pid) and d.store.events(0) == [] and outside(d) == {}
+
+
 def test_allowlisted_left_alone(world, spawned):
     d, backend = world(Config(guard_allow=("sleep",)))
     p = spawned(["sleep", "60"])

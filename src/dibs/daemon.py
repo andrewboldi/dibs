@@ -1148,12 +1148,15 @@ class Daemon:
     def _watch_gpus(self, now: float) -> None:
         """Hold jobs to their VRAM reservations, and run the guard on everything else."""
         seen = self.backend.processes() if self.capacity.gpus else []
-        if not seen:
+        managed = {g.index for g in self.capacity.gpus}
+        graphics = []  # processes rendering through EGL or OpenGL: they count only toward job peaks (#173)
+        if seen is not None:
+            graphics = [p for p in self.backend.graphics_processes() or [] if p.gpu_index in managed]
+        if not seen and not graphics:
             self.outside = []
             self._outside_vram = {}
             return
-        managed = {g.index for g in self.capacity.gpus}
-        seen = [p for p in seen if p.gpu_index in managed]
+        seen = [p for p in seen or [] if p.gpu_index in managed]
         running = {j.id: j for j in self.store.jobs([State.RUNNING])}
         shims = {j.shim_pid: j.id for j in running.values() if j.shim_pid}
         units = {j.unit: j.id for j in running.values() if j.unit}
@@ -1176,10 +1179,21 @@ class Daemon:
         self._remember(verdicts)
 
         usage: dict[int, dict[int, int]] = {}
+        held: dict[int, dict[int, dict[int, int]]] = {}  # job -> GPU -> pid -> bytes, for its peak
         for v in verdicts:
             if v.kind == "job" and v.used is not None:
                 per_gpu = usage.setdefault(v.job_id, {})
                 per_gpu[v.gpu_index] = per_gpu.get(v.gpu_index, 0) + v.used
+                pids = held.setdefault(v.job_id, {}).setdefault(v.gpu_index, {})
+                pids[v.pid] = pids.get(v.pid, 0) + v.used
+        # A job that renders through EGL or OpenGL holds VRAM only the graphics-process list shows
+        # (#173). It counts toward the job's peak, and a process holding both kinds of context counts
+        # once. The watch below still holds jobs to their reservations by compute use alone.
+        for p in graphics:
+            job_id = self._job_of(p.pid, shims, units) if p.used is not None else None
+            if job_id is not None:
+                pids = held.setdefault(job_id, {}).setdefault(p.gpu_index, {})
+                pids[p.pid] = max(pids.get(p.pid, 0), p.used)
         # A job may borrow VRAM beyond its reservation that no other job holds and no program outside
         # dibs uses (#88); it's stopped only when it reaches into theirs. A job holds its reservation,
         # or more while it borrows.
@@ -1199,9 +1213,10 @@ class Daemon:
             others = sum(holds(o, g) for o in running.values() if o.id != j.id)
             return max(j.request.vram, capacity_of.get(g, 0) - others - outside_use.get(g, 0))
 
-        for job_id, per_gpu in usage.items():
+        for job_id, per_gpu_pids in held.items():
             job = running[job_id]
-            peak = max(per_gpu.values())
+            per_gpu = usage.get(job_id, {})
+            peak = max(sum(pids.values()) for pids in per_gpu_pids.values())
             changed = job.peak_vram is None or peak > job.peak_vram
             if changed:
                 job.peak_vram = peak
