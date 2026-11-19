@@ -190,7 +190,8 @@ Run `dibs daemon restart` after changing it; running jobs keep running.
 `dibs setup` also adds a marked block to each agent CLI's instructions file it finds
 (`~/.claude/CLAUDE.md`, `~/.codex/AGENTS.md`, `~/.config/opencode/AGENTS.md`,
 `~/.pi/agent/AGENTS.md`, `~/.gemini/GEMINI.md`, and the files in `agent_files`), plus a Claude Code
-skill. `dibs setup --undo` puts every file back as it was, keeping edits you made since.
+skill. Where /tmp is a tmpfs, the block also says in one plain line that /tmp is stored in RAM.
+`dibs setup --undo` puts every file back as it was, keeping edits you made since.
 
 The full design, with the reasoning behind each choice, is in
 [docs/superpowers/specs/2026-11-13-dibs-design.md](superpowers/specs/2026-11-13-dibs-design.md).

@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from dibs import launcher
-from dibs.instructions import BEGIN, BLOCK, END, SKILL
+from dibs.instructions import BEGIN, BLOCK, END, SKILL, TMP_IN_RAM
 
 # (name, config folder under $HOME, instructions file in it, binary). Locations checked against
 # the installed CLIs on 2026-11-14.
@@ -48,6 +48,27 @@ def _home_path(home: Path, name: str) -> Path:
     if name == "~" or name.startswith("~/"):
         return home / name[2:]
     return home / name if not os.path.isabs(name) else Path(name)
+
+
+def tmp_in_ram(mounts: Path = Path("/proc/self/mounts")) -> bool:
+    """Whether /tmp is a tmpfs, kept in RAM: the last mount on /tmp in the mount table decides, since
+    a later mount hides an earlier one. False where there is no mount table to read, as on macOS."""
+    try:
+        lines = mounts.read_text().splitlines()
+    except OSError:
+        return False
+    fstype = None
+    for line in lines:
+        fields = line.split()
+        if len(fields) >= 3 and fields[1] == "/tmp":
+            fstype = fields[2]
+    return fstype == "tmpfs"
+
+
+def _block() -> str:
+    """The block for this machine: the dibs instructions, and where /tmp is a tmpfs, one plain line
+    saying so (#165)."""
+    return BLOCK + (f"\n\n{TMP_IN_RAM}" if tmp_in_ram() else "")
 
 
 def put_block(text: str, block: str) -> str:
@@ -198,9 +219,10 @@ def setup(
     found += [Target("agent_files", _home_path(home, f), True) for f in agent_files]
     if not found:
         lines.append("No agent CLIs found (Claude Code, Codex, opencode, pi, Gemini CLI).")
+    block = _block()
     for target in found:
         old = target.path.read_text() if target.path.exists() else ""
-        new = put_block(old, BLOCK)
+        new = put_block(old, block)
         if new == old:
             lines.append(f"{target.agent}: {target.path} already has the dibs instructions.")
             continue

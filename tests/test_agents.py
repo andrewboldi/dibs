@@ -355,8 +355,37 @@ def test_setup_says_what_it_did_in_good_english(home):
     assert not any("updateed" in line for line in again)
 
 
-def test_agents_are_told_their_own_files_in_a_ram_backed_tmp_take_ram_from_jobs():
-    # Issue #138: one agent's own scratch folder in /tmp held 5.4G and grew by about a gigabyte an hour;
-    # /tmp is a tmpfs there, so those files held RAM (or swap) that dibs could hand to no job.
-    for text in (BLOCK, AGENT_HELP):
-        assert "findmnt /tmp" in text and "your own scratch" in text, text[:80]
+def test_tmp_in_ram_reads_the_mount_table(tmp_path):
+    # Issue #165: whether /tmp is a tmpfs decides one plain line in the agents' instructions.
+    mounts = tmp_path / "mounts"
+    mounts.write_text("/dev/nvme0n1p5 / ext4 rw,relatime 0 0\ntmpfs /tmp tmpfs rw,nosuid,nodev,size=16777216k 0 0\n")
+    assert agents.tmp_in_ram(mounts)
+    mounts.write_text("/dev/nvme0n1p5 / ext4 rw,relatime 0 0\n")  # /tmp is a folder on the root disk
+    assert not agents.tmp_in_ram(mounts)
+    mounts.write_text("tmpfs /tmp tmpfs rw 0 0\n/dev/sdb1 /tmp ext4 rw 0 0\n")  # a later mount hides the tmpfs
+    assert not agents.tmp_in_ram(mounts)
+    assert not agents.tmp_in_ram(tmp_path / "missing")  # no mount table to read, as on macOS
+
+
+@pytest.mark.parametrize("in_ram", [True, False])
+def test_agents_are_told_plainly_whether_tmp_is_stored_in_ram(home, monkeypatch, in_ram):
+    # Issue #165: agents get the fact, and no advice for or against keeping files in /tmp.
+    monkeypatch.setattr(agents, "tmp_in_ram", lambda: in_ram)
+    setup(home)
+    for target in (home / ".claude" / "CLAUDE.md", home / ".codex" / "AGENTS.md"):
+        block = target.read_text()
+        assert ("/tmp on this machine is stored in RAM (a tmpfs), not on disk." in block) is in_ram, target
+        if not in_ram:
+            assert "/tmp" not in block, target
+        for advice in ("keep big ones on disk", "take RAM from jobs", "your own scratch"):
+            assert advice not in block, (target, advice)
+    again = [line for line in setup(home) if "dibs instructions" in line]
+    assert len(again) == 2 and all("already has" in line for line in again), again  # a rerun changes nothing
+
+
+def test_agent_help_gives_no_advice_on_where_to_keep_files_in_tmp():
+    # Issue #165, replacing #138's advice: nothing steers agents toward /tmp or away from it. Sizing
+    # still says a job's files in a tmpfs count toward its own RAM, since that is how dibs counts it.
+    neighbour = AGENT_HELP.split("## Being a good neighbour", 1)[1].split("\n## ", 1)[0]
+    assert "/tmp" not in neighbour and "/tmp" not in BLOCK
+    assert "/tmp where it is a tmpfs" in AGENT_HELP.split("## Sizing a request", 1)[1].split("\n## ", 1)[0]

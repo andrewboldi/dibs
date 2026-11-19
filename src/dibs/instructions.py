@@ -16,9 +16,10 @@ short of memory, dibs stops the largest program running outside it.
     dibs submit --cpus 4 --mem 16G --vram 6G --time 20m -- python train.py
 
 Then `dibs wait ID` (in the background if your commands time out), `dibs logs ID`, `dibs queue`.
-Run `dibs agent-help` before your first job: it explains how to size a request. Where /tmp is kept
-in RAM (`findmnt /tmp` says tmpfs), files there, your own scratch folder included, take RAM from
-jobs until deleted: keep big ones on disk."""
+Run `dibs agent-help` before your first job: it explains how to size a request."""
+
+# Added to the block by `dibs setup` where /tmp is a tmpfs: the fact, with no advice either way (#165).
+TMP_IN_RAM = "/tmp on this machine is stored in RAM (a tmpfs), not on disk."
 
 AGENT_HELP = """\
 # dibs: share this machine's GPUs, CPUs and RAM with the other agents
@@ -136,10 +137,6 @@ their estimates, and it ends by itself; `dibs momentum --end` ends it early.
 
 ## Being a good neighbour
 
-- Where /tmp is a tmpfs (`findmnt /tmp`), every file in it holds RAM, or swap once pushed out,
-  until it is deleted, and dibs can hand that RAM to no job. That includes your own scratch folder
-  there: keep checkpoints, videos, datasets and build outputs in a folder on disk, and delete what
-  you no longer need.
 - `dibs cancel ID` as soon as you no longer need a job, for example after finding a bug.
 - A long-running server is a job too: give it an estimate of how long you'll need it, and cancel
   it when you're done.
