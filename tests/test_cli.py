@@ -265,6 +265,15 @@ def test_submit_retry_is_opt_in(dibs):
     assert js(dibs("submit", *RES, "--no-retry", "--json", "--", "true", check=0))["retry"] is False  # still accepted
 
 
+def test_submit_retry_help_says_what_a_retry_runs(dibs):
+    # Issue #177: since #148 any job may start in RAM other jobs reserved, so the help doesn't tie that
+    # to --retry; and a retry runs over what the stopped try left, which an export that refuses to start
+    # when its output exists failed on, twice, within seconds.
+    out = " ".join(dibs("submit", "--help", check=0).stdout.split())
+    assert "may use RAM other jobs reserved" not in out
+    assert "over whatever a stopped try left" in out
+
+
 def test_submit_exclusive(dibs):
     # Issue #104: a timing run gets the machine to itself, and says so.
     busy = js(dibs("submit", *RES, "--json", "--", "sleep", "30", check=0))["id"]

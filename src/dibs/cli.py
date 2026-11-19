@@ -98,8 +98,8 @@ def build_parser() -> argparse.ArgumentParser:
         )  # fmt: skip
         s.add_argument(
             "--retry", action="store_true",
-            help="it's safe to run again from the start (it resumes, or repeating does no harm): if it runs out of "
-            "VRAM or RAM or a restart kills it, dibs runs it again, and it may use RAM other jobs reserved",
+            help="it's safe to run again from the start, over whatever a stopped try left (it resumes, or "
+            "repeating does no harm): if it runs out of VRAM or RAM or a restart kills it, dibs runs it again",
         )  # fmt: skip
         s.add_argument("--no-retry", action="store_true", help=argparse.SUPPRESS)  # the default since #116
         s.add_argument(

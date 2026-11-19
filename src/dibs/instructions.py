@@ -96,8 +96,9 @@ when those resources are free, so jobs never crash each other by running out of 
   headroom (going over VRAM stops the job), and the CPUs it kept busy. When those runs never used
   the GPU they reserved, it says so: leave --vram out, so the GPU's memory stays free for jobs that
   use it.
-- Add `--retry` when the job is safe to run again from the start: it resumes from a checkpoint, or
-  repeating it does no harm (not one that appends results, uploads or sends something). Then, if it
+- Add `--retry` when the job is safe to run again from the start, over whatever a stopped try left:
+  it resumes from a checkpoint, or repeating it does no harm (not one that appends results, uploads
+  or sends something, or one that refuses to start when its output already exists). Then, if it
   is stopped for going over its VRAM reservation, killed at its RAM limit, or lost when the machine
   restarts, dibs runs it again by itself, up to twice, with more VRAM or RAM when that was the
   cause, keeping its id and its place in line; `dibs wait` keeps waiting, and `dibs show ID` lists
