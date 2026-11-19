@@ -186,7 +186,7 @@ class Daemon:
         self.panes = panes
         self._pane_samples: dict[str, deque[tuple[float, int]]] = {}  # pane cgroup -> (time, CPU µs)
         self._panes_at = -math.inf
-        self._told_panes: dict[str, float] = {}  # pane cgroup -> when its agent was last told
+        self._told_programs: dict[tuple[str, str], float] = {}  # (pane cgroup, program) -> when last told
         self._beside: dict[int, tuple[float, float, float]] = {}  # job -> (time, machine busy, its own CPU)
         # For dibs top (#120): (time, machine busy, jobs' own CPU, the jobs, time asleep) samples, and
         # what programs outside dibs use: cores (None while unknown), RAM, and VRAM per GPU index.
@@ -936,7 +936,8 @@ class Daemon:
 
     def _watch_panes(self, now: float) -> None:
         """Tell an agent when a program in its terminal keeps a sixth of the machine's cores busy outside
-        dibs for two minutes (#158), from each terminal pane's cgroup: at most once an hour per pane."""
+        dibs for two minutes (#158), from each terminal pane's cgroup: at most once an hour per program
+        in a pane, so one program's notice doesn't hold back another's (#170)."""
         if now - self._panes_at < PANE_EVERY:
             return
         self._panes_at = now
@@ -950,17 +951,22 @@ class Daemon:
             while samples[0][0] < now - HEAVY_FOR - PANE_EVERY:
                 samples.popleft()
             (t0, u0), (t1, u1) = samples[0], samples[-1]
-            if t1 - t0 < HEAVY_FOR or now - self._told_panes.get(path, -math.inf) < TELL_EVERY:
+            if t1 - t0 < HEAVY_FOR:
                 continue
             cores = (u1 - u0) / 1e6 / (t1 - t0)
             if cores < heavy:
                 continue
-            self._told_panes[path] = now
             event = guard.heavy_notice(path, cores, t1 - t0)
-            if event is not None:
-                self.store.add_event("heavy", event, now)
-                log.info("told the agent in %s: %s kept %.0f cores busy outside dibs", path.rsplit("/", 1)[-1],
-                         event["command"], cores)  # fmt: skip
+            if event is None:
+                continue
+            # The same program is the same script, whatever its arguments: a sweep gets one notice an hour.
+            program = (path, script_of(event["command"]) or next(iter(event["command"]), ""))
+            if now - self._told_programs.get(program, -math.inf) < TELL_EVERY:
+                continue
+            self._told_programs[program] = now
+            self.store.add_event("heavy", event, now)
+            log.info("told the agent in %s: %s kept %.0f cores busy outside dibs", path.rsplit("/", 1)[-1],
+                     event["command"], cores)  # fmt: skip
 
     def _relieve_shortage(self, now: float) -> None:
         """While the machine stays short of memory, stop one program per stretch of shortage: the largest

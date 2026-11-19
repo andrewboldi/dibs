@@ -261,15 +261,46 @@ def heavy_message(pid: int, argv: Sequence[str], cores: int, seconds: float) -> 
     )
 
 
+SHELLS = frozenset({"sh", "bash", "zsh", "dash", "fish", "ksh"})
+
+
+def _is_shell(pid: int) -> bool:
+    argv = procs.cmdline(pid) or [""]
+    return bool({procs.exe_name(pid) or "", os.path.basename(argv[0]).lstrip("-")} & SHELLS)
+
+
+def _program_of(pid: int, pane: Collection[int]) -> int | None:
+    """The program an agent ran that a process in its terminal belongs to: walking up from the process,
+    the one the agent's command shell started (#170), so a busy browser helper or compiler names the
+    script or build that started it. None for what the agent CLI started itself, with no shell in
+    between, such as a tool server: the agent never ran it as a command, and can't queue it."""
+    path = [pid]
+    for _ in range(64):
+        up = procs.parent(path[-1])
+        if up is None or up not in pane:
+            break
+        if _is_agent(up):
+            if not _is_shell(path[-1]):
+                return None
+            break
+        path.append(up)
+    return path[-2] if len(path) > 1 and _is_shell(path[-1]) else path[-1]
+
+
 def heavy_notice(cgroup_path: str, cores: float, seconds: float) -> dict | None:
     """What to tell the agent whose terminal (a pane's cgroup) kept `cores` busy outside dibs: about the
-    busiest program in it that isn't the agent CLI. Nothing is stopped, and nothing is written into the
-    program's output, which may be data. None when there's no such program."""
+    program it ran whose processes together keep the most cores busy. Nothing is stopped, and nothing is
+    written into the program's output, which may be data. None when there's no such program."""
     pids = procs.cgroup_procs(cgroup_path)
-    rates = [(rate, pid) for pid in pids if not _is_agent(pid) and (rate := procs.cpu_rate(pid)) is not None]
-    if not rates:
+    pane, programs = set(pids), {}
+    for pid in pids:
+        rate = None if _is_agent(pid) else procs.cpu_rate(pid)
+        program = None if rate is None else _program_of(pid, pane)
+        if program is not None:
+            programs[program] = programs.get(program, 0.0) + rate
+    if not programs:
         return None
-    pid = max(rates)[1]
+    pid = max(programs, key=programs.__getitem__)
     argv = procs.cmdline(pid) or [name for name in [procs.exe_name(pid)] if name]
     # The agent's session, from a process of the pane that carries it (its tool commands do).
     session = next((s for p in [pid, *pids] if (s := (procs.environ(p) or {}).get("DIBS_SESSION")

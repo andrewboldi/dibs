@@ -1,4 +1,5 @@
 import os
+import shlex
 import subprocess
 import sys
 import time
@@ -760,6 +761,134 @@ def test_a_terminal_busy_on_a_core_or_two_is_left_alone(make_daemon):
         state["usec"] += int(15 * 1e6 * 2)  # two cores
         d.tick()
     assert [e for e in d.store.events(0) if e["kind"] == "heavy"] == []
+
+
+# Naming the program the agent ran (#170) --------------------------------------------------------
+
+
+def _script(tmp_path, name, helpers):
+    """A script that starts `helpers` helper processes (helper.py), then sleeps."""
+    (tmp_path / "helper.py").write_text("import time\ntime.sleep(60)\n")
+    path = tmp_path / name
+    path.write_text(
+        "import subprocess, sys, time\n"
+        f"for _ in range({helpers}):\n    subprocess.Popen([sys.executable, {str(tmp_path / 'helper.py')!r}])\n"
+        "time.sleep(60)\n"
+    )
+    return path
+
+
+def _agent(tmp_path, spawned, commands, shell=True):
+    """An agent CLI (named claude) that runs each command through a shell, as agents run commands, or
+    starts it itself when `shell` is False, as it starts a tool server."""
+    lines = ["import subprocess, time"]
+    for argv in commands:
+        lines.append(f"subprocess.Popen({['sh', '-c', shlex.join(argv) + ' ; true'] if shell else argv!r})")
+    (tmp_path / "claude").write_text("\n".join([*lines, "time.sleep(60)", ""]))
+    return spawned([PY, str(tmp_path / "claude")], env={**CLEAN_ENV, "CLAUDE_CODE_SESSION_ID": "agent-9"})
+
+
+def _running(root, path, count=1):
+    """The pids under `root` running the Python script at `path`, once `count` of them do."""
+    found = [p for p in procs.descendants(root) if (procs.cmdline(p) or [])[1:2] == [str(path)]]
+    return sorted(found, key=lambda p: procs.cmdline(p)) if len(found) == count else None
+
+
+@pytest.fixture
+def watched_pane(make_daemon, tmp_path, monkeypatch):
+    """A daemon watching one terminal pane: the processes in it are the ones placed there, and each one's
+    CPU rate is what `rates` says (none otherwise)."""
+    state = {"now": time.time(), "usec": 0}
+    pane = "/app.slice/app-org.gnome.Terminal.slice/tmux-spawn-f3cc.scope"
+    d = make_daemon(clock=lambda: state["now"], panes=lambda: {pane: state["usec"]})
+    scope = tmp_path / "cgroup" / pane.lstrip("/")
+    scope.mkdir(parents=True)
+    monkeypatch.setattr(procs, "CGROUP_ROOT", str(tmp_path / "cgroup"))
+    rates = {}
+    monkeypatch.setattr(procs, "cpu_rate", lambda pid: rates.get(pid, 0.0))
+
+    def place(*pids):
+        (scope / "cgroup.procs").write_text("".join(f"{p}\n" for p in pids))
+
+    def busy_for(seconds, cores):
+        for _ in range(int(seconds // 15)):
+            state["now"] += 15
+            state["usec"] += int(15 * 1e6 * cores)
+            d.tick()
+
+    return d, rates, place, busy_for, lambda: d.notices("agent-9", state["now"])["notices"]
+
+
+def test_the_notice_names_the_script_the_agent_ran_not_a_helper_it_started(watched_pane, spawned, tmp_path):
+    # The first notice named a browser's GPU helper, started by a script the agent ran, and told the
+    # agent to queue the helper: a command it never ran (#170).
+    d, rates, place, busy_for, told = watched_pane
+    script = _script(tmp_path, "render.py", helpers=1)
+    agent = _agent(tmp_path, spawned, [[PY, str(script)]])
+    [render] = wait_for(lambda: _running(agent.pid, script))
+    [helper] = wait_for(lambda: _running(render, tmp_path / "helper.py"))
+    place(agent.pid, procs.parent(render), render, helper)
+    cores = len(d.capacity.cpus) // 2
+    rates[helper] = cores
+    busy_for(150, cores)
+    [notice] = told()
+    command = shlex.join([PY, str(script)])
+    assert f"`{command}` (pid {render}) has kept about {cores} cores busy" in notice["message"]
+    assert f"dibs run --cpus {cores} --mem SIZE --time ESTIMATE -- {command}\n" in notice["message"]
+    assert "helper.py" not in notice["message"]
+
+
+def test_the_program_named_is_the_one_whose_processes_together_keep_the_most_cores_busy(watched_pane, spawned, tmp_path):
+    # A sweep running four workers at 2 cores each keeps more cores busy than one helper at 3.
+    d, rates, place, busy_for, told = watched_pane
+    sweep, shot = _script(tmp_path, "sweep.py", helpers=4), _script(tmp_path, "shot.py", helpers=1)
+    agent = _agent(tmp_path, spawned, [[PY, str(sweep)], [PY, str(shot)]])
+    [s], [t] = wait_for(lambda: _running(agent.pid, sweep)), wait_for(lambda: _running(agent.pid, shot))
+    workers = wait_for(lambda: _running(s, tmp_path / "helper.py", count=4))
+    [helper] = wait_for(lambda: _running(t, tmp_path / "helper.py"))
+    place(agent.pid, procs.parent(s), procs.parent(t), s, t, *workers, helper)
+    rates.update({**{w: 2.0 for w in workers}, helper: 3.0})
+    busy_for(150, 11)
+    [notice] = told()
+    assert notice["message"].startswith(f"dibs: `{shlex.join([PY, str(sweep)])}` (pid {s})")
+
+
+def test_each_program_in_a_terminal_gets_a_notice_and_a_rerun_of_one_within_the_hour_none(watched_pane, spawned, tmp_path):
+    # A session's subagents share its terminal: a notice about one program held back the notice about
+    # the next one, another program entirely, for an hour (#170).
+    d, rates, place, busy_for, told = watched_pane
+    first, second = _script(tmp_path, "first.py", helpers=0), _script(tmp_path, "second.py", helpers=0)
+    agent = _agent(tmp_path, spawned, [[PY, str(first), "--seed", "1"], [PY, str(first), "--seed", "2"], [PY, str(second)]])
+    seed1, seed2 = wait_for(lambda: _running(agent.pid, first, count=2))
+    [other] = wait_for(lambda: _running(agent.pid, second))
+    place(agent.pid, *{procs.parent(p) for p in (seed1, seed2, other)}, seed1, seed2, other)
+    cores = len(d.capacity.cpus) // 2
+    rates[seed1] = cores
+    busy_for(150, cores)
+    assert [n["message"].split("`")[1] for n in told()] == [shlex.join([PY, str(first), "--seed", "1"])]
+    rates.clear()
+    rates[seed2] = cores  # the same script again, with other arguments
+    busy_for(300, cores)
+    assert told() == []
+    rates.clear()
+    rates[other] = cores
+    busy_for(150, cores)
+    assert [n["message"].split("`")[1] for n in told()] == [shlex.join([PY, str(second)])]
+
+
+def test_a_tool_server_the_agent_cli_started_itself_gets_no_notice(watched_pane, spawned, tmp_path):
+    # An agent CLI starts its tool servers itself, with no shell in between: it never ran them as
+    # commands, and can't queue them.
+    d, rates, place, busy_for, told = watched_pane
+    server = _script(tmp_path, "server.py", helpers=1)
+    agent = _agent(tmp_path, spawned, [[PY, str(server)]], shell=False)
+    [srv] = wait_for(lambda: _running(agent.pid, server))
+    [helper] = wait_for(lambda: _running(srv, tmp_path / "helper.py"))
+    place(agent.pid, srv, helper)
+    cores = len(d.capacity.cpus) // 2
+    rates[helper] = cores
+    busy_for(150, cores)
+    assert told() == [] and [e for e in d.store.events(0) if e["kind"] == "heavy"] == []
 
 
 # Runs that reserved VRAM and never used the GPU (#139) -----------------------------------------

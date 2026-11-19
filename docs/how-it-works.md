@@ -120,8 +120,13 @@ holds for GPU stops too.
 CPU-heavy work outside dibs is never stopped: jobs have first claim on their cores (#152), and when
 a terminal pane keeps a sixth of the machine's cores busy for two minutes (from its cgroup's CPU
 time), dibs tells that pane's agent at its next `dibs` command which program it was and the
-`dibs run --cpus` line to queue it with, at most once an hour per pane (#158). Nothing is written
-into the program's own output, which may be data.
+`dibs run --cpus` line to queue it with (#158). The program named is the one the agent ran, the
+process its command shell started, whose processes together keep the most cores busy: a busy browser
+helper or compiler is named as the script or build that started it. What the agent CLI started
+itself, with no shell in between, such as a tool server, isn't named: the agent never ran it as a
+command. Each program gets a notice at most once an hour per pane, a script whatever its arguments,
+so in a terminal that subagents share, one program's notice doesn't hold back another's (#170).
+Nothing is written into the program's own output, which may be data.
 
 **Sizing.** `dibs show ID` lists a job's peak RAM (memory in use, not file cache) and peak VRAM.
 `dibs submit` shows what earlier runs of the same command in the same folder used:
