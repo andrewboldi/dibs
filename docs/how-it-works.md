@@ -27,7 +27,8 @@ Every queued job gets a place on a timeline: the earliest moment it fits for its
 run, around the running jobs and the places already given to the jobs ahead of it. A small job
 whose place is "now" starts now, so gaps get filled without delaying anyone. A job past its
 estimate is assumed to need another 10% of it (at least a minute), and nothing is ever stopped for
-running long: the estimate only orders the queue. `dibs top` draws the timeline live. Its meters
+running long: the estimate only orders the queue. `dibs top` draws it live, in a panel per agent:
+its running jobs, then its waiting jobs' bars on a timeline that every panel shares. Its meters
 show, for CPU, RAM and each GPU, what jobs reserved (in their colours), what programs outside dibs
 use (grey) and what's free, and its load row the machine's busy cores over the last 10 minutes. RAM in use outside dibs is never handed out; CPU busy outside dibs is
 only shown, since dibs still starts a job on cores another program keeps busy: the job's threads
@@ -137,7 +138,7 @@ Earlier runs of this command here:
 | `dibs submit [resources] -- CMD …` | queue a job; prints its id, when it's expected to start, and earlier runs |
 | `dibs run [resources] -- CMD …` | queue it, show its output, exit with its exit code |
 | `dibs queue [--all] [--mine]` | running and queued jobs (`--all`: and the last day's finished ones) |
-| `dibs top` | the live view from the demo |
+| `dibs top` | the live view from the demo, a panel per agent; the arrows, PgUp/PgDn, Home/End or the mouse wheel scroll it |
 | `dibs show ID` | everything about one job |
 | `dibs wait ID… [--timeout 9m]` | wait for jobs to end (exit 124 when the timeout runs out) |
 | `dibs logs ID [-f] [-n N]` | a job's output |

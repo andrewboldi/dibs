@@ -389,3 +389,29 @@ def test_agent_help_gives_no_advice_on_where_to_keep_files_in_tmp():
     neighbour = AGENT_HELP.split("## Being a good neighbour", 1)[1].split("\n## ", 1)[0]
     assert "/tmp" not in neighbour and "/tmp" not in BLOCK
     assert "/tmp where it is a tmpfs" in AGENT_HELP.split("## Sizing a request", 1)[1].split("\n## ", 1)[0]
+
+
+def test_session_names_come_from_claude_codes_session_files(tmp_path):
+    # Issue #167: dibs top heads each agent's panel with the name the user knows the session by.
+    # Claude Code keeps a file per running session, with the session id dibs stores with each job.
+    sessions = tmp_path / ".claude" / "sessions"
+    sessions.mkdir(parents=True)
+    (sessions / "101.json").write_text('{"pid": 101, "sessionId": "aaaa-1", "name": "VLA Chess", "cwd": "/w"}')
+    (sessions / "102.json").write_text('{"pid": 102, "sessionId": "bbbb-2", "name": "  ccsdt-5c\\n"}')
+    (sessions / "103.json").write_text("not json")
+    (sessions / "104.json").write_text('["a", "list"]')
+    (sessions / "105.json").write_text('{"sessionId": "cccc-3"}')  # no name
+    (sessions / "106.json").write_text('{"sessionId": "dddd-4", "name": "  "}')
+    (sessions / "107.key").write_text('{"sessionId": "eeee-5", "name": "a key file"}')
+    assert agents.session_names(tmp_path) == {"aaaa-1": "VLA Chess", "bbbb-2": "ccsdt-5c"}
+    assert agents.session_names(tmp_path / "nowhere") == {}
+
+
+def test_a_session_named_twice_takes_its_newest_name(tmp_path):
+    sessions = tmp_path / ".claude" / "sessions"
+    sessions.mkdir(parents=True)
+    old, new = sessions / "201.json", sessions / "202.json"
+    old.write_text('{"sessionId": "aaaa-1", "name": "old name"}')
+    new.write_text('{"sessionId": "aaaa-1", "name": "new name"}')
+    os.utime(old, (1_000_000, 1_000_000))
+    assert agents.session_names(tmp_path) == {"aaaa-1": "new name"}

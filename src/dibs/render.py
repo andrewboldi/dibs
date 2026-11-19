@@ -4,6 +4,7 @@ import os
 import re
 import shlex
 import time
+import unicodedata
 
 from dibs.model import script_of
 from dibs.units import format_duration, format_size
@@ -346,10 +347,9 @@ _WARN_SGR = "38;5;136"  # a job past its estimate, and what the guard stopped
 _LOAD_SGR = ("38;5;29", "38;5;136", "38;5;167")  # the load row with under half the cores busy, under 85%, more
 _SPARK = "▁▂▃▄▅▆▇█"
 # The job rows' columns, each followed by a space that's always there (#118)
-_ID_W, _NAME_W, _SESSION_W, _WHEN_W, _PROGRESS_W = 4, 13, 14, 16, 10  # "starts in 12h30m" is 16
+_ID_W, _NAME_W, _WHEN_W, _PROGRESS_W = 4, 13, 16, 10  # "starts in 12h30m" is 16
 _NAME_MAX = 24  # names get up to this much room, as the width allows (#143)
 _PLAN_MIN = 30  # what names leave a row for its bar or timeline and its reason
-_SESSIONS_FROM = 110  # panels at least this wide inside (terminals of 114 columns) show each job's session
 _REASON_MIN = 10  # a reason shows only when this much of it fits
 _METER_MAX = 60  # the widest a meter gets
 
@@ -399,9 +399,8 @@ def _spaced(pieces) -> list[tuple[str, str | None]]:
     return out + [(" ", None)]
 
 
-def _border(corners: str, width: int, *, title=(), note=(), labels=(), strip=None) -> _Line:
-    """A panel's top or bottom border, the terminal's width: a title on the left, a note on the right,
-    and labels at their cells (the plan's time axis, the columns' names) on a blank strip of cells."""
+def _border(corners: str, width: int, *, title=(), note=()) -> _Line:
+    """A panel's top or bottom border, the terminal's width: a title on the left, a note on the right."""
     n = max(0, width - 2)
     cells: list[tuple[str, str | None]] = [("─", _BORDER)] * n
     taken = [False] * n
@@ -420,13 +419,6 @@ def _border(corners: str, width: int, *, title=(), note=(), labels=(), strip=Non
     if note:
         piece = _spaced(note)
         place(n - 1 - sum(len(t) for t, _ in piece), piece)
-    if strip:
-        start = max(strip[0], max((i for i in range(n) if taken[i]), default=-1) + 2 if title else strip[0])
-        for i in range(max(1, start), min(strip[1], n - 1)):
-            if not taken[i]:
-                cells[i] = (" ", None)
-    for x, label in labels:
-        place(x, [(label, "2")])
     line = _Line((corners[0], _BORDER))
     for ch, sgr in cells:
         if line.parts[-1][1] == sgr:
@@ -436,10 +428,10 @@ def _border(corners: str, width: int, *, title=(), note=(), labels=(), strip=Non
     return line.add(corners[1], _BORDER)
 
 
-def _panel(width: int, rows: list[_Line], *, title, note=(), foot=(), foot_note=(), labels=(), strip=None) -> list[_Line]:
+def _panel(width: int, rows: list[_Line], *, title, note=(), foot=(), foot_note=()) -> list[_Line]:
     """A rounded panel the terminal's width, each row fitted inside its borders so they never drift."""
     inner = max(1, width - 4)
-    out = [_border("╭╮", width, title=title, note=note, labels=labels, strip=strip)]
+    out = [_border("╭╮", width, title=title, note=note)]
     for row in rows:
         fitted = row.fit(inner)
         out.append(_Line(("│ ", _BORDER), *fitted.parts, (" " * (inner - len(fitted)), None), (" │", _BORDER)))
@@ -522,19 +514,19 @@ def _tick(seconds: float) -> str:
     return format_duration(s)
 
 
-def _grid(several: bool, sessions: bool, name_w: int = _NAME_W) -> tuple[int, int, int]:
+def _grid(several: bool, name_w: int = _NAME_W) -> tuple[int, int, int]:
     """Inside a job panel: where the CPU, RAM and VRAM numbers start, the VRAM column's width, and
-    where the progress bar or the plan's timeline starts."""
-    numbers = 2 + _ID_W + 1 + name_w + 1 + (_SESSION_W + 1 if sessions else 0)
+    where the progress bar or the plan's timeline starts. Every agent's panel shares it (#167)."""
+    numbers = 2 + _ID_W + 1 + name_w + 1
     vram = 8 if several else 5
     return numbers, vram, numbers + 3 + 1 + 5 + 1 + vram + 2 + _WHEN_W + 2
 
 
-def _name_width(jobs: list[dict], inner: int, several: bool, sessions: bool) -> int:
+def _name_width(jobs: list[dict], inner: int, several: bool) -> int:
     """The name column: as wide as the longest name shown, from _NAME_W up to _NAME_MAX, leaving each
     row _PLAN_MIN for its bar or timeline and its reason (#143)."""
     longest = max((len(j["name"]) for j in jobs), default=0)
-    room = inner - _grid(several, sessions, 0)[2] - _PLAN_MIN
+    room = inner - _grid(several, 0)[2] - _PLAN_MIN
     return max(_NAME_W, min(longest, _NAME_MAX, room))
 
 
@@ -549,19 +541,17 @@ def _short_reason(job: dict) -> str:
     return re.sub(r", [\d.]+[KMGT]? in use outside dibs", "", job.get("waiting_for", ""))
 
 
-def _job_columns(job: dict, dot: str, several: bool, sessions: bool, name_w: int = _NAME_W) -> _Line:
+def _job_columns(job: dict, dot: str, several: bool, name_w: int = _NAME_W) -> _Line:
     req = job["request"]
     line = _Line((dot, _job_color(job["id"])),
                  (f" {str(job['id']).ljust(_ID_W)} {_short(job['name'], name_w).ljust(name_w)} ", None))  # fmt: skip
-    if sessions:
-        line.add(_short_label(job["session_label"], _SESSION_W).ljust(_SESSION_W) + " ", "2")
     vram = 8 if several else 5
     return line.add(f"{req['cpus']:>3} {format_size(req['mem']):>5} {_top_vram(job, several):>{vram}}  ", None)
 
 
-def _running_row(job: dict, now: float, several: bool, sessions: bool, name_w: int = _NAME_W) -> _Line:
+def _running_row(job: dict, now: float, several: bool, name_w: int = _NAME_W) -> _Line:
     """A running job: its resources, when it ends, and a bar of its time so far against its estimate."""
-    line = _job_columns(job, "●", several, sessions, name_w)
+    line = _job_columns(job, "●", several, name_w)
     over, estimate = job.get("over_estimate") or 0, job["request"]["time"]
     if over:
         line.add(f"over by {format_duration(over)}".ljust(_WHEN_W) + "  ", _WARN_SGR)
@@ -614,71 +604,146 @@ def _machine(snapshot: dict, width: int) -> list[_Line]:
                   foot=[(gpus, "2")] if gpus else (), foot_note=[(f"guard {guard.get('mode', '?')}", "2")])  # fmt: skip
 
 
-def _frame(snapshot: dict, width: int, rows_per_list: int) -> list[_Line]:
+_ESCAPES = re.compile(r"\x1b(?:\[[0-9;?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)?|.)")
+
+
+def _plain(text: str) -> str:
+    """Text the user typed, such as a session's name, made safe to draw: no escape codes or other
+    control characters (they would restyle or move the screen), no zero-width marks, and wide
+    characters (CJK, most emoji) as "?", since each takes two cells and would push the border out."""
+    out = []
+    for ch in _ESCAPES.sub("", text):
+        kind = unicodedata.category(ch)
+        if kind[0] == "C" or kind in ("Mn", "Me"):
+            out.append(" " if ch in "\t\n\r" else "")
+        else:
+            out.append("?" if unicodedata.east_asian_width(ch) in ("W", "F") else ch)
+    return " ".join("".join(out).split())
+
+
+def _agent_title(name: str, own_name: bool, running: int, waiting: int, width: int) -> list[tuple[str, str]]:
+    """A panel's title: the agent's name, cut to leave room for how many of its jobs run and wait,
+    so the title always fits its border and never disappears."""
+    counts = " · ".join(part for part in (f"{running} running" if running else "",
+                                          f"{waiting} waiting" if waiting else "") if part)  # fmt: skip
+    room = max(1, width - 8 - len(counts))  # the border's corners, its margins, and the gaps around each piece
+    cut = _short(name, room) if own_name else _short_label(name, room)
+    return [(cut, "1"), (" " + counts, "2")]
+
+
+def _axis_row(inner: int, marks: list[tuple[int, str]]) -> _Line:
+    """The waiting jobs' time axis, a row above their Gantt bars: "now" where a job starting now
+    starts, then a tick label at each step, whole labels only, never touching."""
+    cells, end = [" "] * inner, -2
+    for col, label in marks:
+        if col < end + 2 or col + len(label) > inner:
+            continue
+        cells[col : col + len(label)] = label
+        end = col + len(label) - 1
+    return _Line(("".join(cells).rstrip(), "2"))
+
+
+def _sections(snapshot: dict, width: int, names: dict) -> tuple[list[_Line], list[tuple[_Line, bool]]]:
+    """The machine panel, which stays put, and the lines below it, which scroll: a panel for each
+    agent with its running jobs then its waiting ones (#167), and the guard's. Each of the lines
+    below says whether it's a job's row, so the scroll line can count the jobs out of sight."""
     now, cap, guard = snapshot["now"], snapshot["capacity"], snapshot.get("guard", {})
     running = [j for j in snapshot["jobs"] if j["state"] == "running"]
     queued = [j for j in snapshot["jobs"] if j["state"] == "queued"]
     inner = max(1, width - 4)
-    several, sessions = len(cap["gpus"]) > 1, inner >= _SESSIONS_FROM
-    name_w = _name_width(running[:rows_per_list] + queued[:rows_per_list], inner, several, sessions)
-    numbers, vram_w, graphic = _grid(several, sessions, name_w)
-    lines = _machine(snapshot, width)
+    several = len(cap["gpus"]) > 1
+    name_w = _name_width(running + queued, inner, several)
+    numbers, vram_w, graphic = _grid(several, name_w)
+    body: list[tuple[_Line, bool]] = []
     if not running and not queued:
-        lines += _panel(width, [_Line(("Nothing running or waiting.", None)),
-                                _Line(("Queue a job: dibs submit --cpus 4 --mem 8G --time 20m -- python train.py", "2"))],
-                        title=[("queue", "1")])  # fmt: skip
+        body += [(line, False) for line in _panel(width, [
+            _Line(("Nothing running or waiting.", None)),
+            _Line(("Queue a job: dibs submit --cpus 4 --mem 8G --time 20m -- python train.py", "2"))],
+            title=[("queue", "1")])]  # fmt: skip
+    # One time scale for every agent's Gantt bars, so bars in different panels compare.
+    planned = [j for j in queued if j.get("predicted_start") is not None]
+    span = max(60.0, max((j["predicted_end"] for j in planned), default=now + 60) - now)
+    timeline = max(8, (inner - graphic) * 3 // 5)
+    x = lambda t: int((max(t, now) - now) / span * (timeline - 1))  # noqa: E731
+    interval = next((t for t in _TICKS if span / t <= max(1, timeline // 7)), _TICKS[-1])
+    axis = _axis_row(inner, [(graphic, "now")] + [(graphic + x(now + t), "+" + _tick(t))
+                                                  for t in range(int(interval), int(span) + 1, int(interval))])  # fmt: skip
 
-    def more(jobs: list) -> list:
-        return [(f"{len(jobs) - rows_per_list} more", "2")] if len(jobs) > rows_per_list else []
+    def waiting_row(job: dict) -> _Line:
+        line = _job_columns(job, "○", several, name_w)
+        start = job.get("predicted_start")
+        if start is None:
+            line.add("can't run".ljust(_WHEN_W) + "  ", None)
+        else:
+            line.add(("starting" if start <= now + 0.5 else f"starts in {format_duration(start - now)}")
+                     .ljust(_WHEN_W) + "  ", None)  # fmt: skip
+            x0, x1 = x(start), min(timeline, max(x(start) + 1, x(job["predicted_end"])))
+            line.add(" " * x0).add("━" * (x1 - x0), _job_color(job["id"]))
+        why = _short_reason(job)
+        shown = _Line((why, None)).fit(max(0, inner - len(line) - 2))
+        if why and len(shown) >= min(len(why), _REASON_MIN):  # enough of it, or none
+            line.add("  " + why, "2")
+        return line
 
-    if running:
-        rows = [_running_row(j, now, several, sessions, name_w) for j in running[:rows_per_list]]
-        # Cell x of a border sits above column x - 1 inside the panel.
-        labels = [(numbers, "cpus"), (numbers + 7, "ram"), (numbers + 7 + vram_w, "vram")]
-        lines += _panel(width, rows, title=[("running", "1"), (str(len(running)), "2")], labels=labels,
-                        strip=(numbers - 1, numbers + 12 + vram_w), foot_note=more(running))  # fmt: skip
-    if queued:
-        planned = [j for j in queued if j.get("predicted_start") is not None]
-        horizon = max((j["predicted_end"] for j in planned), default=now + 60)
-        span = max(60.0, horizon - now)
-        timeline = max(8, (inner - graphic) * 3 // 5)
-        x = lambda t: int((max(t, now) - now) / span * (timeline - 1))  # noqa: E731
-        rows = []
-        for job in queued[:rows_per_list]:
-            line = _job_columns(job, "○", several, sessions, name_w)
-            start = job.get("predicted_start")
-            if start is None:
-                line.add("can't run".ljust(_WHEN_W) + "  ", None)
-            else:
-                line.add(("starting" if start <= now + 0.5 else f"starts in {format_duration(start - now)}")
-                         .ljust(_WHEN_W) + "  ", None)  # fmt: skip
-                x0, x1 = x(start), min(timeline, max(x(start) + 1, x(job["predicted_end"])))
-                line.add(" " * x0).add("━" * (x1 - x0), _job_color(job["id"]))
-            why = _short_reason(job)
-            shown = _Line((why, None)).fit(max(0, inner - len(line) - 2))
-            if why and len(shown) >= min(len(why), _REASON_MIN):  # enough of it, or none
-                line.add("  " + why, "2")
-            rows.append(line)
-        interval = next((t for t in _TICKS if span / t <= max(1, timeline // 7)), _TICKS[-1])
-        marks = [(graphic + 1, "now")] + [(graphic + 1 + x(now + t), "+" + _tick(t))
-                                          for t in range(int(interval), int(span) + 1, int(interval))]  # fmt: skip
-        marks = [(x, label) for x, label in marks if x + len(label) < width - 3]  # whole labels only
-        strip = (graphic, max(x + len(label) for x, label in marks) + 1) if marks else None
-        lines += _panel(width, rows, title=[("waiting", "1"), (str(len(queued)), "2")], labels=marks,
-                        strip=strip, foot_note=more(queued))  # fmt: skip
+    # Panels go by each agent's oldest job, so they keep their places as jobs start and end.
+    agents: dict[str, dict] = {}
+    for job in running + queued:
+        agent = agents.setdefault(job["session"], {"running": [], "queued": [], "oldest": job})
+        agent["running" if job["state"] == "running" else "queued"].append(job)
+        if job["id"] < agent["oldest"]["id"]:
+            agent["oldest"] = job
+    for session, agent in sorted(agents.items(), key=lambda item: item[1]["oldest"]["id"]):
+        own = _plain(names.get(session) or "")
+        title = _agent_title(own or _plain(agent["oldest"]["session_label"]), bool(own), len(agent["running"]),
+                             len(agent["queued"]), width)  # fmt: skip
+        rows = [(_running_row(j, now, several, name_w), True) for j in agent["running"]]
+        if agent["queued"]:
+            rows += [(axis, False)] + [(waiting_row(j), True) for j in agent["queued"]]
+        panel = _panel(width, [row for row, _ in rows], title=title)
+        body += list(zip(panel, [False] + [is_job for _, is_job in rows] + [False]))
     extra = guard_lines(guard, now)
     if extra:
         rows = [_Line((text, _WARN_SGR if text.startswith("Stopped") else "2")) for text in extra[:4]]
-        lines += _panel(width, rows, title=[("guard", "1")])
-    return lines
+        body += [(line, False) for line in _panel(width, rows, title=[("guard", "1")])]
+    fixed = _machine(snapshot, width)
+    if agents:  # the columns' names, once, over every panel's rows, as htop's header row is
+        head = [" "] * width
+        for cell, label in ((numbers, "cpus"), (numbers + 7, "ram"), (numbers + 7 + vram_w, "vram")):
+            head[cell + 1 : cell + 1 + len(label)] = label  # ending where its column's numbers end
+        fixed.append(_Line(("".join(head).rstrip(), "2")))
+    return fixed, body
 
 
-def render_top(snapshot: dict, *, width: int, height: int, color: bool) -> str:
-    """One screen of `dibs top`: an instrument panel of what's reserved, what runs, what's next (#122)."""
+def _scroll_line(above: int, hidden_above: bool, below: int, hidden_below: bool) -> _Line:
+    """The bottom line while the panels scroll: how many jobs are out of sight each way, and the keys."""
+    def side(arrow: str, jobs: int, hidden: bool, where: str) -> str:
+        if jobs:
+            return f"{arrow} {jobs} job{'s' if jobs != 1 else ''} {where}"
+        return f"{arrow} more {where}" if hidden else ""
+
+    parts = [p for p in (side("↑", above, hidden_above, "above"), side("↓", below, hidden_below, "below")) if p]
+    return _Line((" " + " · ".join(parts + ["↑↓ PgUp PgDn Home End to scroll"]), "2"))
+
+
+def top_screen(snapshot: dict, *, width: int, height: int, color: bool, offset: int = 0,
+               names: dict | None = None) -> tuple[str, int, int]:  # fmt: skip
+    """One screen of `dibs top` (#122), scrolled offset lines down when the panels don't fit (#167):
+    the screen, the offset kept within what there is to scroll, and how many lines a page shows."""
     width = max(width, 30)
-    rows = max(1, len(snapshot["jobs"]))
-    lines = _frame(snapshot, width, rows)
-    while len(lines) > height and rows > 1:
-        rows -= 1
-        lines = _frame(snapshot, width, rows)
-    return "\n".join(line.render(width, color) for line in lines[:height])
+    fixed, body = _sections(snapshot, width, names or {})
+    if len(fixed) + len(body) <= height:
+        lines, offset, page = fixed + [line for line, _ in body], 0, len(body)
+    else:
+        page = max(1, height - len(fixed) - 1)
+        offset = max(0, min(offset, len(body) - page))
+        out_above, out_below = body[:offset], body[offset + page :]
+        lines = fixed + [line for line, _ in body[offset : offset + page]] + [_scroll_line(
+            sum(is_job for _, is_job in out_above), bool(out_above),
+            sum(is_job for _, is_job in out_below), bool(out_below))]  # fmt: skip
+    return "\n".join(line.render(width, color) for line in lines[:height]), offset, page
+
+
+def render_top(snapshot: dict, *, width: int, height: int, color: bool, offset: int = 0,
+               names: dict | None = None) -> str:  # fmt: skip
+    """One screen of `dibs top`: an instrument panel of what's reserved, what runs, what's next (#122)."""
+    return top_screen(snapshot, width=width, height=height, color=color, offset=offset, names=names)[0]

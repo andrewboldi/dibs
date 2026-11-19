@@ -3,6 +3,7 @@
 import argparse
 import json
 import os
+import re
 import select
 import shutil
 import signal
@@ -12,7 +13,7 @@ import time
 import tty
 from pathlib import Path
 
-from dibs import __version__
+from dibs import __version__, agents
 from dibs import client as dc
 from dibs import render
 from dibs.paths import Paths, get_paths
@@ -370,31 +371,101 @@ def cmd_info(args, paths: Paths, _) -> int:
     return 0
 
 
+# dibs top's keys (#167), as htop takes them: the arrows and j/k scroll a line, PgUp/PgDn and space a
+# page, Home/End and g/G to either end, the mouse wheel three lines; q or Ctrl-C quits.
+_TOP_SEQUENCES = {b"\x1b[A": "up", b"\x1bOA": "up", b"\x1b[B": "down", b"\x1bOB": "down",
+                  b"\x1b[5~": "page_up", b"\x1b[6~": "page_down", b"\x1b[H": "home", b"\x1bOH": "home",
+                  b"\x1b[1~": "home", b"\x1b[7~": "home", b"\x1b[F": "end", b"\x1bOF": "end", b"\x1b[4~": "end",
+                  b"\x1b[8~": "end"}  # fmt: skip
+_TOP_CHARS = {b"q": "quit", b"Q": "quit", b"\x03": "quit", b"k": "up", b"j": "down", b" ": "page_down",
+              b"g": "home", b"G": "end"}  # fmt: skip
+_SGR_MOUSE = re.compile(rb"\x1b\[<(\d+);\d+;\d+([Mm])")
+_SEQUENCE = re.compile(rb"\x1b(?:\[[0-9;<?]*[ -/]*[@-~]|O[@-~])")
+_PARTIAL = re.compile(rb"\x1b(?:\[[0-9;<?]*|O)?\Z")
+_TOP_STEPS = {"up": -1, "down": 1, "wheel_up": -3, "wheel_down": 3}
+
+
+def _top_keys(data: bytes) -> tuple[list[str], bytes]:
+    """What the bytes a terminal sent ask dibs top to do, and an escape sequence cut off at their end,
+    which waits for the next read to finish it. Other keys, and mouse clicks, do nothing."""
+    actions: list[str] = []
+    i = 0
+    while i < len(data):
+        rest = data[i:]
+        if rest[:1] != b"\x1b":
+            if action := _TOP_CHARS.get(rest[:1]):
+                actions.append(action)
+            i += 1
+        elif rest.startswith(b"\x1b[M"):  # the older mouse encoding: a button byte and two more after it
+            if len(rest) < 6:
+                return actions, rest
+            if rest[3] - 32 in (64, 65):
+                actions.append("wheel_up" if rest[3] - 32 == 64 else "wheel_down")
+            i += 6
+        elif mouse := _SGR_MOUSE.match(rest):
+            if int(mouse.group(1)) in (64, 65) and mouse.group(2) == b"M":
+                actions.append("wheel_up" if mouse.group(1) == b"64" else "wheel_down")
+            i += mouse.end()
+        elif sequence := _SEQUENCE.match(rest):
+            if action := _TOP_SEQUENCES.get(sequence.group(0)):
+                actions.append(action)
+            i += sequence.end()
+        elif _PARTIAL.match(rest) and len(rest) < 32:
+            return actions, rest
+        else:  # a lone Escape
+            i += 1
+    return actions, b""
+
+
+def _scrolled(offset: int, page: int, action: str) -> int:
+    """Where the panels start after a key; top_screen keeps it within what there is to scroll."""
+    if action == "home":
+        return 0
+    if action == "end":
+        return 1 << 30
+    step = {"page_up": -max(1, page - 1), "page_down": max(1, page - 1)}.get(action, _TOP_STEPS.get(action, 0))
+    return max(0, offset + step)
+
+
 def cmd_top(args, paths: Paths, _) -> int:
     client = dc.Client(paths)
-    if not sys.stdout.isatty():
+    home = Path.home()
+    if not sys.stdout.isatty():  # everything at once, for a pipe or a file
         size = shutil.get_terminal_size((100, 40))
-        print(render.render_top(client.call("queue"), width=size.columns, height=size.lines, color=False))
+        print(render.render_top(client.call("queue"), width=size.columns, height=1 << 30, color=False,
+                                names=agents.session_names(home)))  # fmt: skip
         return 0
-    saved = termios.tcgetattr(sys.stdin) if sys.stdin.isatty() else None
+    fd = sys.stdin.fileno()
+    saved = termios.tcgetattr(fd) if sys.stdin.isatty() else None
     if saved:
-        tty.setcbreak(sys.stdin)
-    sys.stdout.write("\033[?1049h\033[?25l")  # alternate screen, hide the cursor
+        tty.setcbreak(fd)
+    # Alternate screen, no cursor, and mouse reporting so the wheel scrolls, in tmux too (#167).
+    sys.stdout.write("\033[?1049h\033[?25l\033[?1000h\033[?1006h")
+    offset, page, pending = 0, 1, b""
     try:
         while True:
             size = shutil.get_terminal_size()
-            frame = render.render_top(client.call("queue"), width=size.columns, height=size.lines, color=True)
+            frame, offset, page = render.top_screen(client.call("queue"), width=size.columns, height=size.lines,
+                                                    color=True, offset=offset, names=agents.session_names(home))  # fmt: skip
             sys.stdout.write("\033[H" + frame.replace("\n", "\033[K\n") + "\033[K\033[J")
             sys.stdout.flush()
-            ready, _, _ = select.select([sys.stdin] if saved else [], [], [], 1.0)
-            if ready and sys.stdin.read(1) in ("q", "Q", "\x03"):
+            ready, _, _ = select.select([fd] if saved else [], [], [], 1.0)
+            if not ready:
+                continue
+            data = os.read(fd, 1024)
+            if not data:  # the terminal hung up
                 return 0
+            actions, pending = _top_keys(pending + data)
+            for action in actions:
+                if action == "quit":
+                    return 0
+                offset = _scrolled(offset, page, action)
     except (KeyboardInterrupt, _Interrupted):
         return 0
     finally:
         if saved:
-            termios.tcsetattr(sys.stdin, termios.TCSADRAIN, saved)
-        sys.stdout.write("\033[?25h\033[?1049l")
+            termios.tcsetattr(fd, termios.TCSADRAIN, saved)
+        sys.stdout.write("\033[?1006l\033[?1000l\033[?25h\033[?1049l")
         sys.stdout.flush()
 
 
