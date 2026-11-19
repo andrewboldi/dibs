@@ -154,6 +154,12 @@ def test_agent_help_says_dibs_retries_resource_failures():
         assert phrase in AGENT_HELP, phrase
 
 
+def test_agent_help_says_a_retry_runs_over_what_the_stopped_try_left():
+    # Issue #177: an export that refuses to start when its output exists failed both of its retries.
+    for phrase in ("over whatever a stopped try left", "refuses to start when its output already exists"):
+        assert phrase in AGENT_HELP, phrase
+
+
 def test_agent_help_says_files_in_a_folder_kept_in_ram_count_as_ram():
     # Issue #74: most RAM kills were scratch files in a /tmp kept in RAM.
     for phrase in ("/dev/shm", "findmnt /tmp", "TMPDIR", "until deleted", "dibs deletes when the job ends"):
