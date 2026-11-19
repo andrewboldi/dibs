@@ -63,7 +63,7 @@ def test_open_backend_honours_env(fake_env):
 
 def test_no_gpu_backend():
     backend = NoGpuBackend()
-    assert backend.list_gpus() == [] and backend.processes() == []
+    assert backend.list_gpus() == [] and backend.processes() == [] and backend.graphics_processes() == []
 
 
 def test_nvml_backend_reads_real_gpu():
@@ -74,6 +74,7 @@ def test_nvml_backend_reads_real_gpu():
     gpus = backend.list_gpus()
     assert gpus and all(g.vram > 0 and g.uuid.startswith("GPU-") for g in gpus)
     assert isinstance(backend.processes(), list)
+    assert isinstance(backend.graphics_processes(), list)
 
 
 # --- AMD: amd-smi ---------------------------------------------------------------------------------

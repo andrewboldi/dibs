@@ -33,6 +33,7 @@ class FakeBackend:
     def __init__(self, gpus=(FAKE_GPU,), procs=()):
         self.gpus = list(gpus)
         self.procs: list[GpuProcess] = list(procs)
+        self.graphics: list[GpuProcess] = []  # processes holding a graphics context (EGL/OpenGL), #173
         self.blind = False  # True: the driver doesn't report processes
 
     def list_gpus(self):
@@ -40,6 +41,9 @@ class FakeBackend:
 
     def processes(self):
         return None if self.blind else list(self.procs)
+
+    def graphics_processes(self):
+        return None if self.blind else list(self.graphics)
 
 
 @pytest.fixture
