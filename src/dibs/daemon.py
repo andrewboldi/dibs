@@ -85,6 +85,8 @@ FAILED_FOR = 3600.0  # seconds: a failed job is told at each of its session's di
 IDLE_UTIL, IDLE_EVERY, IDLE_TELL_EVERY, IDLE_SHARE = 5.0, 30.0, 3600.0, 0.1
 IDLE_AFTER = GPU_IDLE_AFTER
 ADVISE_EVERY = 3600.0  # seconds: each kind of advice, at most this often per session and script (#169)
+SHORTAGE_LOG_EVERY = 60.0  # seconds: while short of memory, what the relief did, logged this often (#191)
+SLOW_PASS = 5.0  # seconds: a pass of the daemon's loop this long is logged (#191)
 ADVISE_RUNS = 5  # runs of a script it takes to say how it uses what it asks for (#169)
 WAIT_RECHECK = 5.0  # a long-polling wait re-checks its jobs at least this often
 LOG_MAX = 5 * 1024 * 1024
@@ -212,6 +214,9 @@ class Daemon:
         self.pressure = pressure
         self._pressured_since: float | None = None  # when memory pressure rose above EVICT_PRESSURE
         self._idle_at = -math.inf  # when idle GPU holds were last checked (#180)
+        self._relief_note = ""  # what the memory relief did last, for the log (#191)
+        self._shortage_logged = -math.inf
+        self._passes: deque[tuple[float, float]] = deque()  # (time, seconds the pass took), the last minute
         self._held: dict[int, int] = {}  # job id -> what it held (anon + shmem) at this tick's sample
         self._grow_failed: dict[int, float] = {}  # job id -> when raising its RAM limit last failed
         self.cpu_busy = cpu_busy
@@ -846,7 +851,21 @@ class Daemon:
             self._reline(session)
 
     def tick(self) -> None:
-        """Called about once a second: notice finished jobs, push stops along, start what can start."""
+        """Called about once a second: notice finished jobs, push stops along, start what can start. A slow
+        pass is logged: the relief of a memory shortage needs it to keep up (#191)."""
+        began = time.monotonic()
+        try:
+            self._tick()
+        finally:
+            took = time.monotonic() - began
+            now = self.clock()
+            self._passes.append((now, took))
+            while self._passes and self._passes[0][0] < now - SHORTAGE_LOG_EVERY:
+                self._passes.popleft()
+            if took >= SLOW_PASS:
+                log.info("a pass took %.1f s", took)
+
+    def _tick(self) -> None:
         now = self.clock()
         launcher.reap()
         for job in self.store.jobs([State.RUNNING]):
@@ -1176,8 +1195,22 @@ class Daemon:
         self.store.set_meta("short_since", repr(now))
         # RAM dibs lent a job to grow into comes back first (#182), then a program outside dibs (#135),
         # then RAM a job started on (#114).
+        self._relief_note = "nothing to stop"
         if not self._give_back_growth(now) and not self._stop_ram_hog(now):
             self._give_back_borrowed(now)
+        self._log_shortage(now)
+
+    def _log_shortage(self, now: float) -> None:
+        """Once a minute while short of memory: how short, what the relief did, and the longest pass of
+        the daemon's loop (#191), so a shortage it didn't relieve can be told from one it couldn't see."""
+        if now - self._shortage_logged < SHORTAGE_LOG_EVERY:
+            return
+        self._shortage_logged = now
+        info = self._meminfo()
+        total, used = info if info is not None else (self.capacity.mem, self.capacity.mem)
+        passes = f"; longest pass in the last minute {max(t for _, t in self._passes):.1f} s" if self._passes else ""
+        log.info("short of memory: %s of %s available, memory pressure %.0f%%: %s%s", format_size(max(0, total - used)),
+                 format_size(total), self.pressure(), self._relief_note, passes)  # fmt: skip
 
     def _give_back_growth(self, now: float) -> bool:
         """Stop the most recently started job that grew into RAM other jobs reserved (#182): dibs lent it
@@ -1187,6 +1220,7 @@ class Daemon:
         if not growers:
             return False
         job = max(growers, key=lambda j: (j.started or 0, j.id))
+        self._relief_note = f"stopped job {job.id}, which had grown into RAM other jobs reserved"
         job.evicted = True
         job.stop_reason = ("stopped to give back RAM other jobs reserved, which it had grown into: the machine was "
                            "short of memory")  # fmt: skip
@@ -1208,6 +1242,7 @@ class Daemon:
         shims = {j.shim_pid: j.id for j in running if j.shim_pid}
         units = {j.unit: j.id for j in running if j.unit}
         mine = {os.getpid(), *self._ancestors}
+        left: list[tuple[int, int, str]] = []
         hog = guard.ram_hog(
             self.programs(minimum),
             minimum=minimum,
@@ -1219,8 +1254,14 @@ class Daemon:
             parents=self.guard_parents,
             instance=self.paths.instance,
             desktop=self.config.guard_desktop,
+            left=left,
         )
         if hog is None:
+            if left:
+                pid, held, why = left[0]
+                self._relief_note = f"nothing to stop: the largest program outside dibs, pid {pid} holding {format_size(held)}, is left alone ({why})"
+            else:
+                self._relief_note = f"nothing to stop: no program outside dibs holds {format_size(minimum)} or more"
             return False
         pid, held, kind = hog
         if kind == "warn":
@@ -1233,6 +1274,7 @@ class Daemon:
         self.store.add_event("stop", event, now)
         log.info("guard stopped pid %d, holding %s of RAM while the machine was short of memory: %s",
                  pid, format_size(held), event["command"])  # fmt: skip
+        self._relief_note = f"stopped pid {pid}, holding {format_size(held)}"
         return True
 
     def _give_back_borrowed(self, now: float) -> None:
@@ -1245,6 +1287,7 @@ class Daemon:
         if not borrowers:
             return
         job = max(borrowers, key=lambda j: (j.started or 0, j.id))
+        self._relief_note = f"stopped job {job.id}, which started on RAM other jobs reserved"
         job.evicted = True
         job.stop_reason = "stopped to give back borrowed RAM: the machine was short of memory"
         job.stop_requested = now
