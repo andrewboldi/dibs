@@ -15,7 +15,7 @@ import time
 import tty
 from pathlib import Path
 
-from dibs import __version__, agents
+from dibs import __version__, agents, build_id
 from dibs import client as dc
 from dibs import render
 from dibs.paths import Paths, get_paths
@@ -131,7 +131,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("id", type=int)
     s.add_argument("--json", action="store_true")
 
-    w = sub.add_parser("wait", help="wait for jobs to finish; exits with the job's exit code")
+    waits = "wait until every listed job ends (or --timeout); exits with a failed job's exit code"
+    w = sub.add_parser("wait", help=waits, description=waits)
     w.add_argument("ids", type=int, nargs="+", metavar="ID")
     w.add_argument("--timeout", type=_duration, help="give up after this long, like 9m (exit 124)")
     w.add_argument("--json", action="store_true")
@@ -579,10 +580,12 @@ REPEATABLE = {"wait", "queue", "q", "show", "status", "info", "top"}
 
 
 def _run_again(argv: list[str]) -> None:
-    """dibs was upgraded while this command ran: run it again, started the same way, on the new code."""
+    """dibs was upgraded while this command ran: run it again, started the same way, on the new code.
+    DIBS_RERUN says which code ran it, so the rerun runs again after each new upgrade, but not when it
+    didn't pick up new code (#201)."""
     sys.stdout.flush()
     sys.stderr.flush()
-    os.execve(sys.executable, [sys.executable, sys.argv[0], *argv], {**os.environ, "DIBS_RERUN": "1"})
+    os.execve(sys.executable, [sys.executable, sys.argv[0], *argv], {**os.environ, "DIBS_RERUN": build_id()})
 
 
 HANDLERS = {
@@ -671,8 +674,8 @@ def main(argv: list[str] | None = None) -> int:
             _tell(get_paths(), seen=looks, failures=not getattr(args, "json", False))
         return HANDLERS[args.cmd](args, get_paths(), command)
     except dc.DibsError as e:
-        if e.code == "upgraded" and args.cmd in REPEATABLE and not os.environ.get("DIBS_RERUN"):
-            _run_again(given)  # once: a second upgrade under the same command shows the error
+        if e.code == "upgraded" and args.cmd in REPEATABLE and os.environ.get("DIBS_RERUN") != build_id():
+            _run_again(given)  # again on each new upgrade; a rerun still on the same code shows the error (#201)
         print(f"dibs: {e}", file=sys.stderr)
         return 2 if e.code == "rejected" else 1
     except KeyboardInterrupt:

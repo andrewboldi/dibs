@@ -369,7 +369,9 @@ def test_a_repeatable_command_runs_again_on_the_upgraded_code(argv, monkeypatch,
     cli, execs = _upgraded_under(monkeypatch, tmp_path)
     with pytest.raises(SystemExit):
         cli.main(argv)
-    assert execs == [(PY, [PY, sys.argv[0], *argv], "1")]  # the same dibs, started the same way
+    from dibs import build_id
+
+    assert execs == [(PY, [PY, sys.argv[0], *argv], build_id())]  # the same dibs, started the same way
 
 
 @pytest.mark.parametrize(
@@ -406,11 +408,29 @@ def test_a_run_the_upgrade_reaches_after_its_submit_names_the_running_job(monkey
     )
 
 
-def test_a_command_runs_again_only_once(monkeypatch, tmp_path, capsys):
+def test_a_command_run_again_on_the_same_code_doesnt_run_again(monkeypatch, tmp_path, capsys):
+    # The rerun didn't pick up the new code (it was started another way): show the error, don't loop.
+    from dibs import build_id
+
     cli, execs = _upgraded_under(monkeypatch, tmp_path)
-    monkeypatch.setenv("DIBS_RERUN", "1")
+    monkeypatch.setenv("DIBS_RERUN", build_id())
     assert cli.main(["wait", "5"]) == 1
     assert execs == []
+
+
+def test_a_wait_runs_again_on_each_new_upgrade(monkeypatch, tmp_path):
+    # #201: a second upgrade during the same dibs wait ended it with an error, its jobs still queued.
+    from dibs import build_id
+
+    cli, execs = _upgraded_under(monkeypatch, tmp_path)
+    monkeypatch.setenv("DIBS_RERUN", "0.1.0+the-code-before")  # it ran again once already, on other code
+    with pytest.raises(SystemExit):
+        cli.main(["wait", "5"])
+    assert execs == [(PY, [PY, sys.argv[0], "wait", "5"], build_id())]
+
+
+def test_the_wait_help_says_it_waits_for_every_job(dibs):
+    assert "until every listed job ends" in " ".join(dibs("wait", "--help", check=0).stdout.split())
 
 
 def test_a_wait_dibs_was_upgraded_under_runs_again_until_its_job_ends(dibs, tmp_path):
