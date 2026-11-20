@@ -1598,3 +1598,35 @@ def test_earlier_runs_say_when_the_gpu_they_reserved_went_unused():
     assert hint not in render_earlier([run(1, 0), run(2, 300 * MiB)])  # one did use it
     assert hint not in render_earlier([run(1, 0, ran=3.0)])  # too short to tell
     assert hint not in render_earlier([run(1, None)])  # dibs couldn't see the GPU's processes
+
+
+def test_a_waiting_jobs_view_names_the_job_past_its_estimate_it_waits_for(make_daemon, tmp_path):
+    # #181: its predicted start is that job's assumed end, which moves with every pass.
+    now = [1_000_000.0]
+    d = make_daemon(clock=lambda: now[0], slept=lambda: 0.0)
+    go = tmp_path / "go"
+    holding = [PY, "-c", f"import os, time\nwhile not os.path.exists({str(go)!r}): time.sleep(0.02)"]
+    running = submit(d, tmp_path, holding, cpus="all", time_=600.0)
+    run_until(d, lambda: job(d, running).shim_pid)
+    now[0] += 900  # 5 minutes past its 10-minute estimate
+    waiting = submit(d, tmp_path, [PY, "-c", "pass"], cpus="all")
+    assert d.show(waiting)["job"]["after"] == {"id": running, "over": 300.0, "estimate": 600.0}
+    go.touch()
+    run_until(d, lambda: finished(d, running))
+
+
+def test_a_start_waiting_on_a_job_past_its_estimate_is_shown_as_that_job_ending():
+    from dibs.model import Job, Request, State, job_to_dict
+    from dibs.render import _when_cell, render_show, render_submit, top_screen
+
+    t = 1_000_000.0
+    request = Request(cpus=2, mem=8 * GiB, gpus=1, vram=1 * GiB, time=3600.0)
+    waiting = Job(id=2644, name="game", argv=["python", "game.py"], cwd="/w", env={}, request=request, session="s",
+                  session_label="w·s", submitted=t, tag=t + 3600, state=State.QUEUED, output="/w/out")  # fmt: skip
+    view = {**job_to_dict(waiting), "position": 1, "predicted_start": t + 300, "predicted_end": t + 3900,
+            "waiting_for": "needs 1G VRAM (0 free)", "lacks": ["VRAM"], "behind": None,
+            "after": {"id": 2270, "over": 3 * 3600 + 840.0, "estimate": 3000.0}}  # fmt: skip
+    ending = "when #2270 ends (3h14m past its 50m estimate)"
+    assert _when_cell(view, t) == f"starts {ending}: needs 1G VRAM (0 free)"
+    assert f"expected to start {ending}." in render_submit(view, t)
+    assert f"start {ending}" in render_show(view, t) and "in 5m" not in render_show(view, t)

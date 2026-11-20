@@ -1452,6 +1452,7 @@ class Daemon:
                 waiting_for=p.reason if p else "",
                 lacks=list(p.lacks) if p else [],
                 behind=p.behind if p else None,
+                after=dict(zip(("id", "over", "estimate"), p.after)) if p and p.after else None,
             )
         elif job.state == State.RUNNING:
             started = (job.started or now) + self._asleep(job)

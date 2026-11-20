@@ -15,7 +15,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 
 from dibs.model import Capacity, Request, fits_machine
-from dibs.units import format_size, format_size_against
+from dibs.units import format_duration, format_size, format_size_against
 
 OVERRUN_MIN = 60.0
 OVERRUN_FRACTION = 0.10
@@ -56,6 +56,9 @@ class Prediction:
     reason: str  # why it isn't starting now; "" if it is
     lacks: tuple[str, ...] = ()  # what it waits for, in a word each: CPUs, RAM, VRAM, GPUs (#143)
     behind: int | None = None  # the job ahead in line it would delay by starting now (#143)
+    # (job, how far past its estimate, its estimate): a running job past its estimate whose assumed end
+    # this start rests on, which moves with every pass (#181)
+    after: tuple[int, float, float] | None = None
 
 
 @dataclass(frozen=True)
@@ -212,6 +215,9 @@ def plan(
 
     # What is free right now, once the jobs starting now have taken their share.
     now_cpus, now_mem, now_vram = profile.cpus[0], profile.mem[0], profile.vram[0]
+    # Starts that rest on a running job's assumed end past its estimate (#181).
+    overrunning = {running_ends[r.job_id]: r for r in running if r.started + r.request.time <= now}
+    rests = {job_id: overrunning[start] for job_id, (start, _, _) in placed.items() if start > now and start in overrunning}
     predictions: dict[int, Prediction] = {}
     for position, q in enumerate(order, 1):
         problem = fits_machine(q.request, capacity)
@@ -221,7 +227,7 @@ def plan(
             )
             continue
         if q.job_id not in placed:  # waits for programs outside dibs to free RAM
-            reason, lacks, behind = _reason(q, order, placed, now, now_cpus, now_mem, now_vram, outside_mem)
+            reason, lacks, behind = _reason(q, order, placed, now, now_cpus, now_mem, now_vram, outside_mem, rests)
             predictions[q.job_id] = Prediction(q.job_id, position, None, None, (), reason, lacks, behind)
             continue
         start, end, gpu_ids = placed[q.job_id]
@@ -231,13 +237,17 @@ def plan(
         elif start > now and blocker is not None:
             reason = f"waits for #{blocker}, which has the machine to itself"
         elif start > now:
-            reason, lacks, behind = _reason(q, order, placed, now, now_cpus, now_mem, now_vram, outside_mem)
-        predictions[q.job_id] = Prediction(q.job_id, position, start, end, gpu_ids, reason, lacks, behind)
+            reason, lacks, behind = _reason(q, order, placed, now, now_cpus, now_mem, now_vram, outside_mem, rests)
+        r = rests.get(q.job_id)
+        after = (r.job_id, now - r.started - r.request.time, r.request.time) if r else None
+        predictions[q.job_id] = Prediction(q.job_id, position, start, end, gpu_ids, reason, lacks, behind, after)
 
     return Plan(starts, predictions, running_ends)
 
 
-def _reason(q, order, placed, now, free_cpus, free_mem, free_vram, outside_mem=0) -> tuple[str, tuple[str, ...], int | None]:
+def _reason(
+    q, order, placed, now, free_cpus, free_mem, free_vram, outside_mem=0, rests=None
+) -> tuple[str, tuple[str, ...], int | None]:
     """Why a queued job isn't starting now, and the same in a word or two for dibs top: what it lacks,
     and the job ahead in line it would delay."""
     req = q.request
@@ -269,5 +279,10 @@ def _reason(q, order, placed, now, free_cpus, free_mem, free_vram, outside_mem=0
         if ahead.job_id in placed:
             start, _, _ = placed[ahead.job_id]
             if now < start < now + req.time:
+                r = (rests or {}).get(ahead.job_id)
+                if r is not None:  # #181: and that start moves with every pass
+                    over, estimate = format_duration(now - r.started - r.request.time), format_duration(r.request.time)
+                    why = f"would delay #{ahead.job_id}, which waits for #{r.job_id} to end ({over} past its {estimate} estimate)"
+                    return why, (), ahead.job_id
                 return f"would delay #{ahead.job_id}, which is ahead in line", (), ahead.job_id
     return "waiting for a job ahead in line", (), None

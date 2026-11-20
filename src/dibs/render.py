@@ -140,13 +140,19 @@ def render_submit(job: dict, now: float) -> str:
     elif job["state"] == "queued":
         head = (
             f"{name} queued: {ordinal(job['position'])} in line, "
-            f"expected to start {when(job['predicted_start'], now)}."
+            f"expected to start {_after(job['after']) if job.get('after') else when(job['predicted_start'], now)}."
         )
         if job.get("waiting_for"):
             head += f"\n  Waiting: {job['waiting_for']}"
     else:
         return finished_line(job)
     return f"{head}\n  dibs wait {job_id}      dibs logs {job_id} -f"
+
+
+def _after(after: dict) -> str:
+    """A start that rests on a running job past its estimate, whose assumed end moves with every pass (#181)."""
+    over, estimate = format_duration(after["over"]), format_duration(after["estimate"])
+    return f"when #{after['id']} ends ({over} past its {estimate} estimate)"
 
 
 def _when_cell(job: dict, now: float) -> str:
@@ -160,7 +166,7 @@ def _when_cell(job: dict, now: float) -> str:
             return f"can't run here: {job['waiting_for']}"
         if job["predicted_start"] <= now + 0.5:
             return "starting"
-        cell = f"starts {when(job['predicted_start'], now)}"
+        cell = f"starts {_after(job['after']) if job.get('after') else when(job['predicted_start'], now)}"
         return cell + (f": {job['waiting_for']}" if job.get("waiting_for") else "")
     cell = f"{state} {clock(job['ended'], now)}" if job.get("ended") else state
     if state != "cancelled" and job.get("exit_code") is not None:
@@ -261,9 +267,12 @@ def render_show(job: dict, now: float) -> str:
         if job.get("predicted_start") is None:
             rows.append(("can't run", job["waiting_for"]))
         else:
-            rows.append(
-                ("expected", f"start {when(job['predicted_start'], now)}, end ~{clock(job['predicted_end'], now)}")
-            )
+            if job.get("after"):
+                rows.append(("expected", f"start {_after(job['after'])}"))
+            else:
+                rows.append(
+                    ("expected", f"start {when(job['predicted_start'], now)}, end ~{clock(job['predicted_end'], now)}")
+                )
             if job.get("waiting_for"):
                 rows.append(("waiting", job["waiting_for"]))
     elif state == "running":
@@ -675,8 +684,8 @@ def _sections(snapshot: dict, width: int, names: dict) -> tuple[list[_Line], lis
         if start is None:
             line.add("can't run".ljust(_WHEN_W) + "  ", None)
         else:
-            line.add(("starting" if start <= now + 0.5 else f"starts in {format_duration(start - now)}")
-                     .ljust(_WHEN_W) + "  ", None)  # fmt: skip
+            line.add(("starting" if start <= now + 0.5 else f"after #{job['after']['id']}" if job.get("after")
+                      else f"starts in {format_duration(start - now)}").ljust(_WHEN_W) + "  ", None)  # fmt: skip
             x0, x1 = x(start), min(timeline, max(x(start) + 1, x(job["predicted_end"])))
             line.add(" " * x0).add("━" * (x1 - x0), _job_color(job["id"]))
         why = _short_reason(job)
