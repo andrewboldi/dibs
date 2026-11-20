@@ -339,3 +339,25 @@ def test_a_job_counts_on_a_gpu_only_while_it_runs():
     waits = queued(3, req(cpus=63, gpus=1, vram=20 * GiB, time=600))  # waits for job 1's core
     p = plan(big, [soon, later], [waits], NOW)
     assert p.predictions[3].gpu_ids == (1,)
+
+
+def test_a_start_that_rests_on_a_job_past_its_estimate_names_it():
+    # #181: a GPU job waits for a job 10 minutes past its 50-minute estimate. Assumed to end 5 minutes
+    # from now, pass after pass, it made the wait read "starts in 5m" for as long as it kept running.
+    long = running(1, req(cpus=8, mem=10 * GiB, gpus=1, vram=7 * GiB, time=3000), range(8), (0,), started=NOW - 3600)
+    gpu_job = queued(2, req(cpus=2, mem=20 * GiB, gpus=1, vram=7 * GiB, time=3600), submitted=NOW - 7200, tag=NOW - 3600)
+    cpu_job = queued(3, req(cpus=1, mem=14 * GiB, time=900), submitted=NOW - 300)
+    p = plan(cap(cpus=24, mem=32 * GiB), [long], [gpu_job, cpu_job], NOW)
+    assert p.predictions[2].start == NOW + 300 and p.predictions[2].after == (1, 600.0, 3000)
+    assert p.predictions[3].reason == "would delay #2, which waits for #1 to end (10m past its 50m estimate)"
+    assert p.predictions[3].after is None  # its own start rests on #2's end, not on #1's
+
+
+def test_a_start_that_rests_on_a_job_within_its_estimate_names_no_job():
+    # The same wait, but the running job is due to end in 5 minutes within its estimate.
+    long = running(1, req(cpus=8, mem=10 * GiB, gpus=1, vram=7 * GiB, time=3000), range(8), (0,), started=NOW - 2700)
+    gpu_job = queued(2, req(cpus=2, mem=20 * GiB, gpus=1, vram=7 * GiB, time=3600), submitted=NOW - 7200, tag=NOW - 3600)
+    cpu_job = queued(3, req(cpus=1, mem=14 * GiB, time=900), submitted=NOW - 300)
+    p = plan(cap(cpus=24, mem=32 * GiB), [long], [gpu_job, cpu_job], NOW)
+    assert p.predictions[2].after is None
+    assert p.predictions[3].reason == "would delay #2, which is ahead in line"
