@@ -239,7 +239,7 @@ def cmd_submit(args, paths: Paths, command: list[str]) -> int:
             print(render.render_earlier(earlier, match), file=sys.stderr)
         if response["job"]["state"] == "queued" and (line := render.render_estimates(response.get("estimates"))):
             print(line, file=sys.stderr)  # only for a job that waits: its promise is of starting sooner
-    _tell(paths, failures=not args.json)
+    _tell(paths, failures=not args.json, at_submit=True)
     return 0
 
 
@@ -255,7 +255,7 @@ def cmd_run(args, paths: Paths, command: list[str]) -> int:
         print(render.render_earlier(response["earlier"], response.get("earlier_match", "command")), file=sys.stderr)
     if job["state"] == "queued" and (line := render.render_estimates(response.get("estimates"))):
         print(line, file=sys.stderr)  # only for a job that waits (#169)
-    _tell(paths)
+    _tell(paths, at_submit=True)
     try:
         finished = _follow(client, job["id"], job["output"], 0, sys.stdout.buffer)
     except KeyboardInterrupt:
@@ -617,19 +617,24 @@ def _discarded(stream) -> bool:
     return stat.S_ISCHR(here.st_mode) and here.st_rdev == null.st_rdev
 
 
-def _tell(paths, seen: list[int] | None = None, failures: bool = True) -> None:
+def _tell(paths, seen: list[int] | None = None, failures: bool = True, at_submit: bool = False) -> None:
     """Tell this session what the guard stopped of its since it was last told: the note in a stopped
     program's own output can be lost, in a pipe through grep or a log nobody reads (#135). And its jobs
     that failed in the last hour, at each command until one looks at them (seen) (#176). failures=False
     for JSON output, which a program reads."""
     try:
-        notices = dc.Client(paths).call("notices", session=dc.current_session()[0], seen=seen or []).get("notices", [])
+        notices = dc.Client(paths).call(
+            "notices", session=dc.current_session()[0], seen=seen or [], at_submit=at_submit
+        ).get("notices", [])
     except (dc.DibsError, OSError):
         return  # the command itself will say what's wrong
     for notice in notices:
         if notice.get("kind") == "failed":
             if failures:
                 print(f"dibs: {render.failed_notice(notice)}", file=sys.stderr)
+            continue
+        if notice.get("kind") == "advice":  # a request that doesn't match earlier runs (#169)
+            print(f"dibs: {notice['message']}", file=sys.stderr)
             continue
         when = time.strftime("%H:%M", time.localtime(notice["time"]))
         what = {"heavy": "a program in your terminal kept many cores busy outside dibs",
