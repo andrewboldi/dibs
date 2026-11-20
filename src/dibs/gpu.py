@@ -46,6 +46,15 @@ class GpuBackend(Protocol):
         them; the other backends return none."""
         ...
 
+    def utilization(self) -> dict[int, float] | None:
+        """Each GPU's use, in percent of the time it was busy lately, by index; None if unknown (#180)."""
+        ...
+
+    def process_utilization(self) -> dict[int, float] | None:
+        """Each process's use of its GPU since the last call, in percent, by pid (a process missing used
+        none); None where the driver doesn't say, as nvidia-smi and amd-smi don't (#180)."""
+        ...
+
 
 class NoGpuBackend:
     name = "none"
@@ -59,6 +68,12 @@ class NoGpuBackend:
 
     def graphics_processes(self) -> list[GpuProcess] | None:
         return []
+
+    def utilization(self) -> dict[int, float] | None:
+        return {}
+
+    def process_utilization(self) -> dict[int, float] | None:
+        return None
 
 
 class _Memory(ctypes.Structure):
@@ -74,7 +89,23 @@ class _ProcessInfo(ctypes.Structure):
     ]
 
 
+class _Utilization(ctypes.Structure):
+    _fields_ = [("gpu", ctypes.c_uint), ("memory", ctypes.c_uint)]
+
+
+class _ProcessUtilization(ctypes.Structure):
+    _fields_ = [
+        ("pid", ctypes.c_uint),
+        ("timeStamp", ctypes.c_ulonglong),
+        ("smUtil", ctypes.c_uint),
+        ("memUtil", ctypes.c_uint),
+        ("encUtil", ctypes.c_uint),
+        ("decUtil", ctypes.c_uint),
+    ]
+
+
 _NVML_SUCCESS = 0
+_NVML_ERROR_NOT_FOUND = 6
 _NVML_ERROR_INSUFFICIENT_SIZE = 7
 _NVML_VALUE_NOT_AVAILABLE = 0xFFFFFFFFFFFFFFFF
 
@@ -89,6 +120,7 @@ class NvmlBackend:
         if rc != _NVML_SUCCESS:
             raise OSError(f"NVML failed to start (error {rc})")
         self._handles: list[ctypes.c_void_p] | None = None
+        self._last_seen: dict[int, int] = {}  # GPU -> newest process sample read, in microseconds
 
     def _devices(self) -> list[ctypes.c_void_p]:
         if self._handles is None:
@@ -121,6 +153,37 @@ class NvmlBackend:
 
     def graphics_processes(self) -> list[GpuProcess] | None:
         return self._running(self._lib.nvmlDeviceGetGraphicsRunningProcesses_v3)
+
+    def utilization(self) -> dict[int, float] | None:
+        found = {}
+        for index, handle in enumerate(self._devices()):
+            rates = _Utilization()
+            if self._lib.nvmlDeviceGetUtilizationRates(handle, ctypes.byref(rates)) != _NVML_SUCCESS:
+                return None
+            found[index] = float(rates.gpu)
+        return found
+
+    def process_utilization(self) -> dict[int, float] | None:
+        found: dict[int, float] = {}
+        for index, handle in enumerate(self._devices()):
+            since = ctypes.c_ulonglong(self._last_seen.get(index, 0))
+            size = 64
+            while True:
+                count = ctypes.c_uint(size)
+                samples = (_ProcessUtilization * size)()
+                rc = self._lib.nvmlDeviceGetProcessUtilization(handle, samples, ctypes.byref(count), since)
+                if rc == _NVML_ERROR_INSUFFICIENT_SIZE:
+                    size = count.value + 16
+                    continue
+                break
+            if rc == _NVML_ERROR_NOT_FOUND:  # no samples since the last call: no process used the GPU
+                continue
+            if rc != _NVML_SUCCESS:
+                return None
+            for sample in samples[: count.value]:
+                found[sample.pid] = max(found.get(sample.pid, 0.0), float(sample.smUtil))
+                self._last_seen[index] = max(self._last_seen.get(index, 0), sample.timeStamp)
+        return found
 
     def _running(self, query) -> list[GpuProcess] | None:
         found = []
@@ -192,6 +255,21 @@ class SmiBackend:
 
     def graphics_processes(self) -> list[GpuProcess] | None:
         return []  # nvidia-smi has a query for compute processes only
+
+    def utilization(self) -> dict[int, float] | None:
+        rows = self._query("--query-gpu=index,utilization.gpu")
+        if rows is None:
+            return None
+        found = {}
+        for index, busy in rows:
+            try:
+                found[int(index)] = float(busy)
+            except ValueError:
+                return None  # [N/A]
+        return found
+
+    def process_utilization(self) -> dict[int, float] | None:
+        return None  # nvidia-smi's per-process numbers (pmon) take a second of sampling each time
 
 
 # --- AMD: the amd-smi command line -------------------------------------------------------------
@@ -413,6 +491,12 @@ class AmdSmiBackend:
 
     def graphics_processes(self) -> list[GpuProcess] | None:
         return []  # amd-smi lists graphics clients, but processes() keeps compute ones only (/dev/kfd)
+
+    def utilization(self) -> dict[int, float] | None:
+        return None  # not read from amd-smi yet
+
+    def process_utilization(self) -> dict[int, float] | None:
+        return None
 
 
 def open_backend(env: Mapping[str, str] = os.environ) -> GpuBackend:

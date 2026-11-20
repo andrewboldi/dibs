@@ -11,6 +11,9 @@ from typing import Any
 from dibs.units import GiB, format_size, format_size_against
 
 
+GPU_IDLE_AFTER = 600.0  # seconds: a job's hold of GPU memory with the GPU idle counts once it has gone on this long (#180)
+
+
 @dataclass(frozen=True)
 class Gpu:
     index: int
@@ -95,6 +98,12 @@ class Job:
     owed_left: float = 0.0  # what it left its session's next job: payback for a boost, credit for less
     owed_settled: bool = False  # whether the two were settled against its real wait, when it started
     history_mem: int | None = None  # the peak RAM of earlier runs of the same command, at submit (#86)
+    # GPU memory held with the GPU idle (#180): stretches of GPU_IDLE_AFTER or more, in seconds; the one going
+    # on now, since when; the most it held then; and when its session was last told of it (#186).
+    gpu_idle: float = 0.0
+    gpu_idle_since: float | None = None
+    gpu_idle_held: int | None = None
+    gpu_idle_told: float | None = None
     history_vram: int | None = None  # the most GPU memory earlier runs of the same command held, at submit (#183)
     borrowed_ram: bool = False  # this run started on RAM other jobs reserved but weren't using
     no_borrow: bool = False  # must start within RAM nobody reserved (after the machine ran out once)
