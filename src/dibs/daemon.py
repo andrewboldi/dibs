@@ -106,12 +106,15 @@ def _limit(job: Job) -> int:
     return max(job.request.mem, job.ram_limit or 0)
 
 
-def _holding(job: Job, mem: int | None = None) -> Request:
+def _holding(job: Job, mem: int | None = None, vram: int | None = None) -> Request:
     """A running job's request as the planner should count it: VRAM it borrowed counts as held (#88),
-    and its RAM as `mem` when RAM is planned by use (#86)."""
+    and so does `vram`, what its command's earlier runs held, while it's young (#183); its RAM counts
+    as `mem` when RAM is planned by use (#86)."""
     request = job.request
     if job.peak_vram and request.gpus and job.peak_vram > request.vram:
         request = replace(request, vram=job.peak_vram)
+    if vram and request.gpus and vram > request.vram:
+        request = replace(request, vram=vram)
     if mem is not None and mem != request.mem:
         request = replace(request, mem=mem)
     return request
@@ -300,6 +303,7 @@ class Daemon:
             owed_carried=carried,
             owed_left=left,
             history_mem=self._history_mem(cwd, list(argv)),
+            history_vram=self._history_vram(cwd, list(argv), request),
             state=State.QUEUED,
             output=output or "",
         )
@@ -670,14 +674,37 @@ class Daemon:
             # A job that borrows VRAM (#88) counts at what it has used, so nothing starts into it.
             # A job that grew past its RAM reservation counts at its raised limit, so nothing starts into
             # RAM it may yet use (#155).
-            [Running(j.id, _holding(j, _limit(j) if j.ram_limit else self._planned_mem(j, now) if borrowing else None),
+            [Running(j.id, _holding(j, _limit(j) if j.ram_limit else self._planned_mem(j, now) if borrowing else None,
+                                    self._young_vram(j, now)),
                      tuple(j.cpu_ids), tuple(j.gpu_ids), (j.started or now) + self._asleep(j))
              for j in running],
-            [Queued(j.id, j.request, j.tag, j.submitted) for j in queued],
+            # A job that asks for less GPU memory than its command's earlier runs held is planned at what
+            # they held: nothing holds a job that renders to its reservation (#173, #183).
+            [Queued(j.id, replace(j.request, vram=j.history_vram), j.tag, j.submitted, asked_vram=j.request.vram)
+             if j.history_vram and j.request.gpus and j.history_vram > j.request.vram
+             else Queued(j.id, j.request, j.tag, j.submitted) for j in queued],
             now,
             outside_mem=outside_mem,
         )
         return current, running, queued
+
+    def _history_vram(self, cwd: str, argv: list[str], request: Request) -> int | None:
+        """The most GPU memory earlier runs of the same command here (or the same script) held, at most a
+        GPU's worth, for a job that asks for a GPU (#183); None for one that doesn't."""
+        if not request.gpus:
+            return None
+        runs = [j for j in self.store.earlier_runs(cwd, argv, limit=6) if j.peak_vram]
+        script = script_of(argv)
+        if not runs and script:
+            runs = [j for j in self.store.earlier_runs_of_script(cwd, script, limit=6) if j.peak_vram]
+        most = max((j.peak_vram for j in runs), default=0)
+        return min(most, max((g.vram for g in self.capacity.gpus), default=0)) or None
+
+    def _young_vram(self, job: Job, now: float) -> int | None:
+        """What a running job's command's earlier runs held on the GPU, for its first ten minutes, while its
+        own use may not show yet (#183)."""
+        ran = now - (job.started or now) - self._asleep(job)
+        return job.history_vram if job.history_vram and ran < YOUNG else None
 
     def _history_mem(self, cwd: str, argv: list[str]) -> int | None:
         """The peak RAM of earlier runs of the same command here (or the same script), if any."""

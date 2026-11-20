@@ -37,6 +37,7 @@ class Queued:
     request: Request
     tag: float
     submitted: float
+    asked_vram: int | None = None  # what it asks for, when it's planned at more: its earlier runs held more (#183)
 
 
 @dataclass(frozen=True)
@@ -271,6 +272,8 @@ def _reason(
                 most = format_size_against(max(max(free_vram, default=0), 0), req.vram)
                 where = f"{most} free" if len(free_vram) == 1 else f"at most {most} free on one GPU"
                 short.append(f"{vram} VRAM ({where})")
+                if q.asked_vram is not None and q.asked_vram < req.vram:  # #183
+                    short[-1] += f": its earlier runs held that much, though it asks for {format_size(q.asked_vram)}"
     if short:
         return "needs " + ", ".join(short), tuple(lacks), None
     for ahead in order:
