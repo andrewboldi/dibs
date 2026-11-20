@@ -665,6 +665,12 @@ def _machine(snapshot: dict, width: int) -> list[_Line]:
         if name == "cpu" and (speed := snapshot.get("cpu_cap")):  # every CPU job runs slower (#179)
             line.add(f"   capped at {speed['capped_mhz'] / 1000:.1f} GHz of {speed['max_mhz'] / 1000:.1f}", _WARN_SGR)
         lines.append(line)
+    holders = [f"{h['name']} {format_size(h['ram'])}" + (f" (+{format_size(h['swap'])} swap)" if h["swap"] >= 2**27 else "")
+               for h in snapshot.get("outside_holders") or []]  # fmt: skip
+    if (snapshot.get("tmp_files") or 0) >= 2**30:  # charged to whichever program wrote them (#164)
+        holders.append(f"files in /tmp {format_size(snapshot['tmp_files'])}")
+    if holders:
+        lines.append(_Line(("       ", None), ("outside dibs: " + ", ".join(holders), "2")))
     load = snapshot.get("load") or {}
     cores = load.get("cores") or []
     if sum(v is not None for v in cores) >= 2:

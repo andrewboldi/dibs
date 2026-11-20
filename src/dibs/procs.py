@@ -273,6 +273,70 @@ def cpu_cap(root: str = CPU_ROOT) -> dict | None:
     return {"capped_mhz": min(cap for _, cap in capped), "max_mhz": max(top for top, _ in speeds)}
 
 
+def outside_holders(minimum: int) -> list[dict]:
+    """What holds RAM outside dibs, per app or terminal pane (#164): each scope or service under the
+    user's systemd instance, but dibs's own jobs and service, by what its processes hold (anon + shmem:
+    exact, shared pages counted once) and its swap, largest first. An app's scopes are added up; each
+    terminal pane is its own. Only those holding `minimum` or more in RAM and swap together, four at most."""
+    from dibs.agents import PANE_SCOPES
+
+    base = f"{CGROUP_ROOT}/user.slice/user-{os.getuid()}.slice/user@{os.getuid()}.service"
+    found: dict[str, dict] = {}
+    for path, dirs, files in os.walk(base):
+        leaf = os.path.basename(path)
+        if "memory.stat" not in files or not leaf.endswith((".scope", ".service")) or path == base:
+            continue
+        if any(os.path.exists(f"{path}/{d}/memory.stat") for d in dirs):
+            continue  # it holds others, each counted itself
+        if leaf == "dibs.service" or (leaf.startswith("dibs-") and "-job-" in leaf):
+            continue
+        stat = keyed_numbers(_read(f"{path}/memory.stat"))
+        swap = (_read(f"{path}/memory.swap.current") or "0").strip()
+        pane = leaf.startswith(PANE_SCOPES)
+        name = _holder_name(path, leaf, pane)
+        held = found.setdefault(leaf if pane else name, {"name": name, "ram": 0, "swap": 0})
+        held["ram"] += stat.get("anon", 0) + stat.get("shmem", 0)
+        held["swap"] += int(swap) if swap.isdigit() else 0
+    holders = [h for h in found.values() if h["ram"] + h["swap"] >= minimum]
+    return sorted(holders, key=lambda h: -(h["ram"] + h["swap"]))[:4]
+
+
+def _holder_name(path: str, leaf: str, pane: bool) -> str:
+    """A readable name for a scope or service: the app, or a terminal pane and its largest program."""
+    if pane:
+        largest = max(((_rss(pid), pid) for pid in _pids(path)), default=None)
+        program = (_read(f"/proc/{largest[1]}/comm") or "").strip() if largest else ""
+        return f"terminal pane ({program})" if program else "terminal pane"
+    if leaf.startswith("snap."):  # snap.chromium.chromium-<id>.scope
+        return leaf.split(".")[1]
+    name = leaf.rsplit(".", 1)[0].replace("\\x2d", "-")
+    if name.startswith("app-"):  # app-gnome-org.gnome.Evolution-12618.scope
+        name = name[4:].removeprefix("gnome-").rstrip("0123456789").rstrip("-")
+    return name
+
+
+def _pids(path: str) -> list[int]:
+    return [int(p) for p in (_read(f"{path}/cgroup.procs") or "").split() if p.isdigit()]
+
+
+def _rss(pid: int) -> int:
+    fields = (_read(f"/proc/{pid}/statm") or "").split()
+    return int(fields[1]) if len(fields) > 1 and fields[1].isdigit() else 0
+
+
+def tmp_files(path: str = "/tmp") -> int | None:
+    """What files in a RAM-backed /tmp (a tmpfs) take; None when /tmp is on disk (#164). They're charged
+    to whichever cgroup wrote them, so a per-app list misnames them."""
+    mounts = [line.split() for line in (_read("/proc/mounts") or "").splitlines()]
+    if not any(len(m) > 2 and m[1] == path and m[2] == "tmpfs" for m in mounts):
+        return None
+    try:
+        st = os.statvfs(path)
+    except OSError:
+        return None
+    return (st.f_blocks - st.f_bfree) * st.f_frsize
+
+
 def memory_pressure() -> float:
     """The share of the last 10 s in which some task waited for memory, in percent (PSI, "some
     avg10"); 0 where the kernel doesn't report it."""
