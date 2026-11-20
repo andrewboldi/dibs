@@ -19,7 +19,7 @@ import sys
 import time
 from collections import deque
 from dataclasses import asdict, replace
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 
 from dibs import __version__, build_id, guard, launcher, procs
 from dibs.agents import PANE_SCOPES
@@ -77,6 +77,7 @@ HEAVY_FOR = 120.0  # a terminal that keeps HEAVY_SHARE of the cores busy this lo
 HEAVY_SHARE = 1 / 6  # of the machine's cores, at least 2
 TELL_EVERY = 3600.0  # seconds: at most this often per terminal
 TOLD_WINDOW = 86400.0  # how far back a session is told, at its next dibs command, what the guard stopped (#135)
+FAILED_FOR = 3600.0  # seconds: a failed job is told at each of its session's dibs commands this long at most (#176)
 WAIT_RECHECK = 5.0  # a long-polling wait re-checks its jobs at least this often
 LOG_MAX = 5 * 1024 * 1024
 
@@ -618,7 +619,10 @@ class Daemon:
             if op == "info":
                 return self.info()
             if op == "notices":
-                return self.notices(str(request["session"]), self.clock())
+                return self.notices(str(request["session"]), self.clock(), request.get("seen") or ())
+            if op == "seen":
+                self._mark_seen(str(request["session"]), request.get("ids") or (), self.clock())
+                return {"ok": True}
             if op == "momentum":
                 return self.momentum(request)
             if op == "shutdown":
@@ -926,18 +930,44 @@ class Daemon:
             log.info("job %d grew past its %s RAM reservation into RAM nobody reserved: its limit is now %s",
                      job.id, format_size(job.request.mem), format_size(job.ram_limit))  # fmt: skip
 
-    def notices(self, session: str, now: float) -> dict:
+    def notices(self, session: str, now: float, seen: Sequence[int] = ()) -> dict:
         """What the guard stopped of this session's since it was last told, each told once: the note in a
-        stopped program's own output can be lost, in a pipe through grep or a log nobody reads (#135)."""
+        stopped program's own output can be lost, in a pipe through grep or a log nobody reads (#135).
+        And its jobs that failed in the last hour, at each of its dibs commands until one of them looks
+        at the job (seen: the jobs this command shows), or it runs the same command again (#176): a failed
+        job drops out of dibs queue as a finished one does, and a loop's command may be the one told."""
+        self._mark_seen(session, seen, now)
         key = f"told:{session}"
         told = float(self.store.get_meta(key) or 0.0)
-        stops = [
-            e for e in self.store.events(max(told, now - TOLD_WINDOW))
-            if e["kind"] in ("stop", "heavy") and e.get("session") == session and e["time"] > told and e.get("message")
-        ]  # fmt: skip
+        events = [e for e in self.store.events(min(max(told, now - TOLD_WINDOW), now - FAILED_FOR)) if e.get("session") == session]
+        stops = [e for e in events if e["kind"] in ("stop", "heavy") and e["time"] > told and e.get("message")]
         if stops:
             self.store.set_meta(key, repr(stops[-1]["time"]))
-        return {"ok": True, "notices": [{"time": e["time"], "message": e["message"], "kind": e["kind"]} for e in stops]}
+        told_now = [{"time": e["time"], "message": e["message"], "kind": e["kind"]} for e in stops]
+        failed = [e for e in events if e["kind"] == "failed" and now - FAILED_FOR <= e["time"] <= now]
+        told_now += [n for n in (self._failure_notice(e, session) for e in failed) if n is not None]
+        return {"ok": True, "notices": told_now}
+
+    def _mark_seen(self, session: str, ids: Sequence[int], now: float) -> None:
+        """The session looked at these jobs (dibs show, wait or logs): the ended ones are no longer told (#176)."""
+        for job_id in ids:
+            looked = self.store.get_job(int(job_id))
+            if looked is not None and looked.session == session and looked.ended is not None:
+                self.store.set_meta(f"seen:{looked.id}", repr(now))
+
+    def _failure_notice(self, event: dict, session: str) -> dict | None:
+        """A failed job's notice (#176), unless the session has looked at it or run the same command again."""
+        job = self.store.get_job(int(event["job"]))
+        if job is None or job.state != State.FAILED or self.store.get_meta(f"seen:{job.id}") is not None:
+            return None
+        ended = job.ended or event["time"]
+        later = self.store.jobs([State.QUEUED, State.RUNNING]) + self.store.finished_since(ended)
+        if any(j.session == session and j.id != job.id and j.submitted >= ended and (j.argv, j.cwd) == (job.argv, job.cwd)
+               for j in later):  # fmt: skip
+            return None
+        ran = ended - job.started - (job.asleep or 0.0) if job.started is not None else None
+        return {"time": event["time"], "kind": "failed", "job": job.id, "exit_code": job.exit_code, "ran": ran,
+                "reason": job.reason or "", "message": ""}  # fmt: skip
 
     def _watch_panes(self, now: float) -> None:
         """Tell an agent when a program in its terminal keeps a sixth of the machine's cores busy outside
@@ -1427,6 +1457,8 @@ class Daemon:
         self._notify(job)
 
     def _notify(self, job: Job) -> None:
+        if job.state == State.FAILED:  # its session is told at its next dibs commands (#176)
+            self.store.add_event("failed", {"session": job.session, "job": job.id}, job.ended or self.clock())
         for callback in self._callbacks:
             callback(job)
 
@@ -1438,6 +1470,7 @@ class Daemon:
         self.store.delete_jobs(j.id for j in old)
         self.store.delete_events_before(cutoff)
         lapsed = [k for k, v in self.store.meta_items("owed:") if now - json.loads(v).get("time", 0) > OWED_FOR]
+        lapsed += [k for k, v in self.store.meta_items("seen:") if now - float(v) > TOLD_WINDOW]  # #176
         self.store.delete_meta(lapsed)
         self._last_retention = now
 

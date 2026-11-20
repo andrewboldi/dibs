@@ -1,12 +1,14 @@
 """The dibs command."""
 
 import argparse
+import contextlib
 import json
 import os
 import re
 import select
 import shutil
 import signal
+import stat
 import sys
 import termios
 import time
@@ -232,6 +234,8 @@ def cmd_submit(args, paths: Paths, command: list[str]) -> int:
             print(render.render_earlier(earlier, match))
         if line := render.render_estimates(response.get("estimates")):
             print(line)
+    sys.stdout.flush()  # the job's lines first, in a merged stream too (#169)
+    _tell(paths, failures=not args.json)
     return 0
 
 
@@ -246,6 +250,7 @@ def cmd_run(args, paths: Paths, command: list[str]) -> int:
         print(render.render_earlier(response["earlier"], response.get("earlier_match", "command")), file=sys.stderr)
     if line := render.render_estimates(response.get("estimates")):
         print(line, file=sys.stderr)
+    _tell(paths)
     try:
         finished = _follow(client, job["id"], job["output"], 0, sys.stdout.buffer)
     except KeyboardInterrupt:
@@ -323,6 +328,9 @@ def cmd_wait(args, paths: Paths, _) -> int:
     if not args.json:
         for job in response["jobs"]:
             print(render.finished_line(job))
+    if not _discarded(sys.stdout):  # it read how they ended: no need to tell it again (#176)
+        with contextlib.suppress(dc.DibsError, OSError):
+            dc.Client(paths).call("seen", session=dc.current_session()[0], ids=args.ids)
     return next((render.exit_code(j) for j in response["jobs"] if render.exit_code(j)), 0)
 
 
@@ -592,16 +600,32 @@ HANDLERS = {
 
 
 TELLS = {"submit", "run", "queue", "q", "momentum", "show", "status", "wait", "logs", "cancel", "info"}  # not top
+AFTER = {"submit", "run"}  # these tell after the job's own lines: loops read its number from the first (#169)
 
 
-def _tell_stops(paths) -> None:
-    """Tell this session what the guard stopped of its since it was last told: the note in a stopped
-    program's own output can be lost, in a pipe through grep or a log nobody reads (#135)."""
+def _discarded(stream) -> bool:
+    """Whether what's written to this stream goes nowhere (/dev/null), so nobody reads it."""
     try:
-        notices = dc.Client(paths).call("notices", session=dc.current_session()[0]).get("notices", [])
+        here, null = os.fstat(stream.fileno()), os.stat(os.devnull)
+    except (OSError, ValueError, AttributeError):
+        return False
+    return stat.S_ISCHR(here.st_mode) and here.st_rdev == null.st_rdev
+
+
+def _tell(paths, seen: list[int] | None = None, failures: bool = True) -> None:
+    """Tell this session what the guard stopped of its since it was last told: the note in a stopped
+    program's own output can be lost, in a pipe through grep or a log nobody reads (#135). And its jobs
+    that failed in the last hour, at each command until one looks at them (seen) (#176). failures=False
+    for JSON output, which a program reads."""
+    try:
+        notices = dc.Client(paths).call("notices", session=dc.current_session()[0], seen=seen or []).get("notices", [])
     except (dc.DibsError, OSError):
         return  # the command itself will say what's wrong
     for notice in notices:
+        if notice.get("kind") == "failed":
+            if failures:
+                print(f"dibs: {render.failed_notice(notice)}", file=sys.stderr)
+            continue
         when = time.strftime("%H:%M", time.localtime(notice["time"]))
         what = ("a program in your terminal kept many cores busy outside dibs" if notice.get("kind") == "heavy"
                 else "the guard stopped a program of yours")  # fmt: skip
@@ -631,8 +655,9 @@ def main(argv: list[str] | None = None) -> int:
         parser.print_help(sys.stderr)
         return 2
     try:
-        if args.cmd in TELLS:
-            _tell_stops(get_paths())
+        if args.cmd in TELLS and args.cmd not in AFTER:
+            looks = [args.id] if args.cmd in ("show", "logs") and not _discarded(sys.stdout) else []
+            _tell(get_paths(), seen=looks, failures=not getattr(args, "json", False))
         return HANDLERS[args.cmd](args, get_paths(), command)
     except dc.DibsError as e:
         if e.code == "upgraded" and args.cmd in REPEATABLE and not os.environ.get("DIBS_RERUN"):

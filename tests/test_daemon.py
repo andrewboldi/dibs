@@ -1724,3 +1724,52 @@ def test_a_shortage_long_over_isnt_resumed_after_a_restart(make_daemon, tmp_path
     second._stop_ram_hog = lambda t: stopped.append(t) or True
     second._relieve_shortage(now[0])
     assert stopped == []
+
+
+def _failed(notices):
+    return [n for n in notices["notices"] if n["kind"] == "failed"]
+
+
+def test_a_session_is_told_of_its_failed_job_at_each_dibs_command_until_it_looks(daemon, tmp_path):
+    # #176: a failed job drops out of dibs queue like a finished one, and an agent took three for done.
+    failing = submit(daemon, tmp_path, [PY, "-c", "import sys; sys.exit(3)"], session="s1")
+    run_until(daemon, lambda: finished(daemon, failing))
+    now = time.time()
+    for _ in range(2):  # repeated: a loop's dibs command may be the one that gets it
+        (told,) = _failed(daemon.notices("s1", now))
+        assert told["job"] == failing and told["exit_code"] == 3
+    assert _failed(daemon.notices("s2", now)) == []  # only its own session's
+    assert _failed(daemon.notices("s1", now, seen=[failing])) == []  # dibs show, wait or logs of it
+    assert _failed(daemon.notices("s1", now)) == []
+
+
+def test_a_failed_jobs_notice_ends_after_an_hour(make_daemon, tmp_path):
+    now = [time.time()]
+    d = make_daemon(clock=lambda: now[0])
+    failing = submit(d, tmp_path, [PY, "-c", "import sys; sys.exit(3)"], session="s1")
+    run_until(d, lambda: finished(d, failing))
+    assert len(_failed(d.notices("s1", now[0] + 3500))) == 1
+    assert _failed(d.notices("s1", now[0] + 3700)) == []
+
+
+def test_a_failed_jobs_notice_ends_when_the_session_runs_the_command_again(daemon, tmp_path):
+    # It knows the job ended, as an agent that resubmits at another size does.
+    argv = [PY, "-c", "import sys; sys.exit(3)"]
+    failing = submit(daemon, tmp_path, argv, session="s1")
+    run_until(daemon, lambda: finished(daemon, failing))
+    again = submit(daemon, tmp_path, argv, session="s1", mem=2 * GiB)
+    assert not any(n["job"] == failing for n in _failed(daemon.notices("s1", time.time())))
+    run_until(daemon, lambda: finished(daemon, again))
+
+
+def test_no_failure_notice_for_a_cancelled_job_or_a_try_dibs_ran_again(daemon, tmp_path, monkeypatch):
+    go = tmp_path / "go"
+    holding = [PY, "-c", f"import os, time\nwhile not os.path.exists({str(go)!r}): time.sleep(0.02)"]
+    cancelled = submit(daemon, tmp_path, holding, session="s1")
+    run_until(daemon, lambda: job(daemon, cancelled).shim_pid)
+    daemon.cancel([cancelled])
+    run_until(daemon, lambda: finished(daemon, cancelled))
+    retried = submit(daemon, tmp_path, [PY, "-c", "pass"], mem=2 * GiB, retry=True, session="s1")
+    _oom_on_first_exit(monkeypatch, retried)
+    run_until(daemon, lambda: job(daemon, retried).state == State.DONE)
+    assert _failed(daemon.notices("s1", time.time())) == []

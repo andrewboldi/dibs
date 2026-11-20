@@ -433,7 +433,7 @@ def test_a_wait_dibs_was_upgraded_under_runs_again_until_its_job_ends(dibs, tmp_
     assert re.search(r"pid (\d+)", before).group(1) == re.search(r"pid (\d+)", after).group(1)
 
 
-@pytest.mark.parametrize("argv", [["queue"], ["wait", "5"], ["submit", "--cpus", "1", "--mem", "1G", "--time", "1m", "--", "true"]])
+@pytest.mark.parametrize("argv", [["queue"], ["wait", "5"]])
 def test_a_dibs_command_first_tells_the_session_what_the_guard_stopped(argv, monkeypatch, tmp_path, capsys):
     # Issue #135: the note in a stopped program's own output can be lost, in a pipe through grep.
     from dibs import cli
@@ -488,3 +488,59 @@ def test_a_heavy_cpu_notice_says_what_it_is_about(monkeypatch, tmp_path, capsys)
     monkeypatch.setattr(dc.Client, "call", call)
     cli.main(["queue"])
     assert "a program in your terminal kept many cores busy outside dibs:" in capsys.readouterr().err
+
+
+def test_submit_tells_the_session_after_its_own_lines(monkeypatch, tmp_path, capsys):
+    # #169, #176: loops read the job's number from the first line of submit's merged output (2>&1 | head -1).
+    from dibs import cli
+    from dibs import client as dc
+
+    monkeypatch.setenv("DIBS_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "agent-1")
+    asked = []
+    job = {"id": 7, "name": "train", "state": "running", "request": {"cpus": 1, "mem": 1 << 30, "gpus": 0, "vram": 0, "time": 60.0}}
+
+    def call(self, op, **fields):
+        asked.append(op)
+        if op == "submit":
+            return {"ok": True, "now": time.time(), "job": job}
+        if op == "notices":
+            return {"ok": True, "notices": [{"time": time.time(), "message": "dibs: stopped `python prep.py` (pid 7)"}]}
+        raise dc.DibsError("unexpected", "busy")
+
+    monkeypatch.setattr(dc.Client, "call", call)
+    assert cli.main(["submit", "--cpus", "1", "--mem", "1G", "--time", "1m", "--", "true"]) == 0
+    assert asked == ["submit", "notices"]
+    out, err = capsys.readouterr()
+    assert out.startswith("Job 7 (train) started.") and "python prep.py" in err
+
+
+def test_a_failed_jobs_notice_comes_after_submits_job_line_and_names_the_job_by_number(dibs, tmp_path):
+    # #176: dibs queue 2>&1 | grep -c <a job name, a session label, or "queued"> loops must count the same.
+    env = {**dibs.env, "DIBS_SESSION": "agent-9"}
+    failed = js(dibs("submit", *RES, "--json", "--name", "exp-g015", "--", PY, "-c", "import sys; sys.exit(3)",
+                     env={"DIBS_SESSION": "agent-9"}))  # fmt: skip
+    # A wait whose output is thrown away doesn't count as looking at it.
+    subprocess.run([PY, "-m", "dibs", "wait", str(failed["id"])], env=env, cwd=tmp_path, timeout=60,
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)  # fmt: skip
+    merged = subprocess.run([PY, "-m", "dibs", "submit", *RES, "--", PY, "-c", "pass"], env=env, cwd=tmp_path,
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=60).stdout.splitlines()  # fmt: skip
+    assert merged[0].startswith("Job "), merged
+    (told,) = [line for line in merged if line.startswith(f"dibs: job {failed['id']} failed")]
+    assert "exit 3" in told
+    for word in ("exp-g015", failed["session_label"], "·", "queued", "running"):
+        assert word not in told, word
+
+
+def test_dibs_show_of_a_failed_job_ends_its_notice(dibs, tmp_path):
+    env = {"DIBS_SESSION": "agent-9"}
+    failed = js(dibs("submit", *RES, "--json", "--", PY, "-c", "import sys; sys.exit(3)", env=env))["id"]
+    dibs("wait", str(failed), env=env)  # read: its last line says how it ended
+    assert f"job {failed} failed" not in dibs("queue", env=env).stderr
+    other = js(dibs("submit", *RES, "--json", "--", PY, "-c", "import sys; sys.exit(4)", env=env))["id"]
+    subprocess.run([PY, "-m", "dibs", "wait", str(other)], env={**dibs.env, **env}, cwd=tmp_path, timeout=60,
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)  # fmt: skip
+    assert f"job {other} failed" in dibs("queue", env=env).stderr
+    assert f"job {other} failed" in dibs("queue", env=env).stderr  # again, at the next command
+    dibs("show", str(other), env=env)
+    assert f"job {other} failed" not in dibs("queue", env=env).stderr
