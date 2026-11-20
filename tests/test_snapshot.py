@@ -99,3 +99,19 @@ def test_submit_with_snapshot_outside_a_repository_says_why(dibs_env, tmp_path):
                             env=dibs_env, cwd=plain, capture_output=True, text=True, timeout=60)  # fmt: skip
     assert result.returncode == 2 and "--snapshot needs the job's folder to be in a git repository" in result.stderr
     subprocess.run([PY, "-m", "dibs", "daemon", "stop"], env=dibs_env, capture_output=True, timeout=60)
+
+
+def test_paths_into_the_repository_inside_a_shell_string_point_into_the_copy():
+    # Agents' pipelines submit `bash -c "cd /repo/...; python /repo/src/..."`: those ran the live files.
+    cwd, argv = snapshot.run_paths("/w/proj", "/s/tree", "/w/proj/sub", [
+        "bash", "-c", "set -e; cd /w/proj/data/pin; python /w/proj/src/gen.py --out '/w/proj/out' /w/project2/x /w/proj",
+        "/w/proj/run.py"])  # fmt: skip
+    assert cwd == "/s/tree/sub" and argv[3] == "/s/tree/run.py"
+    assert argv[2] == "set -e; cd /s/tree/data/pin; python /s/tree/src/gen.py --out '/s/tree/out' /w/project2/x /s/tree"
+
+
+def test_the_snapshot_help_says_what_still_points_at_the_real_files():
+    from dibs.instructions import AGENT_HELP
+
+    assert "~/ paths in a shell string and paths in environment variables still point at the real files" in " ".join(
+        AGENT_HELP.split())

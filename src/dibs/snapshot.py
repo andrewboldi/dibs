@@ -9,6 +9,7 @@ When it ends, the copy goes, unless the job wrote files into it: then it's kept,
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import uuid
@@ -83,13 +84,23 @@ def stage(paths: Paths, cwd: str) -> str:
     return str(folder)
 
 
+SHELLS = ("sh", "bash", "zsh", "dash")  # as model.script_of
+
+
 def run_paths(root: str, copy: str, cwd: str, argv: list[str]) -> tuple[str, list[str]]:
-    """The job's folder and command with paths into the repository pointing into its copy."""
+    """The job's folder and command with paths into the repository pointing into its copy: arguments
+    that are such paths, and such paths inside a shell's -c string (`bash -c "cd /repo/...; python
+    /repo/src/x.py"`), where the repository's path stands as a path of its own."""
 
     def moved(path: str) -> str:
         return copy + path[len(root) :] if path == root or path.startswith(root + os.sep) else path
 
-    return moved(cwd), [moved(a) for a in argv]
+    inside = re.compile(re.escape(root) + r"(?=/|$|[\s'\";)&|<>])")
+    out = []
+    for i, arg in enumerate(argv):
+        shell = i >= 2 and argv[i - 1] == "-c" and any(os.path.basename(w) in SHELLS for w in argv[: i - 1])
+        out.append(inside.sub(lambda m: copy, arg) if shell else moved(arg))
+    return moved(cwd), out
 
 
 def clear(folder: Path) -> str | None:

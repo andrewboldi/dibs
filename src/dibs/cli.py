@@ -113,7 +113,9 @@ def build_parser() -> argparse.ArgumentParser:
             "--snapshot", action="store_true",
             help="run it on a copy of this git repository's code as it is now (what git tracks, with your uncommitted "
             "changes, and new files git doesn't ignore), so you can keep editing while it waits; what git ignores "
-            "(.venv, data, outputs) is linked, not copied. At most 1G of code",
+            "(.venv, data, outputs) is linked, not copied. Paths into the repository, as arguments or in a shell's "
+            "-c string, point into the copy; ~/ paths in a shell string and paths in environment variables still "
+            "point at the real files. At most 1G of code",
         )  # fmt: skip
         s.add_argument("-o", "--output", help="write the job's output to this file instead of dibs's log")
         if name == "submit":
@@ -627,6 +629,7 @@ HANDLERS = {
 
 
 TELLS = {"submit", "run", "queue", "q", "momentum", "show", "status", "wait", "logs", "cancel", "info"}  # not top
+FAILED_SHOWN = 3  # failure notices given in full at one command; the rest are counted (#206)
 AFTER = {"submit", "run"}  # these tell after the job's own lines: loops read its number from the first (#169)
 
 
@@ -650,9 +653,11 @@ def _tell(paths, seen: list[int] | None = None, failures: bool = True, at_submit
         ).get("notices", [])
     except (dc.DibsError, OSError):
         return  # the command itself will say what's wrong
+    failed = sorted((n for n in notices if n.get("kind") == "failed"), key=lambda n: n["time"])
+    shown = {id(n) for n in failed[-FAILED_SHOWN:]}  # the newest few; agents filter lines they see each time (#206)
     for notice in notices:
         if notice.get("kind") == "failed":
-            if failures:
+            if failures and id(notice) in shown:
                 print(f"dibs: {render.failed_notice(notice)}", file=sys.stderr)
             continue
         if notice.get("kind") == "advice":  # a request that doesn't match earlier runs (#169)
@@ -663,6 +668,9 @@ def _tell(paths, seen: list[int] | None = None, failures: bool = True, at_submit
                 "idle_gpu": "a job of yours holds GPU memory with the GPU idle"}.get(notice.get("kind") or "",
                                                                                      "the guard stopped a program of yours")  # fmt: skip
         print(f"dibs: at {when}, {what}:\n{notice['message']}\n", file=sys.stderr)
+    if failures and len(failed) > FAILED_SHOWN:
+        more = len(failed) - FAILED_SHOWN
+        print(f"dibs: and {more} more of your jobs failed in the last hour: dibs queue --all lists them", file=sys.stderr)
 
 
 def main(argv: list[str] | None = None) -> int:

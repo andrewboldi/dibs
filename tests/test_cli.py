@@ -565,3 +565,24 @@ def test_dibs_show_of_a_failed_job_ends_its_notice(dibs, tmp_path):
     assert f"job {other} failed" in dibs("queue", env=env).stderr  # again, at the next command
     dibs("show", str(other), env=env)
     assert f"job {other} failed" not in dibs("queue", env=env).stderr
+
+
+def test_failure_notices_give_the_three_newest_and_count_the_rest(monkeypatch, tmp_path, capsys):
+    # #206: one session had up to 10 failures within an hour, each repeated at every dibs command.
+    from dibs import cli
+    from dibs import client as dc
+
+    monkeypatch.setenv("DIBS_HOME", str(tmp_path / "home"))
+    failed = [{"time": time.time() - 60 * (10 - n), "kind": "failed", "job": 100 + n, "exit_code": 1, "ran": 30.0,
+               "reason": "", "message": ""} for n in range(5)]  # fmt: skip
+
+    def call(self, op, **fields):
+        if op == "notices":
+            return {"ok": True, "notices": failed}
+        raise dc.DibsError("the daemon is busy", "busy")
+
+    monkeypatch.setattr(dc.Client, "call", call)
+    cli.main(["queue"])
+    err = capsys.readouterr().err
+    assert [n for n in (100, 101, 102, 103, 104) if f"job {n} failed" in err] == [102, 103, 104]
+    assert "and 2 more of your jobs failed in the last hour: dibs queue --all lists them" in err

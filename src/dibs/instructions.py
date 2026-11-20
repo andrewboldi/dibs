@@ -81,7 +81,9 @@ when those resources are free, so jobs never crash each other by running out of 
 - `--snapshot` to keep editing while a job waits: it runs a copy of the git repository's code as
   it is at submit (what git tracks, with your uncommitted changes, and new files git doesn't
   ignore). What git ignores (.venv, data, outputs) is linked, not copied, so the job reads and
-  writes the real ones. At most 1G of code; the copy goes when the job ends.
+  writes the real ones. Paths into the repository, as arguments or in a shell's -c string, point
+  into the copy; ~/ paths in a shell string and paths in environment variables still point at the
+  real files. At most 1G of code; the copy goes when the job ends.
 - `--replace ID` to change a job that's still waiting (a smaller request, a fixed command): dibs
   cancels ID and queues the new job in one step. Cancelling first and then submitting can let
   another job start in the gap and keep the resources. A replacement that runs the same command
