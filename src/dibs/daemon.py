@@ -983,7 +983,12 @@ class Daemon:
         if self.set_mem_limit is None:
             return
         running = self.store.jobs([State.RUNNING])
-        room = self.capacity.mem - self._outside_mem(now, running) - sum(_limit(j) for j in running)
+        outside = self._outside_mem(now, running)
+        room = self.capacity.mem - outside - sum(_limit(j) for j in running)
+        # Failing that, RAM other jobs reserved but aren't using, by the plan by use that lets a waiting
+        # job start in it (#149, #182): a job at its limit has work to lose, so it goes ahead of them.
+        lend = self.capacity.mem - outside - sum(_limit(j) if j.ram_limit else self._planned_mem(j, now) for j in running)
+        lend = lend if self._borrowing() else 0
         for job in sorted(running, key=lambda j: (j.started or 0, j.id)):
             held = self._held.get(job.id)
             if held is None or job.request.exclusive or job.stop_requested is not None or job.cancel_requested is not None:
@@ -991,7 +996,8 @@ class Daemon:
             limit, step = _limit(job), max(GiB, int(job.request.mem * GROW_SHARE))
             # Near its limit: within half a step, or an eighth of its limit for a small job, whose 1G step
             # would otherwise make its usual peak look like growth.
-            if held < limit - min(step // 2, limit // 8) or room < step:
+            borrowing = room < step
+            if held < limit - min(step // 2, limit // 8) or (borrowing and (job.no_borrow or lend < step)):
                 continue
             if now - self._grow_failed.get(job.id, -math.inf) < GROW_RETRY:
                 continue
@@ -1001,10 +1007,12 @@ class Daemon:
             if job.ram_limit is None:  # past its reservation now: if the machine runs out, it goes first
                 launcher.raise_oom_score(job)
             job.ram_limit = limit + step
-            room -= step
+            job.grew_borrowed = job.grew_borrowed or borrowing  # given back first in a shortage (#182)
+            room, lend = room - step, lend - step
             self.store.update_job(job)
-            log.info("job %d grew past its %s RAM reservation into RAM nobody reserved: its limit is now %s",
-                     job.id, format_size(job.request.mem), format_size(job.ram_limit))  # fmt: skip
+            log.info("job %d grew past its %s RAM reservation into RAM %s: its limit is now %s", job.id,
+                     format_size(job.request.mem), "other jobs reserved but weren't using" if borrowing else "nobody reserved",
+                     format_size(job.ram_limit))  # fmt: skip
 
     def notices(self, session: str, now: float, seen: Sequence[int] = (), at_submit: bool = False) -> dict:
         """What the guard stopped of this session's since it was last told, each told once: the note in a
@@ -1166,8 +1174,27 @@ class Daemon:
             return
         self._pressured_since = now
         self.store.set_meta("short_since", repr(now))
-        if not self._stop_ram_hog(now):
+        # RAM dibs lent a job to grow into comes back first (#182), then a program outside dibs (#135),
+        # then RAM a job started on (#114).
+        if not self._give_back_growth(now) and not self._stop_ram_hog(now):
             self._give_back_borrowed(now)
+
+    def _give_back_growth(self, now: float) -> bool:
+        """Stop the most recently started job that grew into RAM other jobs reserved (#182): dibs lent it
+        that RAM, so in a shortage it's the first to go. Whether one was stopped."""
+        growers = [j for j in self.store.jobs([State.RUNNING])
+                   if j.grew_borrowed and j.stop_requested is None and j.cancel_requested is None]  # fmt: skip
+        if not growers:
+            return False
+        job = max(growers, key=lambda j: (j.started or 0, j.id))
+        job.evicted = True
+        job.stop_reason = ("stopped to give back RAM other jobs reserved, which it had grown into: the machine was "
+                           "short of memory")  # fmt: skip
+        job.stop_requested = now
+        self.store.update_job(job)
+        log.info("job %d %s", job.id, job.stop_reason)
+        self._push_stop(job, now)
+        return True
 
     def _stop_ram_hog(self, now: float) -> bool:
         """Stop the largest program outside dibs that holds a tenth of the RAM or more, with a note in its
@@ -1567,7 +1594,8 @@ class Daemon:
             job.reason += f"; resubmit with --mem {format_size(mem)}"  # it needed more than it reserved (#155)
         lost_borrowing = job.evicted or (result.get("oom_killed") and result.get("hit_limit") is False and job.borrowed_ram)
         if job.state == State.FAILED and lost_borrowing and not job.retry:  # dibs chose to start it there (#148)
-            job.reason += "; resubmit it, or submit it with --retry so dibs runs it again by itself"
+            more = f" with --mem {format_size(mem)}" if job.grew_borrowed and (mem := self._more_ram(job)) else ""  # #182
+            job.reason += f"; resubmit it{more}, or submit it with --retry so dibs runs it again by itself"
         self.store.update_job(job)
         self._terminated.discard(job.id)
         self._notify(job)
@@ -1582,6 +1610,8 @@ class Daemon:
             # outside the retry limit: it then can't borrow, so this happens once (#114).
             job.no_borrow = True
             reason = job.stop_reason if job.evicted else _ram_kill_reason(job, result)
+            if job.grew_borrowed and (mem := self._more_ram(job)):  # it showed it needs more (#182)
+                return replace(job.request, mem=mem), f"with --mem {format_size(mem)}, without borrowing", reason
             return job.request, "without borrowing", reason
         if len(job.attempts) >= MAX_RETRIES:
             return None
@@ -1628,7 +1658,7 @@ class Daemon:
         job.cpu_ids, job.gpu_ids = [], []
         job.shim_pid = job.shim_ticks = job.unit = None
         job.stop_reason = job.stop_requested = job.retry_vram = None
-        job.borrowed_ram = job.evicted = False
+        job.borrowed_ram = job.evicted = job.grew_borrowed = False
         job.peak_mem = job.peak_shmem = job.peak_shmem_mapped = job.peak_vram = job.ram_limit = None
         job.sleep_at_start, job.asleep = None, 0.0
         with contextlib.suppress(FileNotFoundError):
