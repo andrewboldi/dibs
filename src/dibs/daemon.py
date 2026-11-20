@@ -1459,6 +1459,9 @@ class Daemon:
             view["asleep"] = self._asleep(job)
             view["expected_end"] = current.running_ends.get(job.id, started + job.request.time)
             view["over_estimate"] = max(0.0, now - (started + job.request.time))
+            own = self._job_cpu_seconds(job)  # for CPU use on dibs show's peak line (#175)
+            if own is not None:
+                view["cpu_seconds"] = own
         return view
 
     def _asleep(self, job: Job) -> float:

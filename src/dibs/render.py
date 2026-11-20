@@ -10,6 +10,7 @@ from dibs.model import script_of
 from dibs.units import format_duration, format_size
 
 _COLORS = {"running": "32", "queued": "33", "failed": "31", "done": "2", "cancelled": "2"}
+CPU_USE_AFTER = 10.0  # seconds: a job's mean CPU use is shown for runs at least this long (#175)
 
 
 def ordinal(n: int) -> str:
@@ -295,7 +296,17 @@ def render_show(job: dict, now: float) -> str:
             if ran and asleep >= 60:
                 ran += f" (plus {format_duration(asleep)} asleep)"
             code = f", exit {job['exit_code']}" if job.get("exit_code") is not None else ""
-            rows.append(("ended", f"{clock(job['ended'], now)}{ran}{code}"))
+            # Agents keep this line and drop the others (#175): which try it was, and why it failed.
+            tries = [a for a in job.get("attempts") or [] if a.get("started") is not None]
+            if tries:
+                earlier = "; ".join(
+                    f"the {ordinal(i)} ended after {format_duration(max(0.0, a['ended'] - a['started'] - (a.get('asleep') or 0.0)))}"
+                    + (f": {a['reason'].split(';')[0]}" if a.get("reason") else "")
+                    for i, a in enumerate(tries, 1) if a.get("ended") is not None
+                )  # fmt: skip
+                code += f", on its {ordinal(len(tries) + 1)} try" + (f" ({earlier})" if earlier else "")
+            why = f": {job['reason']}" if job.get("reason") else ""
+            rows.append(("ended", f"{clock(job['ended'], now)}{ran}{code}{why}"))
         if job.get("reason"):
             rows.append(("reason", job["reason"]))
     if job.get("background"):  # beside a timing run (#112)
@@ -311,6 +322,9 @@ def render_show(job: dict, now: float) -> str:
     if job.get("peak_mem") is not None:
         grown = f", grown to a {format_size(job['ram_limit'])} limit" if (job.get("ram_limit") or 0) > job["request"]["mem"] else ""
         peaks.append(f"RAM {format_size(job['peak_mem'])} of {format_size(job['request']['mem'])}{grown} (not counting file cache)")
+    cpu = _cpu_use(job, now)
+    if cpu:
+        peaks.append(cpu)
     if peaks:
         rows.append(("peak", ", ".join(peaks)))
     rows.append(("output", _home(job["output"])))
@@ -318,6 +332,16 @@ def render_show(job: dict, now: float) -> str:
     lines = [f"Job {job['id']}  {job['name']}  {title}"]
     lines += [f"  {k.ljust(width)}  {v}" for k, v in rows]
     return "\n".join(lines)
+
+
+def _cpu_use(job: dict, now: float) -> str:
+    """A job's mean CPU use over its run, for runs long enough to tell (#175): "CPU 3.3 of 4"."""
+    if job.get("cpu_seconds") is None or job.get("started") is None:
+        return ""
+    ran = (job.get("ended") or now) - job["started"] - (job.get("asleep") or 0.0)
+    if ran < CPU_USE_AFTER:
+        return ""
+    return f"CPU {job['cpu_seconds'] / ran:.1f} of {job['request']['cpus']}"
 
 
 def render_info(info: dict) -> str:
