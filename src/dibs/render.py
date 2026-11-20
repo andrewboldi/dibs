@@ -662,6 +662,8 @@ def _machine(snapshot: dict, width: int) -> list[_Line]:
                      (f"  {fmt(used)}/{fmt(total)}", None))  # fmt: skip
         if used_away:
             line.add(f"   {fmt(used_away)} {verb}", "2")
+        if name == "cpu" and (speed := snapshot.get("cpu_cap")):  # every CPU job runs slower (#179)
+            line.add(f"   capped at {speed['capped_mhz'] / 1000:.1f} GHz of {speed['max_mhz'] / 1000:.1f}", _WARN_SGR)
         lines.append(line)
     load = snapshot.get("load") or {}
     cores = load.get("cores") or []

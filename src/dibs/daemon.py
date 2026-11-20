@@ -572,6 +572,7 @@ class Daemon:
             # What programs outside dibs use, for dibs top (#120); the RAM is what _plan just subtracted.
             "outside": {"cpus": self._outside_cpu, "mem": self._shown_outside_mem, "vram": dict(self._outside_vram)},
             "load": {"every": LOAD_EVERY, "cores": self._load_history()},
+            "cpu_cap": procs.cpu_cap(),  # only read, for dibs top (#179)
         }
 
     def info(self) -> dict:

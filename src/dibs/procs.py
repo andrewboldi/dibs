@@ -248,6 +248,31 @@ def short_of_memory(meminfo=None, pressure=None) -> bool:
     return total - used < total * SHORT_OF_RAM and (pressure or memory_pressure)() >= SHORT_PRESSURE
 
 
+CPU_ROOT = "/sys/devices/system/cpu"
+CAPPED_BELOW = 0.9  # a CPU whose speed cap is under this share of its top speed is capped (#179)
+
+
+def cpu_cap(root: str = CPU_ROOT) -> dict | None:
+    """When most CPUs are capped below their top speed (cpufreq's scaling_max_freq under 90% of
+    cpuinfo_max_freq), the lowest cap among them and the highest top speed, in MHz; None otherwise, or
+    without cpufreq. A cap set while the GPU draws a lot slowed every CPU job up to about 3 times on one
+    laptop, and nothing showed it (#179). dibs only reads the cap; it never sets it."""
+    try:
+        names = [n for n in os.listdir(root) if n.startswith("cpu") and n[3:].isdigit()]
+    except OSError:
+        return None
+    speeds = []
+    for name in names:
+        top = (_read(f"{root}/{name}/cpufreq/cpuinfo_max_freq") or "").strip()
+        cap = (_read(f"{root}/{name}/cpufreq/scaling_max_freq") or "").strip()
+        if top.isdigit() and cap.isdigit():
+            speeds.append((int(top) // 1000, int(cap) // 1000))
+    capped = [(top, cap) for top, cap in speeds if cap < top * CAPPED_BELOW]
+    if not speeds or len(capped) * 2 < len(speeds):
+        return None
+    return {"capped_mhz": min(cap for _, cap in capped), "max_mhz": max(top for top, _ in speeds)}
+
+
 def memory_pressure() -> float:
     """The share of the last 10 s in which some task waited for memory, in percent (PSI, "some
     avg10"); 0 where the kernel doesn't report it."""
