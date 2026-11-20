@@ -15,7 +15,7 @@ import time
 import tty
 from pathlib import Path
 
-from dibs import __version__, agents, build_id
+from dibs import __version__, agents, build_id, snapshot
 from dibs import client as dc
 from dibs import render
 from dibs.paths import Paths, get_paths
@@ -109,6 +109,12 @@ def build_parser() -> argparse.ArgumentParser:
             help="cancel job ID and queue this one instead, in one step, so no other job starts in between; "
             "a waiting job's replacement that runs the same command and asks for no more keeps its place in line",
         )  # fmt: skip
+        s.add_argument(
+            "--snapshot", action="store_true",
+            help="run it on a copy of this git repository's code as it is now (what git tracks, with your uncommitted "
+            "changes, and new files git doesn't ignore), so you can keep editing while it waits; what git ignores "
+            "(.venv, data, outputs) is linked, not copied. At most 1G of code",
+        )  # fmt: skip
         s.add_argument("-o", "--output", help="write the job's output to this file instead of dibs's log")
         if name == "submit":
             s.add_argument("--json", action="store_true", help="print the job as JSON")
@@ -167,10 +173,12 @@ def _print_json(data) -> None:
     print(json.dumps(data, indent=2))
 
 
-def _submit_request(args, command: list[str]) -> dict:
+def _submit_request(args, command: list[str], paths: Paths | None = None) -> dict:
     cwd = os.getcwd()
     session, label = dc.current_session(os.environ, cwd)
+    staged = snapshot.stage(paths, cwd) if getattr(args, "snapshot", False) and paths is not None else None  # #172
     return {
+        "snapshot": staged,
         "argv": command,
         "cwd": cwd,
         "env": dict(os.environ),
@@ -224,7 +232,7 @@ def _keeps_running(job_id: int, signum: int) -> int:
 
 
 def cmd_submit(args, paths: Paths, command: list[str]) -> int:
-    response = dc.Client(paths).call("submit", **_submit_request(args, command))
+    response = _submit(paths, args, command)
     earlier, match = response.get("earlier", []), response.get("earlier_match", "command")
     if args.json:
         _print_json({**response["job"], "earlier": earlier, "earlier_match": match, "replaced": response.get("replaced")})
@@ -244,9 +252,20 @@ def cmd_submit(args, paths: Paths, command: list[str]) -> int:
     return 0
 
 
+def _submit(paths: Paths, args, command: list[str]) -> dict:
+    """Submit the job; with --snapshot, a copy of its code goes with it, and is removed if it's refused (#172)."""
+    request = _submit_request(args, command, paths)
+    try:
+        return dc.Client(paths).call("submit", **request)
+    except BaseException:
+        if request.get("snapshot"):
+            shutil.rmtree(request["snapshot"], ignore_errors=True)
+        raise
+
+
 def cmd_run(args, paths: Paths, command: list[str]) -> int:
     client = dc.Client(paths)
-    response = client.call("submit", **_submit_request(args, command))
+    response = _submit(paths, args, command)
     job = response["job"]
     print(render.render_submit(job, response["now"]), file=sys.stderr)
     if response.get("replaced") is not None:
@@ -673,6 +692,9 @@ def main(argv: list[str] | None = None) -> int:
             looks = [args.id] if args.cmd in ("show", "logs") and not _discarded(sys.stdout) else []
             _tell(get_paths(), seen=looks, failures=not getattr(args, "json", False))
         return HANDLERS[args.cmd](args, get_paths(), command)
+    except snapshot.SnapshotError as e:
+        print(f"dibs: {e}", file=sys.stderr)
+        return 2
     except dc.DibsError as e:
         if e.code == "upgraded" and args.cmd in REPEATABLE and os.environ.get("DIBS_RERUN") != build_id():
             _run_again(given)  # again on each new upgrade; a rerun still on the same code shows the error (#201)

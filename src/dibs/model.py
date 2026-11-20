@@ -109,6 +109,8 @@ class Job:
     no_borrow: bool = False  # must start within RAM nobody reserved (after the machine ran out once)
     evicted: bool = False  # stopped by dibs to give borrowed RAM back under memory pressure (#114)
     grew_borrowed: bool = False  # this run grew into RAM other jobs reserved but weren't using (#182)
+    snapshot: str | None = None  # the repository this job runs a copy of, made at submit (#172)
+    snapshot_kept: str | None = None  # where that copy is kept, when the job wrote files into it
     background: dict | None = None  # beside an exclusive job: other programs' CPU use, mean and max cores (#112)
 
 
