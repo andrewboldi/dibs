@@ -46,7 +46,7 @@ from dibs.model import (
 from dibs.paths import Paths, ensure_dirs, get_paths
 from dibs.planner import Plan, Queued, Running, plan
 from dibs.store import Store
-from dibs.units import GiB, format_duration, format_size, format_size_against, parse_size
+from dibs.units import GiB, format_duration, format_size, format_size_against, parse_size, suggest_size
 
 KILL_AFTER = 10.0  # seconds between asking a job to stop (SIGTERM) and forcing it (SIGKILL)
 OWED_FOR = 86400.0  # seconds: what a session owes (or is owed) for its priorities lapses after a day
@@ -84,6 +84,8 @@ FAILED_FOR = 3600.0  # seconds: a failed job is told at each of its session's di
 # is told then, while other jobs wait for GPU memory, and at most once every IDLE_TELL_EVERY (#186).
 IDLE_UTIL, IDLE_EVERY, IDLE_TELL_EVERY, IDLE_SHARE = 5.0, 30.0, 3600.0, 0.1
 IDLE_AFTER = GPU_IDLE_AFTER
+ADVISE_EVERY = 3600.0  # seconds: each kind of advice, at most this often per session and script (#169)
+ADVISE_RUNS = 5  # runs of a script it takes to say how it uses what it asks for (#169)
 WAIT_RECHECK = 5.0  # a long-polling wait re-checks its jobs at least this often
 LOG_MAX = 5 * 1024 * 1024
 
@@ -364,6 +366,7 @@ class Daemon:
             self.store.update_job(replaced)
         self.schedule()
         response = self.show(job.id)
+        self._advise(job, response["job"], now)
         if replaced is not None:
             response["replaced"] = replaced.id
             response["kept_place"] = keeps
@@ -668,7 +671,8 @@ class Daemon:
             if op == "info":
                 return self.info()
             if op == "notices":
-                return self.notices(str(request["session"]), self.clock(), request.get("seen") or ())
+                return self.notices(str(request["session"]), self.clock(), request.get("seen") or (),
+                                    at_submit=bool(request.get("at_submit")))  # fmt: skip
             if op == "seen":
                 self._mark_seen(str(request["session"]), request.get("ids") or (), self.clock())
                 return {"ok": True}
@@ -1002,7 +1006,7 @@ class Daemon:
             log.info("job %d grew past its %s RAM reservation into RAM nobody reserved: its limit is now %s",
                      job.id, format_size(job.request.mem), format_size(job.ram_limit))  # fmt: skip
 
-    def notices(self, session: str, now: float, seen: Sequence[int] = ()) -> dict:
+    def notices(self, session: str, now: float, seen: Sequence[int] = (), at_submit: bool = False) -> dict:
         """What the guard stopped of this session's since it was last told, each told once: the note in a
         stopped program's own output can be lost, in a pipe through grep or a log nobody reads (#135).
         And its jobs that failed in the last hour, at each of its dibs commands until one of them looks
@@ -1018,7 +1022,76 @@ class Daemon:
         told_now = [{"time": e["time"], "message": e["message"], "kind": e["kind"]} for e in stops]
         failed = [e for e in events if e["kind"] == "failed" and now - FAILED_FOR <= e["time"] <= now]
         told_now += [n for n in (self._failure_notice(e, session) for e in failed) if n is not None]
+        if not at_submit:  # advice on a request goes out at the session's other commands (#169)
+            key = f"told_advice:{session}"
+            advised = float(self.store.get_meta(key) or 0.0)
+            advice = [e for e in self.store.events(max(advised, now - TOLD_WINDOW))
+                      if e["kind"] == "advice" and e.get("session") == session and e["time"] > advised]  # fmt: skip
+            if advice:
+                self.store.set_meta(key, repr(advice[-1]["time"]))
+            told_now += [{"time": e["time"], "message": e["message"], "kind": "advice"} for e in advice]
         return {"ok": True, "notices": told_now}
+
+    def _advise(self, job: Job, view: dict, now: float) -> None:
+        """Tell the session, at its next dibs command other than a submit, when this job's request doesn't
+        match how the same command or script ran before (#169): little of submit's own output reaches
+        agents, and a loop's submit may be the one told. Each kind at most once an hour per script."""
+        script = script_of(job.argv)
+        name = os.path.basename(script) if script and not script.startswith("-m ") else (script or os.path.basename(job.argv[0]))
+        by_command = self.store.earlier_runs(job.cwd, job.argv, limit=6)
+        by_script = self.store.earlier_runs_of_script(job.cwd, script, limit=6) if script else []
+        runs, req, said = by_script or by_command, job.request, []
+        last = (by_command or by_script)[:1]
+        if last and last[0].state == State.FAILED and (last[0].reason or "").startswith("killed: went over its"):
+            limit = max(last[0].request.mem, last[0].ram_limit or 0)
+            if req.mem <= limit:
+                more = self._more_ram(last[0])
+                said.append(("ram_kill", f"Job {job.id} asks for {format_size(req.mem)} of RAM, and the last run of this "
+                             f"command (#{last[0].id}) was killed at its {format_size(limit)} RAM limit"
+                             + (f"; dibs suggested --mem {format_size(more)}" if more else "")
+                             + f". dibs submit --replace {job.id} with more RAM fixes it before it runs."))  # fmt: skip
+        peaks = [r.peak_mem for r in runs if r.peak_mem]
+        if "RAM" in (view.get("lacks") or []) and len(peaks) >= ADVISE_RUNS and max(peaks) < req.mem / 2:
+            said.append(("ram_high", f"Job {job.id} waits for {format_size(req.mem)} of RAM; the last {len(peaks)} runs of "
+                         f"{name} peaked at {format_size(max(peaks))} at most: --mem {format_size(suggest_size(max(peaks)))} "
+                         f"would do (dibs submit --replace {job.id})."))  # fmt: skip
+        if req.gpus:
+            vram = [r.peak_vram for r in runs if r.peak_vram is not None and r.request.gpus]
+            if len(vram) >= ADVISE_RUNS and max(vram) < req.vram / 4:
+                if not max(vram):
+                    said.append(("vram_high", f"The last {len(vram)} runs of {name} used no GPU memory, and job {job.id} "
+                                 f"asks for {format_size(req.vram)}: leave --vram out, so the GPU's memory stays free "
+                                 "for jobs that use it."))  # fmt: skip
+                else:
+                    said.append(("vram_high", f"The last {len(vram)} runs of {name} held at most {format_size(max(vram))} "
+                                 f"of GPU memory, and job {job.id} asks for {format_size(req.vram)}: --vram "
+                                 f"{format_size(suggest_size(max(vram)))} would do."))  # fmt: skip
+            held = [v for v in vram if v]
+            if held and max(held) > req.vram:
+                said.append(("vram_low", f"Job {job.id} asks for {format_size(req.vram)} of GPU memory, and the last "
+                             f"{len(held)} runs of {name} held up to {format_size(max(held))}: dibs plans it at that "
+                             f"until it shows its own use, and --vram {format_size(suggest_size(max(held)))} would ask "
+                             "for it."))  # fmt: skip
+        done = [r for r in runs if r.state == State.DONE and r.started is not None and r.ended is not None]
+        if len(done) >= ADVISE_RUNS:
+            took = [r.ended - r.started - (r.asleep or 0.0) for r in done[:ADVISE_RUNS]]
+            ratios = sorted(t / r.request.time for t, r in zip(took, done) if r.request.time)
+            median = ratios[len(ratios) // 2] if ratios else 1.0
+            estimates = sorted({r.request.time for r in done[:ADVISE_RUNS]})
+            est = format_duration(estimates[0]) + (f"-{format_duration(estimates[-1])}" if len(estimates) > 1 else "")
+            times = ", ".join(format_duration(t) for t in took)
+            if median < 0.25:
+                said.append(("estimate", f"The last {len(took)} runs of {name} took {times}, against {est} estimates: "
+                             "a closer --time gets its jobs started sooner."))  # fmt: skip
+            elif median > 2:
+                said.append(("estimate", f"The last {len(took)} runs of {name} took {times}, over twice their {est} "
+                             "estimates: a longer --time keeps predictions right."))  # fmt: skip
+        for kind, message in said:
+            key = f"advised:{job.session}:{kind}:{script or ' '.join(job.argv)}"
+            if now - float(self.store.get_meta(key) or -math.inf) < ADVISE_EVERY:
+                continue
+            self.store.set_meta(key, repr(now))
+            self.store.add_event("advice", {"session": job.session, "job": job.id, "message": message}, now)
 
     def _mark_seen(self, session: str, ids: Sequence[int], now: float) -> None:
         """The session looked at these jobs (dibs show, wait or logs): the ended ones are no longer told (#176)."""
@@ -1598,6 +1671,7 @@ class Daemon:
         self.store.delete_events_before(cutoff)
         lapsed = [k for k, v in self.store.meta_items("owed:") if now - json.loads(v).get("time", 0) > OWED_FOR]
         lapsed += [k for k, v in self.store.meta_items("seen:") if now - float(v) > TOLD_WINDOW]  # #176
+        lapsed += [k for k, v in self.store.meta_items("advised:") if now - float(v) > TOLD_WINDOW]  # #169
         self.store.delete_meta(lapsed)
         self._last_retention = now
 
