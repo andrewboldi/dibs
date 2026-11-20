@@ -344,6 +344,20 @@ def _cpu_use(job: dict, now: float) -> str:
     return f"CPU {job['cpu_seconds'] / ran:.1f} of {job['request']['cpus']}"
 
 
+def failed_notice(notice: dict) -> str:
+    """A job of the session's that failed, told at each of its dibs commands until it looks (#176). By
+    number only: loops count dibs queue's lines that match a job's name, a session or a state."""
+    when = time.strftime("%H:%M", time.localtime(notice["time"]))
+    line = f"job {notice['job']} failed at {when}"
+    if notice.get("ran") is not None:
+        line += f" after {format_duration(max(0.0, notice['ran']))}"
+    if notice.get("exit_code") is not None:
+        line += f", exit {notice['exit_code']}"
+    if notice.get("reason"):
+        line += f": {notice['reason']}"
+    return line + ". (Told at each dibs command for an hour, until dibs show, wait or logs looks at it.)"
+
+
 def render_info(info: dict) -> str:
     cap = info["capacity"]
     gpus = [f"GPU {g['index']} {g['name']} ({format_size(g['vram'])})" for g in cap["gpus"]] or ["no GPUs"]
