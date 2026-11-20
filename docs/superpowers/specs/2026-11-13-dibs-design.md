@@ -273,8 +273,11 @@ This function is the heart of the project and must be testable with a fake clock
 
 They are never stopped. For planning, a running job's expected end is `start + estimate` while
 that's in the future. After that, it is assumed to need a little longer: `now + max(60 s, 10% of
-its estimate)`, re-evaluated every pass (my call). Everyone's predicted start times shift as it
-keeps running. `queue` and `show` mark it as "over estimate by …".
+its estimate)`, re-evaluated every pass (my call). Once it has run three times its estimate, it is
+assumed to need as long again as it has run past its estimate, if that's longer (#185): by then
+"a little longer" is wrong pass after pass, and every job that would still be running at that end
+is held back for a job waiting on it. Everyone's predicted start times shift as it keeps running.
+`queue` and `show` mark it as "over estimate by …".
 
 ### 7.4 Predictions and reasons
 
