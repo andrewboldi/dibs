@@ -1630,3 +1630,64 @@ def test_a_start_waiting_on_a_job_past_its_estimate_is_shown_as_that_job_ending(
     assert _when_cell(view, t) == f"starts {ending}: needs 1G VRAM (0 free)"
     assert f"expected to start {ending}." in render_submit(view, t)
     assert f"start {ending}" in render_show(view, t) and "in 5m" not in render_show(view, t)
+
+
+def _ended_job(**kw):
+    from dibs.model import Job, Request, State, job_to_dict
+
+    t = 1_000_000.0
+    fields = dict(id=2218, name="export", argv=["python", "export.py"], cwd="/w", env={}, session="s",
+                  request=Request(cpus=4, mem=9 * GiB, gpus=0, vram=0, time=3600.0), session_label="w·s",
+                  submitted=t, tag=t + 3600, state=State.FAILED, output="/w/out", started=t, ended=t + 960,
+                  exit_code=143, reason="killed: went over its 9G RAM reservation; resubmit with --mem 12G",
+                  peak_mem=9 * GiB, cpu_seconds=3.3 * 960)  # fmt: skip
+    fields.update(kw)
+    return job_to_dict(Job(**fields)), t
+
+
+def test_dibs_show_gives_a_failed_jobs_reason_on_its_ended_line():
+    # #175: agents keep the ended line and drop the reason line, which says what to resubmit with.
+    from dibs.render import render_show
+
+    view, t = _ended_job()
+    text = render_show(view, t + 1000)
+    ended = next(line for line in text.splitlines() if line.lstrip().startswith("ended"))
+    assert ended.endswith("after 16m, exit 143: killed: went over its 9G RAM reservation; resubmit with --mem 12G")
+    assert re.search(r"reason +killed: went over its 9G RAM reservation", text)  # kept, for filters that look for it
+
+
+def test_dibs_show_says_on_the_ended_line_which_try_it_was():
+    # #175: a retried job's ended line gave only its last try, and the tries are on lines of their own.
+    from dibs.render import render_show
+
+    t = 1_000_000.0
+    first = {"started": t - 400, "ended": t - 40, "exit_code": 137, "asleep": 0.0, "peak_mem": 8 * GiB, "peak_vram": None,
+             "reason": "killed: went over its 8G RAM reservation; retrying with --mem 10G", "request": {}}  # fmt: skip
+    view, _ = _ended_job(started=t, ended=t + 6, exit_code=1, reason=None, attempts=[first], cpu_seconds=None)
+    ended = next(line for line in render_show(view, t + 60).splitlines() if line.lstrip().startswith("ended"))
+    assert ended.endswith("after 6s, exit 1, on its 2nd try (the 1st ended after 6m: killed: went over its 8G RAM reservation)")
+
+
+def test_dibs_show_gives_cpu_use_on_its_peak_line():
+    # #175: while right-sizing, an agent wrote that dibs show reports peak RAM but not CPU.
+    from dibs.render import render_show
+
+    view, t = _ended_job()
+    assert "peak      RAM 9G of 9G (not counting file cache), CPU 3.3 of 4" in render_show(view, t + 1000)
+    short, _ = _ended_job(ended=t + 5, cpu_seconds=4.0)  # too short a run to tell
+    assert "CPU" not in render_show(short, t + 1000).split("peak", 1)[1]
+    running = {**view, "state": "running", "ended": None, "exit_code": None, "reason": None, "cpu_ids": [0, 1, 2, 3],
+               "gpu_ids": [], "expected_end": t + 3600, "over_estimate": 0.0, "cpu_seconds": 1.5 * 600}  # fmt: skip
+    assert "CPU 1.5 of 4" in render_show(running, t + 600)
+
+
+def test_a_running_jobs_view_carries_the_cpu_time_its_scope_has_used(daemon, tmp_path, monkeypatch):
+    # #175: so dibs show's peak line can give CPU use while the job runs.
+    go = tmp_path / "go"
+    holding = [PY, "-c", f"import os, time\nwhile not os.path.exists({str(go)!r}): time.sleep(0.02)"]
+    running = submit(daemon, tmp_path, holding)
+    run_until(daemon, lambda: job(daemon, running).shim_pid)
+    monkeypatch.setattr(daemon, "_job_cpu_seconds", lambda j: 42.0)
+    assert daemon.show(running)["job"]["cpu_seconds"] == 42.0
+    go.touch()
+    run_until(daemon, lambda: finished(daemon, running))
