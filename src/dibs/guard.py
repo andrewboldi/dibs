@@ -157,24 +157,48 @@ def ram_hog(
     parents: Collection[tuple[int, int]] = (),
     instance: str = "",
     desktop: bool = True,
+    left: list[tuple[int, int, str]] | None = None,
 ) -> tuple[int, int, str] | None:
     """The program to stop while the machine is short of memory, as (pid, RAM it holds, "stop" or
     "warn"): the largest one outside dibs that holds at least `minimum` bytes and runs where agents
     work, leaving alone the agent CLIs themselves, programs an agent runs under (stopping a program
-    stops what it started), and what the GPU guard leaves alone."""
+    stops what it started), and what the GPU guard leaves alone. `left` collects (pid, held, why) for
+    each large one left alone, for dibs's log (#191)."""
     cmap: dict[int, list[int]] | None = None
     for pid, held in sorted(programs, key=lambda p: -p[1]):
         if held < minimum:
             break
-        if mode == "off" or in_dibs(pid) or _is_agent(pid) or not _where_agents_run(pid):
+        if mode == "off":
             continue
-        cmap = procs.children_map() if cmap is None else cmap
-        if any(_is_agent(child) for child in procs.descendants(pid, cmap)):
-            continue  # stopping it would stop the agent under it: the tmux server, a pane's shell (#141)
-        kind = _judge(pid, mode, allow, since, my_uid, parents, instance, desktop)
-        if kind in ("stop", "warn"):
-            return pid, held, kind
+        why = None
+        if in_dibs(pid):
+            why = "a dibs job"
+        elif _is_agent(pid):
+            why = "an agent CLI"
+        elif not _where_agents_run(pid):
+            why = "not in an agent's terminal"
+        else:
+            cmap = procs.children_map() if cmap is None else cmap
+            if any(_is_agent(child) for child in procs.descendants(pid, cmap)):
+                why = "an agent runs under it"  # stopping it would stop the agent: the tmux server, a pane's shell (#141)
+        if why is None:
+            kind = _judge(pid, mode, allow, since, my_uid, parents, instance, desktop)
+            if kind in ("stop", "warn"):
+                return pid, held, kind
+            why = _LEFT_ALONE.get(kind or "", kind)
+        if why and left is not None:
+            left.append((pid, held, why))
     return None
+
+
+_LEFT_ALONE = {
+    "other-user": "another user's",
+    "other-dibs": "another dibs's job",
+    "allowed": "on the guard's allow list",
+    "desktop": "launched from the desktop",
+    "preexisting": "it was running before the guard started",
+    "inherited": "started by a program the guard leaves alone",
+}
 
 
 def _other_dibs_job(pid: int, instance: str) -> bool:
