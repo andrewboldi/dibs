@@ -20,8 +20,9 @@ import time
 from collections import deque
 from dataclasses import asdict, replace
 from collections.abc import Callable, Mapping, Sequence
+from pathlib import Path
 
-from dibs import __version__, build_id, guard, launcher, procs
+from dibs import __version__, build_id, guard, launcher, procs, snapshot
 from dibs.agents import PANE_SCOPES
 from dibs.gpu import GpuBackend, open_backend
 from dibs.machine import Config, ConfigError, build_capacity, detect_cpus, detect_mem, load_config
@@ -305,6 +306,12 @@ class Daemon:
         if isinstance(priority, bool) or not isinstance(priority, int) or not 1 <= priority <= 10:
             return _rejected("priority must be a whole number from 1 to 10")
 
+        staged = None
+        if req.get("snapshot") is not None:  # a copy of its code the CLI made (#172)
+            staged = Path(str(req["snapshot"])).resolve()
+            if staged.parent != (self.paths.state_dir / "snapshots").resolve() or not (staged / snapshot.MANIFEST).exists():
+                return _rejected("no such snapshot of the job's code")
+
         replaced = None
         if req.get("replace") is not None:
             replaced = self.store.get_job(int(req["replace"]))
@@ -365,6 +372,10 @@ class Daemon:
                 j.plain_tag += counted
             self.store.update_job(j)
         self.paths.job_dir(job.id).mkdir(mode=0o700, parents=True, exist_ok=True)
+        if staged is not None:  # it runs this copy of its code, moved into its folder (#172)
+            os.rename(staged, self.paths.job_dir(job.id) / "snapshot")
+            job.snapshot = json.loads((self.paths.job_dir(job.id) / "snapshot" / snapshot.MANIFEST).read_text())["root"]
+            self.store.update_job(job)
         if not job.output:
             job.output = str(self.paths.job_dir(job.id) / "output.log")
             self.store.update_job(job)
@@ -1748,6 +1759,10 @@ class Daemon:
         self._notify(job)
 
     def _notify(self, job: Job) -> None:
+        if job.snapshot and job.snapshot_kept is None:  # its copy goes, unless it wrote into it (#172)
+            job.snapshot_kept = snapshot.clear(self.paths.job_dir(job.id) / "snapshot")
+            if job.snapshot_kept:
+                self.store.update_job(job)
         if job.state == State.FAILED:  # its session is told at its next dibs commands (#176)
             self.store.add_event("failed", {"session": job.session, "job": job.id}, job.ended or self.clock())
         for callback in self._callbacks:
@@ -1763,6 +1778,11 @@ class Daemon:
         lapsed = [k for k, v in self.store.meta_items("owed:") if now - json.loads(v).get("time", 0) > OWED_FOR]
         lapsed += [k for k, v in self.store.meta_items("seen:") if now - float(v) > TOLD_WINDOW]  # #176
         lapsed += [k for k, v in self.store.meta_items("advised:") if now - float(v) > TOLD_WINDOW]  # #169
+        staging = self.paths.state_dir / "snapshots"  # copies a submit never claimed (#172)
+        for folder in staging.iterdir() if staging.is_dir() else ():
+            with contextlib.suppress(OSError):
+                if now - folder.stat().st_mtime > TOLD_WINDOW:
+                    shutil.rmtree(folder, ignore_errors=True)
         self.store.delete_meta(lapsed)
         self._last_retention = now
 

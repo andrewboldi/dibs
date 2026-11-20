@@ -15,7 +15,7 @@ import tempfile
 from collections.abc import Collection, Mapping
 from pathlib import Path
 
-from dibs import procs
+from dibs import procs, snapshot
 from dibs.model import Job
 from dibs.paths import Paths
 from dibs.units import MiB
@@ -168,11 +168,15 @@ def launch(job: Job, paths: Paths, *, use_systemd: bool, vendor: str = "nvidia")
     tmp = job_tmp(paths, job.id)
     tmp.mkdir(mode=0o700, parents=True, exist_ok=True)
     unit = unit_name(paths.instance, job.id) if use_systemd else None
+    cwd, argv, env = job.cwd, job.argv, job_env(job, paths.instance, vendor, tmp=tmp)
+    if job.snapshot:  # it runs its code as it was at submit (#172)
+        cwd, argv = snapshot.run_paths(job.snapshot, str(job_dir / "snapshot" / "tree"), job.cwd, job.argv)
+        env["PWD"] = cwd
     spec = {
         "job_id": job.id,
-        "argv": job.argv,
-        "cwd": job.cwd,
-        "env": job_env(job, paths.instance, vendor, tmp=tmp),
+        "argv": argv,
+        "cwd": cwd,
+        "env": env,
         "cpu_ids": job.cpu_ids,
         "output": job.output,
         "mem": job.request.mem,

@@ -277,7 +277,7 @@ def render_show(job: dict, now: float) -> str:
     title = f"queued ({ordinal(job['position'])} in line)" if state == "queued" and job.get("position") else state
     rows = [
         ("command", shlex.join(job["argv"])),
-        ("folder", _home(job["cwd"])),
+        ("folder", _home(job["cwd"]) + (", run from a copy of its code made at submit" if job.get("snapshot") else "")),
         ("session", job["session_label"]),
         *([("priority", str(job["priority"]))] if job.get("priority", 5) != 5 else []),
         ("asks for", asks_for(job["request"]) + (", with the machine to itself" if job["request"].get("exclusive") else "")),
@@ -347,6 +347,8 @@ def render_show(job: dict, now: float) -> str:
         peaks.append(f"GPU idle {format_duration(idle)} ({format_size(job.get('gpu_idle_held') or 0)})")
     if peaks:
         rows.append(("peak", ", ".join(peaks)))
+    if job.get("snapshot_kept"):  # #172
+        rows.append(("copy", f"it wrote files into its copy of the code, kept at {_home(job['snapshot_kept'])}"))
     rows.append(("output", _home(job["output"])))
     width = max(len(k) for k, _ in rows)
     lines = [f"Job {job['id']}  {job['name']}  {title}"]
