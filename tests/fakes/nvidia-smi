@@ -26,6 +26,9 @@ query = next((a for a in args if a.startswith("--query-")), None)
 if query == "--query-gpu=index,uuid,name,memory.total":
     for g in gpus:
         print(f"{g['index']}, {g['uuid']}, {g['name']}, {g['memory_mib']}")
+elif query == "--query-gpu=index,utilization.gpu":
+    for g in gpus:
+        print(f"{g['index']}, {g.get('utilization', 0)}")
 elif query == "--query-compute-apps=pid,used_memory,gpu_uuid":
     for p in data.get("processes", []):
         used = "[N/A]" if p.get("used_mib") is None else p["used_mib"]

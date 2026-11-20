@@ -27,6 +27,7 @@ from dibs.gpu import GpuBackend, open_backend
 from dibs.machine import Config, ConfigError, build_capacity, detect_cpus, detect_mem, load_config
 from dibs.model import (
     CREDIT_MAX,
+    GPU_IDLE_AFTER,
     TERMINAL,
     Capacity,
     Job,
@@ -45,7 +46,7 @@ from dibs.model import (
 from dibs.paths import Paths, ensure_dirs, get_paths
 from dibs.planner import Plan, Queued, Running, plan
 from dibs.store import Store
-from dibs.units import GiB, format_size, format_size_against, parse_size
+from dibs.units import GiB, format_duration, format_size, format_size_against, parse_size
 
 KILL_AFTER = 10.0  # seconds between asking a job to stop (SIGTERM) and forcing it (SIGKILL)
 OWED_FOR = 86400.0  # seconds: what a session owes (or is owed) for its priorities lapses after a day
@@ -78,6 +79,11 @@ HEAVY_SHARE = 1 / 6  # of the machine's cores, at least 2
 TELL_EVERY = 3600.0  # seconds: at most this often per terminal
 TOLD_WINDOW = 86400.0  # how far back a session is told, at its next dibs command, what the guard stopped (#135)
 FAILED_FOR = 3600.0  # seconds: a failed job is told at each of its session's dibs commands this long at most (#176)
+# A job holding GPU memory with the GPU idle (#180): a hold of at least a tenth of the GPU (1G or more), at
+# under IDLE_UTIL percent use, counts once it has gone on IDLE_AFTER; checked every IDLE_EVERY; its session
+# is told then, while other jobs wait for GPU memory, and at most once every IDLE_TELL_EVERY (#186).
+IDLE_UTIL, IDLE_EVERY, IDLE_TELL_EVERY, IDLE_SHARE = 5.0, 30.0, 3600.0, 0.1
+IDLE_AFTER = GPU_IDLE_AFTER
 WAIT_RECHECK = 5.0  # a long-polling wait re-checks its jobs at least this often
 LOG_MAX = 5 * 1024 * 1024
 
@@ -137,6 +143,15 @@ def _keeps_place(old: Job, session: str, argv: list[str], cwd: str, new: Request
     )  # fmt: skip
 
 
+def _idle_message(job: Job, now: float, waiting: int) -> str:
+    """What a session is told of its job holding GPU memory with the GPU idle (#186): by number, as the
+    failure notice is (#176)."""
+    jobs = "1 job waits" if waiting == 1 else f"{waiting} jobs wait"
+    return (f"Job {job.id} has held {format_size(job.gpu_idle_held or 0)} of GPU memory with the GPU idle for "
+            f"{format_duration(now - (job.gpu_idle_since or now))}, while {jobs} for GPU memory. A job keeps its "
+            "GPU memory until its processes free it or exit.")  # fmt: skip
+
+
 def _shared_part(job: Job) -> str:
     """For a job killed at its RAM limit: how much of its peak was shared memory, when that was at
     least a quarter of its reservation, and of which kind, since what helps differs. Files a job writes
@@ -194,6 +209,7 @@ class Daemon:
         self.slept = slept
         self.pressure = pressure
         self._pressured_since: float | None = None  # when memory pressure rose above EVICT_PRESSURE
+        self._idle_at = -math.inf  # when idle GPU holds were last checked (#180)
         self._held: dict[int, int] = {}  # job id -> what it held (anon + shmem) at this tick's sample
         self._grow_failed: dict[int, float] = {}  # job id -> when raising its RAM limit last failed
         self.cpu_busy = cpu_busy
@@ -996,7 +1012,7 @@ class Daemon:
         key = f"told:{session}"
         told = float(self.store.get_meta(key) or 0.0)
         events = [e for e in self.store.events(min(max(told, now - TOLD_WINDOW), now - FAILED_FOR)) if e.get("session") == session]
-        stops = [e for e in events if e["kind"] in ("stop", "heavy") and e["time"] > told and e.get("message")]
+        stops = [e for e in events if e["kind"] in ("stop", "heavy", "idle_gpu") and e["time"] > told and e.get("message")]
         if stops:
             self.store.set_meta(key, repr(stops[-1]["time"]))
         told_now = [{"time": e["time"], "message": e["message"], "kind": e["kind"]} for e in stops]
@@ -1225,6 +1241,58 @@ class Daemon:
             for (t0, b0, s0), (t1, b1, s1) in zip(samples, samples[1:])
         ]
 
+    def _watch_idle(self, now: float, running: dict[int, Job], held: dict[int, dict[int, dict[int, int]]]) -> None:
+        """Record which jobs hold GPU memory with the GPU idle (#180), and tell a job's session once its
+        hold has gone on IDLE_AFTER while other jobs wait for GPU memory (#186): a job keeps its memory
+        until its processes free it or exit, and one did so, idle, for hours. Nothing is stopped."""
+        if now - self._idle_at < IDLE_EVERY:
+            return
+        self._idle_at = now
+        util = self.backend.utilization() if held else {}
+        per_process = self.backend.process_utilization() if held else None
+        size = {g.index: g.vram for g in self.capacity.gpus}
+        waiting: int | None = None  # jobs waiting for GPU memory, counted only when someone is to be told
+        for job in running.values():
+            holds = {g: sum(pids.values()) for g, pids in held.get(job.id, {}).items()}
+            big = {g: amount for g, amount in holds.items() if amount >= max(GiB, size.get(g, 0) * IDLE_SHARE)}
+            idle = bool(big) and util is not None and all(
+                self._gpu_idle(job.id, g, held, util, per_process) for g in big
+            )
+            if not idle:
+                if job.gpu_idle_since is not None:
+                    self._end_idle(job, now)
+                    self.store.update_job(job)
+                continue
+            if job.gpu_idle_since is None:
+                job.gpu_idle_since, job.gpu_idle_held = now, 0
+            job.gpu_idle_held = max(job.gpu_idle_held or 0, sum(big.values()))
+            if now - job.gpu_idle_since >= IDLE_AFTER and (job.gpu_idle_told is None or now - job.gpu_idle_told >= IDLE_TELL_EVERY):
+                if waiting is None:
+                    current, _, _ = self._plan(now)
+                    waiting = sum(1 for p in current.predictions.values() if {"VRAM", "GPUs"} & set(p.lacks))
+                if waiting:
+                    job.gpu_idle_told = now
+                    self.store.add_event("idle_gpu", {"session": job.session, "job": job.id,
+                                                      "message": _idle_message(job, now, waiting)}, now)  # fmt: skip
+                    log.info("told the session of job %d: it holds %s of GPU memory with the GPU idle", job.id,
+                             format_size(job.gpu_idle_held))  # fmt: skip
+            self.store.update_job(job)
+
+    def _gpu_idle(self, job_id: int, gpu: int, held: dict, util: dict[int, float], per_process: dict[int, float] | None) -> bool:
+        """Whether a job's processes on a GPU are using it: by each process's use where the driver says,
+        else by the whole GPU's, when no other job holds memory there."""
+        if per_process is not None:
+            return all(per_process.get(pid, 0.0) < IDLE_UTIL for pid in held[job_id][gpu])
+        alone = all(gpu not in gpus for other, gpus in held.items() if other != job_id)
+        return alone and gpu in util and util[gpu] < IDLE_UTIL
+
+    def _end_idle(self, job: Job, now: float) -> None:
+        """An idle stretch ends (the job used the GPU again, freed its memory, or ended): it counts in the
+        job's record if it went on IDLE_AFTER or more (#180)."""
+        if job.gpu_idle_since is not None and now - job.gpu_idle_since >= IDLE_AFTER:
+            job.gpu_idle += now - job.gpu_idle_since
+        job.gpu_idle_since = None
+
     def _job_of(self, pid: int, shims: dict[int, int], units: dict[str, int]) -> int | None:
         """The running job a process belongs to: by its systemd scope, else by its shim ancestor."""
         cg = procs.cgroup(pid) or ""
@@ -1250,6 +1318,7 @@ class Daemon:
         if not seen and not graphics:
             self.outside = []
             self._outside_vram = {}
+            self._watch_idle(now, {j.id: j for j in self.store.jobs([State.RUNNING])}, {})
             return
         seen = [p for p in seen or [] if p.gpu_index in managed]
         running = {j.id: j for j in self.store.jobs([State.RUNNING])}
@@ -1289,6 +1358,7 @@ class Daemon:
             if job_id is not None:
                 pids = held.setdefault(job_id, {}).setdefault(p.gpu_index, {})
                 pids[p.pid] = max(pids.get(p.pid, 0), p.used)
+        self._watch_idle(now, running, held)
         # A job may borrow VRAM beyond its reservation that no other job holds and no program outside
         # dibs uses (#88); it's stopped only when it reaches into theirs. A job holds its reservation,
         # or more while it borrows.
@@ -1389,6 +1459,7 @@ class Daemon:
             job.asleep = max(0.0, (slept if slept is not None else self.slept()) - job.sleep_at_start)
         job.exit_code = result.get("exit_code")
         job.ended = result.get("ended") or now
+        self._end_idle(job, now)  # an idle hold ends with the job (#180)
         job.cpu_seconds = result.get("cpu_seconds")
         if job.peak_mem is None:  # never sampled while it ran: the launcher's figure is all there is
             job.peak_mem = result.get("peak_mem")

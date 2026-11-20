@@ -630,8 +630,9 @@ def _tell(paths, seen: list[int] | None = None, failures: bool = True) -> None:
                 print(f"dibs: {render.failed_notice(notice)}", file=sys.stderr)
             continue
         when = time.strftime("%H:%M", time.localtime(notice["time"]))
-        what = ("a program in your terminal kept many cores busy outside dibs" if notice.get("kind") == "heavy"
-                else "the guard stopped a program of yours")  # fmt: skip
+        what = {"heavy": "a program in your terminal kept many cores busy outside dibs",
+                "idle_gpu": "a job of yours holds GPU memory with the GPU idle"}.get(notice.get("kind") or "",
+                                                                                     "the guard stopped a program of yours")  # fmt: skip
         print(f"dibs: at {when}, {what}:\n{notice['message']}\n", file=sys.stderr)
 
 

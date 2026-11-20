@@ -35,6 +35,8 @@ class FakeBackend:
         self.procs: list[GpuProcess] = list(procs)
         self.graphics: list[GpuProcess] = []  # processes holding a graphics context (EGL/OpenGL), #173
         self.blind = False  # True: the driver doesn't report processes
+        self.util: dict[int, float] | None = {}  # each GPU's use in percent (#180)
+        self.proc_util: dict[int, float] | None = None  # each process's, where the driver says (#180)
 
     def list_gpus(self):
         return list(self.gpus)
@@ -44,6 +46,12 @@ class FakeBackend:
 
     def graphics_processes(self):
         return None if self.blind else list(self.graphics)
+
+    def utilization(self):
+        return None if self.blind else self.util
+
+    def process_utilization(self):
+        return None if self.blind else self.proc_util
 
 
 @pytest.fixture

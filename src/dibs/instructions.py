@@ -57,7 +57,9 @@ when those resources are free, so jobs never crash each other by running out of 
   job's real peak.
 - `--vram SIZE`: GPU memory on each GPU it uses. Leave it out for a CPU-only job, which then
   can't see any GPU. A job may use more VRAM than it reserved while nobody else needs that memory,
-  but it is stopped as soon as it reaches memory another job reserved.
+  but it is stopped as soon as it reaches memory another job reserved. A job keeps the GPU memory
+  it took until its processes free it or exit, so a long CPU-only stretch after the GPU work can be
+  a job of its own, without --vram.
 - `--gpus N`: more than one GPU (each with --vram).
 - `--time DURATION`: your honest estimate, like 90s, 20m or 1h30m. It only decides the order:
   shorter jobs go first, and once a job's place in line comes due (at the default priority, after

@@ -6,7 +6,7 @@ import shlex
 import time
 import unicodedata
 
-from dibs.model import script_of
+from dibs.model import GPU_IDLE_AFTER, script_of
 from dibs.units import format_duration, format_size
 
 _COLORS = {"running": "32", "queued": "33", "failed": "31", "done": "2", "cancelled": "2"}
@@ -105,6 +105,8 @@ def render_earlier(earlier: list[dict], match: str = "command") -> str:
             used.append(f"RAM {format_size(e['peak_mem'])} of {format_size(r['mem'])}")
         if e.get("peak_vram") is not None and r.get("vram"):
             used.append(f"VRAM {format_size(e['peak_vram'])} of {format_size(r['vram'])}")
+        if e.get("gpu_idle"):  # it held GPU memory with the GPU idle (#180)
+            used.append(f"GPU idle {format_duration(e['gpu_idle'])}")
         if used:
             line += ": " + ", ".join(used)
         if e.get("reason") and e["state"] != "done":
@@ -150,6 +152,18 @@ def render_submit(job: dict, now: float) -> str:
     return f"{head}\n  dibs wait {job_id}      dibs logs {job_id} -f"
 
 
+def _idle_now(job: dict, now: float) -> float:
+    """How long a running job's current hold of GPU memory with the GPU idle has gone on, once it counts
+    (#180); 0 if it doesn't."""
+    since = job.get("gpu_idle_since")
+    return now - since if since is not None and now - since >= GPU_IDLE_AFTER else 0.0
+
+
+def _idle_total(job: dict, now: float) -> float:
+    """All the time a job has held GPU memory with the GPU idle, in stretches that count (#180)."""
+    return (job.get("gpu_idle") or 0.0) + _idle_now(job, now)
+
+
 def _after(after: dict) -> str:
     """A start that rests on a running job past its estimate, whose assumed end moves with every pass (#181)."""
     over, estimate = format_duration(after["over"]), format_duration(after["estimate"])
@@ -160,8 +174,12 @@ def _when_cell(job: dict, now: float) -> str:
     state = job["state"]
     if state == "running":
         if job.get("over_estimate"):
-            return f"over estimate by {format_duration(job['over_estimate'])}"
-        return f"ends {when(job['expected_end'], now)}"
+            cell = f"over estimate by {format_duration(job['over_estimate'])}"
+        else:
+            cell = f"ends {when(job['expected_end'], now)}"
+        if idle := _idle_now(job, now):  # #180
+            cell += f"; GPU idle {format_duration(idle)}, holding {format_size(job.get('gpu_idle_held') or 0)}"
+        return cell
     if state == "queued":
         if job.get("predicted_start") is None:
             return f"can't run here: {job['waiting_for']}"
@@ -325,6 +343,8 @@ def render_show(job: dict, now: float) -> str:
     cpu = _cpu_use(job, now)
     if cpu:
         peaks.append(cpu)
+    if idle := _idle_total(job, now):  # #180
+        peaks.append(f"GPU idle {format_duration(idle)} ({format_size(job.get('gpu_idle_held') or 0)})")
     if peaks:
         rows.append(("peak", ", ".join(peaks)))
     rows.append(("output", _home(job["output"])))
@@ -607,7 +627,10 @@ def _running_row(job: dict, now: float, several: bool, name_w: int = _NAME_W) ->
         left = max(0.0, job["expected_end"] - now)
         line.add(f"ends in {format_duration(left)}".ljust(_WHEN_W) + "  ", None)
         done = round(min(1.0, max(0.0, 1 - left / estimate)) * _PROGRESS_W) if estimate else 0
-    return line.add("▰" * done, _WARN_SGR if over else _job_color(job["id"])).add("▱" * (_PROGRESS_W - done), "2")
+    line.add("▰" * done, _WARN_SGR if over else _job_color(job["id"])).add("▱" * (_PROGRESS_W - done), "2")
+    if idle := _idle_now(job, now):  # holding GPU memory with the GPU idle (#180)
+        line.add(f"  GPU idle {format_duration(idle)}", _WARN_SGR)
+    return line
 
 
 def _machine(snapshot: dict, width: int) -> list[_Line]:
