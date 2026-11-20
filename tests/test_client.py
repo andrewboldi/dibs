@@ -131,3 +131,50 @@ def test_a_daemon_another_command_already_restarted_isnt_restarted_again(tmp_pat
     monkeypatch.setattr(client, "stop_daemon", lambda *a, **k: stops.append(1) or True)
     assert client.Client(paths).call("queue")["ok"]
     assert stops == []  # the second look, under the restart lock, found the new build running
+
+
+def test_short_of_memory_takes_little_ram_available_and_high_pressure():
+    from dibs import procs
+
+    gib = 1 << 30
+    assert procs.short_of_memory(meminfo=lambda: (30 * gib, 29 * gib), pressure=lambda: 60.0)
+    assert not procs.short_of_memory(meminfo=lambda: (30 * gib, 20 * gib), pressure=lambda: 90.0)  # swap coming back in (#131)
+    assert not procs.short_of_memory(meminfo=lambda: (30 * gib, 29 * gib), pressure=lambda: 5.0)
+    assert not procs.short_of_memory(meminfo=lambda: None, pressure=lambda: 60.0)
+
+
+def test_a_restart_waits_while_the_machine_is_short_of_memory(capsys):
+    # #190: a restart then puts off dibs's relief, which stops the largest program outside dibs before
+    # the system's out-of-memory killer takes a whole terminal.
+    from dibs import client
+
+    readings, slept = iter([True, True, False]), []
+    assert client.wait_for_memory(short=lambda: next(readings), sleep=slept.append) is True
+    assert len(slept) == 2 and "short of memory" in capsys.readouterr().err
+
+
+def test_a_restart_goes_ahead_after_a_minute_short_of_memory():
+    from dibs import client
+
+    t, slept = [0.0], []
+
+    def sleep(s):
+        slept.append(s)
+        t[0] += s
+
+    assert client.wait_for_memory(short=lambda: True, sleep=sleep, clock=lambda: t[0]) is False
+    assert 60.0 <= sum(slept) <= 62.0
+
+
+def test_an_upgrade_restart_waits_for_memory_first(tmp_path, monkeypatch):
+    from dibs import client
+
+    done = []
+    responses = iter([{"ok": False, "code": "build_mismatch"}, {"ok": False, "code": "build_mismatch"}, {"ok": True}])
+    monkeypatch.setattr(client.Client, "_send", lambda self, payload, io_timeout: next(responses))
+    monkeypatch.setattr(client, "_restart_brings_this_build", lambda paths, env: True)
+    monkeypatch.setattr(client, "wait_for_memory", lambda **kw: done.append("waited") or True)
+    monkeypatch.setattr(client, "stop_daemon", lambda paths, **kw: done.append("stopped") or True)
+    paths = get_paths({"DIBS_HOME": str(tmp_path / "home"), "HOME": str(tmp_path)})
+    client.Client(paths).call("queue")
+    assert done == ["waited", "stopped"]

@@ -233,6 +233,21 @@ def cpu_busy_seconds() -> float | None:
     return None
 
 
+SHORT_OF_RAM = 0.2  # share of the RAM: with less available, high pressure means the machine is short (#129)
+SHORT_PRESSURE = 40.0  # percent: memory pressure this high, with little RAM available, is a shortage (#114)
+
+
+def short_of_memory(meminfo=None, pressure=None) -> bool:
+    """Whether the machine is short of memory right now: little RAM available, and memory pressure high.
+    Pressure alone doesn't say so: it stays high a while after a shortage, as swapped-out pages come back
+    in with RAM available again (#131)."""
+    info = (meminfo or globals()["meminfo"])()
+    if info is None:
+        return False
+    total, used = info
+    return total - used < total * SHORT_OF_RAM and (pressure or memory_pressure)() >= SHORT_PRESSURE
+
+
 def memory_pressure() -> float:
     """The share of the last 10 s in which some task waited for memory, in percent (PSI, "some
     avg10"); 0 where the kernel doesn't report it."""
