@@ -87,6 +87,7 @@ IDLE_AFTER = GPU_IDLE_AFTER
 ADVISE_EVERY = 3600.0  # seconds: each kind of advice, at most this often per session and script (#169)
 SHORTAGE_LOG_EVERY = 60.0  # seconds: while short of memory, what the relief did, logged this often (#191)
 SLOW_PASS = 5.0  # seconds: a pass of the daemon's loop this long is logged (#191)
+HOLDERS_EVERY = 10.0  # seconds: what holds RAM outside dibs is read this often (#164)
 ADVISE_RUNS = 5  # runs of a script it takes to say how it uses what it asks for (#169)
 WAIT_RECHECK = 5.0  # a long-polling wait re-checks its jobs at least this often
 LOG_MAX = 5 * 1024 * 1024
@@ -215,6 +216,7 @@ class Daemon:
         self._pressured_since: float | None = None  # when memory pressure rose above EVICT_PRESSURE
         self._idle_at = -math.inf  # when idle GPU holds were last checked (#180)
         self._relief_note = ""  # what the memory relief did last, for the log (#191)
+        self._holders: tuple[float, list[dict], int | None] = (-math.inf, [], None)  # (when, holders, /tmp files)
         self._shortage_logged = -math.inf
         self._passes: deque[tuple[float, float]] = deque()  # (time, seconds the pass took), the last minute
         self._held: dict[int, int] = {}  # job id -> what it held (anon + shmem) at this tick's sample
@@ -573,6 +575,9 @@ class Daemon:
             "outside": {"cpus": self._outside_cpu, "mem": self._shown_outside_mem, "vram": dict(self._outside_vram)},
             "load": {"every": LOAD_EVERY, "cores": self._load_history()},
             "cpu_cap": procs.cpu_cap(),  # only read, for dibs top (#179)
+            # What holds the RAM in use outside dibs, and files in a RAM-backed /tmp (#164).
+            "outside_holders": self._ram_holders(now)[0],
+            "tmp_files": self._ram_holders(now)[1],
         }
 
     def info(self) -> dict:
@@ -740,8 +745,20 @@ class Daemon:
              else Queued(j.id, j.request, j.tag, j.submitted) for j in queued],
             now,
             outside_mem=outside_mem,
+            outside_top=(lambda h: (h[0]["name"], h[0]["ram"]) if h else None)(self._ram_holders(now)[0]),
         )
         return current, running, queued
+
+    def _ram_holders(self, now: float) -> tuple[list[dict], int | None]:
+        """What holds RAM outside dibs, per app or terminal pane, and what files in a RAM-backed /tmp take,
+        read every HOLDERS_EVERY seconds (#164)."""
+        if now - self._holders[0] >= HOLDERS_EVERY:
+            try:
+                holders = procs.outside_holders(minimum=max(GiB, self.capacity.mem // 30))
+            except OSError:
+                holders = []
+            self._holders = (now, holders, procs.tmp_files())
+        return self._holders[1], self._holders[2]
 
     def _history_vram(self, cwd: str, argv: list[str], request: Request) -> int | None:
         """The most GPU memory earlier runs of the same command here (or the same script) held, at most a

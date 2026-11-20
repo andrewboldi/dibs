@@ -163,7 +163,8 @@ def _plural(n: int, word: str) -> str:
 
 
 def plan(
-    capacity: Capacity, running: Sequence[Running], queued: Sequence[Queued], now: float, outside_mem: int = 0
+    capacity: Capacity, running: Sequence[Running], queued: Sequence[Queued], now: float, outside_mem: int = 0,
+    outside_top: tuple[str, int] | None = None,
 ) -> Plan:
     """outside_mem is RAM in use by programs outside dibs: it isn't handed out, and a job that can't fit
     beside it waits, without a predicted start, until those programs free some."""
@@ -228,7 +229,7 @@ def plan(
             )
             continue
         if q.job_id not in placed:  # waits for programs outside dibs to free RAM
-            reason, lacks, behind = _reason(q, order, placed, now, now_cpus, now_mem, now_vram, outside_mem, rests)
+            reason, lacks, behind = _reason(q, order, placed, now, now_cpus, now_mem, now_vram, outside_mem, rests, outside_top)
             predictions[q.job_id] = Prediction(q.job_id, position, None, None, (), reason, lacks, behind)
             continue
         start, end, gpu_ids = placed[q.job_id]
@@ -238,7 +239,7 @@ def plan(
         elif start > now and blocker is not None:
             reason = f"waits for #{blocker}, which has the machine to itself"
         elif start > now:
-            reason, lacks, behind = _reason(q, order, placed, now, now_cpus, now_mem, now_vram, outside_mem, rests)
+            reason, lacks, behind = _reason(q, order, placed, now, now_cpus, now_mem, now_vram, outside_mem, rests, outside_top)
         r = rests.get(q.job_id)
         after = (r.job_id, now - r.started - r.request.time, r.request.time) if r else None
         predictions[q.job_id] = Prediction(q.job_id, position, start, end, gpu_ids, reason, lacks, behind, after)
@@ -247,7 +248,7 @@ def plan(
 
 
 def _reason(
-    q, order, placed, now, free_cpus, free_mem, free_vram, outside_mem=0, rests=None
+    q, order, placed, now, free_cpus, free_mem, free_vram, outside_mem=0, rests=None, outside_top=None
 ) -> tuple[str, tuple[str, ...], int | None]:
     """Why a queued job isn't starting now, and the same in a word or two for dibs top: what it lacks,
     and the job ahead in line it would delay."""
@@ -258,6 +259,8 @@ def _reason(
         lacks.append("CPUs")
     if req.mem > free_mem:
         outside = f", {format_size(outside_mem)} in use outside dibs" if outside_mem else ""
+        if outside and outside_top:  # what holds most of it (#164)
+            outside += f", {format_size(outside_top[1])} of it by {outside_top[0]}"
         left = format_size_against(max(free_mem, 0), req.mem)
         short.append(f"{format_size(req.mem)} RAM ({left} free{outside})")
         lacks.append("RAM")
