@@ -550,6 +550,8 @@ def cmd_daemon(args, paths: Paths, _) -> int:
         print(f"dibs is running (pid {running['pid']}, build {running['build']}).")
         return 0
     if args.action in ("stop", "restart"):
+        if dc.ping(paths):
+            dc.wait_for_memory(what="stops" if args.action == "stop" else "restarts")
         if dc.stop_daemon(paths):
             print("dibs stopped. Jobs that were running keep running.")
         elif args.action == "stop":

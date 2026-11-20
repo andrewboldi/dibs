@@ -1691,3 +1691,36 @@ def test_a_running_jobs_view_carries_the_cpu_time_its_scope_has_used(daemon, tmp
     assert daemon.show(running)["job"]["cpu_seconds"] == 42.0
     go.touch()
     run_until(daemon, lambda: finished(daemon, running))
+
+
+def test_a_restart_in_a_shortage_doesnt_start_the_relief_wait_over(make_daemon, tmp_path):
+    # #190: two restarts in a shortage's first minute each started the 10-second wait over, and dibs
+    # stopped nothing; then systemd-oomd killed a whole terminal, an agent and its subagents with it.
+    now = [1_000_000.0]
+    short = dict(clock=lambda: now[0], pressure=lambda: 60.0, meminfo=lambda: (16 * GiB, 15 * GiB))
+    first = make_daemon(**short)
+    first._relieve_shortage(now[0])  # the shortage begins
+    first.close()
+    now[0] += 6
+    second = make_daemon(**short)
+    stopped = []
+    second._stop_ram_hog = lambda t: stopped.append(t) or True
+    second._relieve_shortage(now[0])
+    assert stopped == []  # 6 s in
+    now[0] += 5
+    second._relieve_shortage(now[0])
+    assert stopped == [now[0]]  # 11 s since it began, across the restart
+
+
+def test_a_shortage_long_over_isnt_resumed_after_a_restart(make_daemon, tmp_path):
+    now = [1_000_000.0]
+    short = dict(clock=lambda: now[0], pressure=lambda: 60.0, meminfo=lambda: (16 * GiB, 15 * GiB))
+    first = make_daemon(**short)
+    first._relieve_shortage(now[0])
+    first.close()
+    now[0] += 600  # dibs was down for 10 minutes
+    second = make_daemon(**short)
+    stopped = []
+    second._stop_ram_hog = lambda t: stopped.append(t) or True
+    second._relieve_shortage(now[0])
+    assert stopped == []

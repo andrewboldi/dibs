@@ -55,9 +55,10 @@ RETENTION_EVERY = 3600.0
 MAX_RETRIES = 2  # runs again after a resource failure, at most (#84)
 YOUNG = 600.0  # seconds: a job with no earlier runs counts at its whole RAM reservation this long (#86)
 PRESSURE_LIMIT = 10.0  # percent (PSI some avg10): above it, no job starts on borrowed RAM
-EVICT_PRESSURE = 40.0  # percent: memory pressure this high for EVICT_AFTER stops a borrower (#114)
+EVICT_PRESSURE = procs.SHORT_PRESSURE  # percent: memory pressure this high for EVICT_AFTER stops a borrower (#114)
 EVICT_AFTER = 10.0  # seconds
-SHORT_OF_RAM = 0.2  # share of the RAM: with less available, high pressure means the machine is short (#129)
+SHORT_OF_RAM = procs.SHORT_OF_RAM  # share of the RAM: with less available, high pressure means the machine is short (#129)
+SHORT_KEPT = 120.0  # seconds: when a shortage began is kept across a restart this long (#190)
 GROW_SHARE = 0.25  # a job grows past its RAM reservation in steps of a quarter of it, at least 1G (#155)
 GROW_RETRY = 60.0  # seconds before dibs tries again to raise a limit it couldn't
 HOG_SHARE = 0.1  # share of the RAM: a program outside dibs holding this much is stopped when the machine is short (#135)
@@ -198,6 +199,10 @@ class Daemon:
         self._display_failed: set[str] = set()  # display-only watchers that raised, logged once each
         ensure_dirs(paths)
         self.store = Store(paths.db)
+        # A restart in a shortage resumes its wait, rather than starting it over (#190).
+        began = self.store.get_meta("short_since")
+        if began is not None and 0 <= clock() - float(began) <= SHORT_KEPT:
+            self._pressured_since = float(began)
         self.closed = False
         self.outside: list[dict] = []  # GPU processes outside dibs that the guard left alone
         self._callbacks: list[Callable[[Job], None]] = []
@@ -974,14 +979,18 @@ class Daemon:
         started job on borrowed RAM (#114). The kernel's OOM killer acts only after minutes of thrashing,
         and then kills whatever is largest: a job, or the program an agent runs in its own terminal."""
         if self.pressure() < EVICT_PRESSURE or not self._short_of_ram():
+            if self._pressured_since is not None:
+                self.store.delete_meta(["short_since"])
             self._pressured_since = None
             return
         if self._pressured_since is None:
             self._pressured_since = now
+            self.store.set_meta("short_since", repr(now))  # kept across a restart (#190)
             return
         if now - self._pressured_since < EVICT_AFTER:
             return
         self._pressured_since = now
+        self.store.set_meta("short_since", repr(now))
         if not self._stop_ram_hog(now):
             self._give_back_borrowed(now)
 

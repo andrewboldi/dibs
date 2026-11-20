@@ -11,7 +11,7 @@ import time
 from collections.abc import Mapping
 from pathlib import Path
 
-from dibs import build_id, installed_build, launcher
+from dibs import build_id, installed_build, launcher, procs
 from dibs.paths import Paths, ensure_dirs
 
 START_TIMEOUT = 15.0
@@ -136,6 +136,28 @@ def start_daemon(paths: Paths, env: Mapping[str, str] = os.environ) -> None:
     )
 
 
+MEMORY_WAIT = 60.0  # seconds: the most a restart of dibs waits for a memory shortage to pass (#190)
+
+
+def wait_for_memory(short=None, sleep=time.sleep, clock=time.monotonic, limit: float = MEMORY_WAIT,
+                    what: str = "restarts") -> bool:  # fmt: skip
+    """Before stopping or restarting dibs: wait while the machine is short of memory, `limit` seconds at
+    most. A restart then puts off dibs's relief of the shortage, which stops the largest program outside
+    dibs before the system's own out-of-memory killer takes a whole terminal with an agent in it (#190).
+    Whether the shortage passed."""
+    short = short or procs.short_of_memory
+    deadline, told = clock() + limit, False
+    while short():
+        if clock() >= deadline:
+            return False
+        if not told:
+            print(f"dibs: the machine is short of memory, so dibs {what} once it isn't (a minute at most): "
+                  "its relief of the shortage would be put off", file=sys.stderr)  # fmt: skip
+            told = True
+        sleep(2.0)
+    return True
+
+
 def stop_daemon(paths: Paths, timeout: float = 10.0, env: Mapping[str, str] = os.environ) -> bool:
     """Ask the daemon to stop and wait until it has. Running jobs keep running. False if none ran."""
     if _service_installed(paths, env):
@@ -191,6 +213,7 @@ class Client:
             with _restart_lock(self.paths):
                 response = self._send(payload, io_timeout)
                 if response.get("code") == "build_mismatch":
+                    wait_for_memory()
                     stop_daemon(self.paths)
                     response = self._send(payload, io_timeout)
         if response.get("code") == "build_mismatch" and installed_build() != build_id():
