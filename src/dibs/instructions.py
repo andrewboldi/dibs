@@ -53,8 +53,9 @@ when those resources are free, so jobs never crash each other by running out of 
   While a running job uses less than it reserved, dibs may start other jobs in the difference; if
   the machine then runs short, a job started that way is the one stopped: with --retry dibs runs it
   again, otherwise it fails with a note to resubmit it. A job that nears its --mem may grow past it
-  into RAM no other job reserved, when there is some, but only --mem is promised: size it for the
-  job's real peak.
+  into RAM no other job reserved, or failing that into RAM other jobs reserved but aren't using; if
+  the machine then runs short, a job grown that way is the first one stopped. Only --mem is
+  promised: size it for the job's real peak.
 - `--vram SIZE`: GPU memory on each GPU it uses. Leave it out for a CPU-only job, which then
   can't see any GPU. A job may use more VRAM than it reserved while nobody else needs that memory,
   but it is stopped as soon as it reaches memory another job reserved. A job keeps the GPU memory
