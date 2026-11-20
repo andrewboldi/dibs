@@ -253,6 +253,7 @@ _SCRIPT_SUFFIXES = (".py", ".sh", ".js", ".ts", ".rb", ".pl")
 
 
 _SHELLS = ("sh", "bash", "zsh", "dash")
+_TEST_RUNNERS = ("pytest", "unittest")  # modules whose arguments pick what runs: their test files are the script (#209)
 
 
 def script_of(argv: Sequence[str]) -> str | None:
@@ -269,7 +270,11 @@ def script_of(argv: Sequence[str]) -> str | None:
             break
     for i, word in enumerate(words):
         if word == "-m" and i + 1 < len(words):
-            return f"-m {words[i + 1]}"
+            module = words[i + 1]
+            if module in _TEST_RUNNERS:  # it runs the tests its arguments name, as `pytest file.py` does (#209)
+                named = (w.split("::")[0] for w in words[i + 2 :])
+                return next((w for w in named if w.endswith(_SCRIPT_SUFFIXES)), f"-m {module}")
+            return f"-m {module}"
         if word.endswith(_SCRIPT_SUFFIXES):
             return word
     return None
