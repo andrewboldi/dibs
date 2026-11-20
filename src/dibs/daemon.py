@@ -120,6 +120,23 @@ def _holding(job: Job, mem: int | None = None, vram: int | None = None) -> Reque
     return request
 
 
+def _plain(job: Job) -> float:
+    """A job's priority-5 place in line (#91)."""
+    return job.plain_tag if job.plain_tag is not None else job.tag
+
+
+def _keeps_place(old: Job, session: str, argv: list[str], cwd: str, new: Request, priority: int) -> bool:
+    """Whether a replacement keeps the place in line of the job it replaces (#184): that job was waiting,
+    in the same session, and the replacement runs the same command in the same folder and asks for no
+    more of anything. Keeping it for more would let a 1-minute placeholder hold a place for a 10-hour job."""
+    was = old.request
+    return (
+        old.state == State.QUEUED and old.session == session and list(old.argv) == argv and old.cwd == cwd
+        and new.cpus <= was.cpus and new.mem <= was.mem and new.gpus <= was.gpus and new.vram <= was.vram
+        and new.time <= was.time and (was.exclusive or not new.exclusive) and priority <= old.priority
+    )  # fmt: skip
+
+
 def _shared_part(job: Job) -> str:
     """For a job killed at its RAM limit: how much of its peak was shared memory, when that was at
     least a quarter of its reservation, and of which kind, since what helps differs. Files a job writes
@@ -270,11 +287,12 @@ class Daemon:
                 return _rejected(f"no job {req['replace']} to replace")
 
         now = self.clock()
+        session = req.get("session") or "unknown"
+        keeps = replaced is not None and _keeps_place(replaced, session, list(argv), cwd, request, priority)
         if replaced is not None:
             # In the same step as the new job, so nothing can start in the gap (#93), and before the
             # backlog is read, so the replacement doesn't line up behind the job it replaces.
-            self._cancel_job(replaced, now)
-        session = req.get("session") or "unknown"
+            self._cancel_job(replaced, now, in_place=keeps)
         # The session's queued jobs' priority-5 places: lining up behind boosted tags would pass each
         # boost down the line, and the time a job saved would never be paid back. Only those of at
         # least its priority: it goes ahead of the session's own lower-priority jobs (#91).
@@ -285,6 +303,12 @@ class Daemon:
         momentum = self._momentum(now)
         counted = request.time * (MOMENTUM_SHARE if momentum and momentum["session"] == session else 1.0)
         carried, left = self._owed(session, now), next_owed(counted, priority)
+        tag, plain_tag = compute_tag(now, counted, backlog, priority, carried), compute_tag(now, counted, backlog)
+        if keeps:
+            # The earlier of its old place and a fresh one (#184), and its debts as they were: the job it
+            # replaces paid for its place, and passed the session's lower-priority jobs, when it was queued.
+            tag, plain_tag = min(tag, replaced.tag), min(plain_tag, _plain(replaced))
+            carried, left, passed = replaced.owed_carried, replaced.owed_left, []
         job = Job(
             id=0,
             name=req.get("name") or default_name(argv),
@@ -295,9 +319,9 @@ class Daemon:
             session=session,
             session_label=req.get("session_label") or session[:4],
             submitted=now,
-            tag=compute_tag(now, counted, backlog, priority, carried),
+            tag=tag,
             priority=priority,
-            plain_tag=compute_tag(now, counted, backlog),
+            plain_tag=plain_tag,
             own_time=counted,
             retry=req.get("retry") is True,  # the agent's choice: only it knows the job is safe to repeat (#116)
             owed_carried=carried,
@@ -308,7 +332,8 @@ class Daemon:
             output=output or "",
         )
         self.store.add_job(job)
-        self.store.set_meta(f"owed:{session}", json.dumps({"owed": left, "time": now}))
+        if not keeps:
+            self.store.set_meta(f"owed:{session}", json.dumps({"owed": left, "time": now}))
         for j in passed:  # zero-sum within the session: the jobs it went ahead of move back by its estimate
             j.tag += counted
             if j.plain_tag is not None:
@@ -325,6 +350,7 @@ class Daemon:
         response = self.show(job.id)
         if replaced is not None:
             response["replaced"] = replaced.id
+            response["kept_place"] = keeps
         # What the same command used before, so the agent can size its next request from it.
         earlier = [j for j in self.store.earlier_runs(job.cwd, job.argv, limit=6) if j.started is not None]
         match = "command"
@@ -470,16 +496,19 @@ class Daemon:
                 j.tag, j.plain_tag = tag, plain
                 self.store.update_job(j)
 
-    def _cancel_job(self, job: Job, now: float) -> bool:
+    def _cancel_job(self, job: Job, now: float, in_place: bool = False) -> bool:
         """Cancel one job without scheduling: a queued one ends now, a running one is asked to stop.
+        in_place: a replacement takes its place in line and its debts (#184), so nothing else moves.
         False if it had already ended."""
         if job.state == State.QUEUED:
             job.state, job.ended, job.reason = State.CANCELLED, now, "cancelled"
             self.store.update_job(job)
-            # It never ran: it hands back what it carried and takes back what it left (#90).
-            self._add_owed(job.session, job.owed_carried - job.owed_left, now)
+            if not in_place:
+                # It never ran: it hands back what it carried and takes back what it left (#90).
+                self._add_owed(job.session, job.owed_carried - job.owed_left, now)
             self._notify(job)
-            self._reline(job.session)
+            if not in_place:
+                self._reline(job.session)
             return True
         if job.state == State.RUNNING:
             if job.cancel_requested is None:

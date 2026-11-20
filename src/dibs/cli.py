@@ -106,7 +106,8 @@ def build_parser() -> argparse.ArgumentParser:
         s.add_argument("--no-retry", action="store_true", help=argparse.SUPPRESS)  # the default since #116
         s.add_argument(
             "--replace", type=int, metavar="ID",
-            help="cancel job ID and queue this one in its place, in one step, so no other job starts in between",
+            help="cancel job ID and queue this one instead, in one step, so no other job starts in between; "
+            "a waiting job's replacement that runs the same command and asks for no more keeps its place in line",
         )  # fmt: skip
         s.add_argument("-o", "--output", help="write the job's output to this file instead of dibs's log")
         if name == "submit":
@@ -229,7 +230,8 @@ def cmd_submit(args, paths: Paths, command: list[str]) -> int:
     else:
         print(render.render_submit(response["job"], response["now"]))
         if response.get("replaced") is not None:
-            print(f"It replaces job {response['replaced']}, which is cancelled.")
+            kept = ", and keeps its place in line" if response.get("kept_place") else ""
+            print(f"It replaces job {response['replaced']}, which is cancelled{kept}.")
         if earlier:
             print(render.render_earlier(earlier, match))
         if line := render.render_estimates(response.get("estimates")):
@@ -245,7 +247,8 @@ def cmd_run(args, paths: Paths, command: list[str]) -> int:
     job = response["job"]
     print(render.render_submit(job, response["now"]), file=sys.stderr)
     if response.get("replaced") is not None:
-        print(f"It replaces job {response['replaced']}, which is cancelled.", file=sys.stderr)
+        kept = ", and keeps its place in line" if response.get("kept_place") else ""
+        print(f"It replaces job {response['replaced']}, which is cancelled{kept}.", file=sys.stderr)
     if response.get("earlier"):
         print(render.render_earlier(response["earlier"], response.get("earlier_match", "command")), file=sys.stderr)
     if line := render.render_estimates(response.get("estimates")):

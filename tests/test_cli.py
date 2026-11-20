@@ -252,7 +252,8 @@ def test_submit_replace(dibs):
     first = js(dibs("submit", *RES, "--vram", "all", "--json", "--", "sleep", "30", check=0))["id"]
     waiting = js(dibs("submit", *RES, "--vram", "all", "--json", "--", "sleep", "1", check=0))["id"]
     out = dibs("submit", *RES, "--vram", "all", "--replace", str(waiting), "--", "sleep", "1", check=0).stdout
-    assert f"It replaces job {waiting}, which is cancelled." in out
+    # The same command, asking for no more: it keeps the place in line too (#184).
+    assert f"It replaces job {waiting}, which is cancelled, and keeps its place in line." in out
     assert js(dibs("show", str(waiting), "--json"))["state"] == "cancelled"
     assert dibs("submit", *RES, "--replace", "99999", "--", "sleep", "1").returncode != 0
     dibs("cancel", str(first), check=0)
