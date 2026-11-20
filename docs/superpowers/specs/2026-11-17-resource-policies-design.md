@@ -21,6 +21,13 @@ submission (now plus its estimate), after the replaced job has left the session'
 replacement gains nothing a cancel and a resubmit wouldn't. ID may be queued or running; an
 unknown ID is refused.
 
+Changed by #184: when the replaced job was waiting, in the same session, and the replacement runs
+the same command in the same folder and asks for no more of anything (CPUs, RAM, VRAM, GPUs, time,
+exclusivity, priority), the replacement gets the earlier of its old place and a fresh one, and the
+old job's priority debts; nothing else in the session's line moves. Shrinking a waiting job's
+request used to cost its place, and an agent kept two oversized requests for that reason. Asking
+for more still gets a fresh place, so a 1-minute placeholder can't hold a place for a 10-hour job.
+
 ## 3. Leave desktop programs alone
 
 The guard stops every GPU process of the user that isn't a job. It was meant for agents, and it
