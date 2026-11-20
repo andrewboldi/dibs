@@ -316,8 +316,8 @@ def test_mine_filters_session(dibs):
 
 def test_submit_shows_earlier_runs(dibs):
     dibs("run", *RES, "--", "true", check=0)
-    out = dibs("submit", *RES, "--", "true", check=0).stdout
-    assert "Earlier runs of this command here:" in out and "#1 done" in out
+    err = dibs("submit", *RES, "--", "true", check=0).stderr  # after the job's lines, on stderr (#169)
+    assert "Earlier runs of this command here:" in err and "#1 done" in err
 
 
 def test_version_flag_prints_the_version(dibs):

@@ -232,11 +232,13 @@ def cmd_submit(args, paths: Paths, command: list[str]) -> int:
         if response.get("replaced") is not None:
             kept = ", and keeps its place in line" if response.get("kept_place") else ""
             print(f"It replaces job {response['replaced']}, which is cancelled{kept}.")
-        if earlier:
-            print(render.render_earlier(earlier, match))
-        if line := render.render_estimates(response.get("estimates")):
-            print(line)
     sys.stdout.flush()  # the job's lines first, in a merged stream too (#169)
+    if not args.json:
+        # The advice goes to stderr, which agents' filters of submit's output keep more often (#169).
+        if earlier:
+            print(render.render_earlier(earlier, match), file=sys.stderr)
+        if response["job"]["state"] == "queued" and (line := render.render_estimates(response.get("estimates"))):
+            print(line, file=sys.stderr)  # only for a job that waits: its promise is of starting sooner
     _tell(paths, failures=not args.json)
     return 0
 
@@ -251,8 +253,8 @@ def cmd_run(args, paths: Paths, command: list[str]) -> int:
         print(f"It replaces job {response['replaced']}, which is cancelled{kept}.", file=sys.stderr)
     if response.get("earlier"):
         print(render.render_earlier(response["earlier"], response.get("earlier_match", "command")), file=sys.stderr)
-    if line := render.render_estimates(response.get("estimates")):
-        print(line, file=sys.stderr)
+    if job["state"] == "queued" and (line := render.render_estimates(response.get("estimates"))):
+        print(line, file=sys.stderr)  # only for a job that waits (#169)
     _tell(paths)
     try:
         finished = _follow(client, job["id"], job["output"], 0, sys.stdout.buffer)
