@@ -150,6 +150,26 @@ def test_expected_end_overrun():
     assert expected_end(running(1, req(time=600), (0,), started=NOW - 100), NOW) == NOW + 500
 
 
+def test_expected_end_far_past_its_estimate_is_as_long_again_as_it_has_overrun():
+    # #185: once a job has run 3 times its estimate, "a little longer" has been wrong pass after pass.
+    assert expected_end(running(1, req(time=600), (0,), started=NOW - 1799), NOW) == NOW + 60
+    assert expected_end(running(1, req(time=600), (0,), started=NOW - 1800), NOW) == NOW + 1200
+    # A 50-minute job 4h20m in: 3h30m past its estimate, so 3h30m more.
+    assert expected_end(running(1, req(time=3000), (0,), started=NOW - 15600), NOW) == NOW + 12600
+
+
+def test_short_job_starts_beside_a_job_far_past_its_estimate():
+    # #185, as seen: a GPU job 3h30m past its 50-minute estimate holds most of the GPU. A GPU job waits
+    # for it, and a 15-minute CPU job that fits now would take RAM the GPU job needs when it starts.
+    # Assumed to end in 5 minutes, the overrunning job held the CPU job back ("would delay #2").
+    long = running(1, req(cpus=8, mem=10 * GiB, gpus=1, vram=7 * GiB, time=3000), range(8), (0,), started=NOW - 15600)
+    gpu_job = queued(2, req(cpus=2, mem=20 * GiB, gpus=1, vram=7 * GiB, time=3600), submitted=NOW - 7200, tag=NOW - 3600)
+    cpu_job = queued(3, req(cpus=1, mem=14 * GiB, time=900), submitted=NOW - 300)
+    p = plan(cap(cpus=24, mem=32 * GiB), [long], [gpu_job, cpu_job], NOW)
+    assert [s.job_id for s in p.starts] == [3]
+    assert p.predictions[2].start == NOW + 12600
+
+
 @pytest.mark.parametrize(
     "held,wanted,reason",
     [

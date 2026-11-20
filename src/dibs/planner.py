@@ -19,6 +19,7 @@ from dibs.units import format_size, format_size_against
 
 OVERRUN_MIN = 60.0
 OVERRUN_FRACTION = 0.10
+OVERRUN_LONG = 3.0  # past this many times its estimate, a job's overrun so far is the better guess (#185)
 
 
 @dataclass(frozen=True)
@@ -65,11 +66,16 @@ class Plan:
 
 
 def expected_end(job: Running, now: float) -> float:
-    """When a running job should end. Past its estimate, it's assumed to need a little longer."""
+    """When a running job should end. Past its estimate, it's assumed to need a little longer; once it
+    has run three times its estimate, as long again as it has run past it (#185): "a little longer"
+    is wrong pass after pass then, and holds back every job that would still be running at that end."""
     end = job.started + job.request.time
     if end > now:
         return end
-    return now + max(OVERRUN_MIN, OVERRUN_FRACTION * job.request.time)
+    longer = max(OVERRUN_MIN, OVERRUN_FRACTION * job.request.time)
+    if now - job.started >= OVERRUN_LONG * job.request.time:
+        longer = max(longer, now - end)
+    return now + longer
 
 
 class _Profile:
