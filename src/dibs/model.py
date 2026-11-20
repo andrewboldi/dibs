@@ -95,6 +95,7 @@ class Job:
     owed_left: float = 0.0  # what it left its session's next job: payback for a boost, credit for less
     owed_settled: bool = False  # whether the two were settled against its real wait, when it started
     history_mem: int | None = None  # the peak RAM of earlier runs of the same command, at submit (#86)
+    history_vram: int | None = None  # the most GPU memory earlier runs of the same command held, at submit (#183)
     borrowed_ram: bool = False  # this run started on RAM other jobs reserved but weren't using
     no_borrow: bool = False  # must start within RAM nobody reserved (after the machine ran out once)
     evicted: bool = False  # stopped by dibs to give borrowed RAM back under memory pressure (#114)
