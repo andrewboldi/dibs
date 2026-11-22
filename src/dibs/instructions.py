@@ -102,10 +102,15 @@ when those resources are free, so jobs never crash each other by running out of 
   RAM you can reserve, set TMPDIR to a folder on a disk with room for it.
 - CPUs: the threads or worker processes it actually uses.
 - `dibs show ID` lists a job's peak VRAM and RAM, and `dibs submit` shows what earlier runs of the
-  same command in the same folder used. Size the next run from those: the peaks plus a little
-  headroom (going over VRAM stops the job), and the CPUs it kept busy. When those runs never used
-  the GPU they reserved, it says so: leave --vram out, so the GPU's memory stays free for jobs that
-  use it.
+  same command in the same folder used. Size the next run from those: the RAM peak plus about a
+  quarter, the VRAM peak plus a little headroom (going over VRAM stops the job), and the CPUs it
+  kept busy. When those runs never used the GPU they reserved, it says so: leave --vram out, so the
+  GPU's memory stays free for jobs that use it. For a batch whose script hasn't run yet, run one
+  job first and size the rest from its peak.
+- Don't pad a request. RAM a job reserves but doesn't use holds back every job behind it, your own
+  included. A job that nears its --mem is given more when the machine has RAM to spare, so a tight
+  request costs little. To shrink a job that is still waiting without losing its place, submit the
+  same command with a smaller --mem and `--replace ID`.
 - Add `--retry` when the job is safe to run again from the start, over whatever a stopped try left:
   it resumes from a checkpoint, or repeating it does no harm (not one that appends results, uploads
   or sends something, or one that refuses to start when its output already exists). Then, if it
