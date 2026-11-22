@@ -933,6 +933,26 @@ def test_each_program_in_a_terminal_gets_a_notice_and_a_rerun_of_one_within_the_
     assert [n["message"].split("`")[1] for n in told()] == [shlex.join([PY, str(second)])]
 
 
+def test_a_program_that_runs_after_the_heavy_one_ended_is_not_named(watched_pane, spawned, tmp_path):
+    # Once a heavy program ended, the terminal's two-minute average stayed high, and each check named
+    # whatever ran next with it: a shell waiting on a dibs job, a login shell, a branch checkout, each
+    # said to have kept 4-9 cores busy (4 of the first 8 notices, #213).
+    d, rates, place, busy_for, told = watched_pane
+    heavy, quick = _script(tmp_path, "heavy.py", helpers=0), _script(tmp_path, "quick.py", helpers=0)
+    agent = _agent(tmp_path, spawned, [[PY, str(heavy)], [PY, str(quick)]])
+    [h], [q] = wait_for(lambda: _running(agent.pid, heavy)), wait_for(lambda: _running(agent.pid, quick))
+    place(agent.pid, procs.parent(h), procs.parent(q), h, q)
+    cores = len(d.capacity.cpus) // 2
+    rates[h] = cores
+    busy_for(150, cores)
+    assert [n["message"].split("`")[1] for n in told()] == [shlex.join([PY, str(heavy)])]
+    place(agent.pid, procs.parent(q), q)  # the heavy one has ended; the other runs on a core
+    rates.clear()
+    rates[q] = 1.0
+    busy_for(150, 1)
+    assert told() == [] and len([e for e in d.store.events(0) if e["kind"] == "heavy"]) == 1
+
+
 def test_a_tool_server_the_agent_cli_started_itself_gets_no_notice(watched_pane, spawned, tmp_path):
     # An agent CLI starts its tool servers itself, with no shell in between: it never ran them as
     # commands, and can't queue them.
