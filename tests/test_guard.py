@@ -954,6 +954,24 @@ def test_a_program_that_runs_after_the_heavy_one_ended_is_not_named(watched_pane
     assert told() == [] and len([e for e in d.store.events(0) if e["kind"] == "heavy"]) == 1
 
 
+def test_the_notice_gives_the_cores_the_program_itself_keeps_busy(watched_pane, spawned, tmp_path):
+    # A program kept about 10 cores busy from its start. Told under a minute in, its notice gave the
+    # terminal's two-minute average, which counts the time before it started: about 5 cores, and
+    # `--cpus 5`, half of what it used, "for 2 minutes" (#217).
+    d, rates, place, busy_for, told = watched_pane
+    script = _script(tmp_path, "sweep.py", helpers=0)
+    agent = _agent(tmp_path, spawned, [[PY, str(script)]])
+    [s] = wait_for(lambda: _running(agent.pid, script))
+    place(agent.pid, procs.parent(s), s)
+    cores = len(d.capacity.cpus)
+    busy_for(60, 0)
+    rates[s] = cores  # it starts, on every core
+    busy_for(75, cores)
+    [notice] = told()
+    assert f"has kept about {cores} cores busy for a minute outside dibs" in notice["message"]
+    assert f"dibs run --cpus {cores} --mem SIZE" in notice["message"]
+
+
 def test_terminals_seen_for_the_first_time_are_watched_without_an_error(make_daemon, caplog):
     # A terminal's first sample has none before it. The check that the last interval was busy (#213)
     # read one anyway: the watch failed at each new terminal and skipped the others that pass.

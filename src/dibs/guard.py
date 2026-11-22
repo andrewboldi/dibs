@@ -8,6 +8,7 @@ started the process, including ones dibs has never heard of.
 import os
 import re
 import shlex
+import time
 from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
 
@@ -275,9 +276,10 @@ def stop_for_ram(pid: int, held: int, available: int, total: int) -> dict | None
 def heavy_message(pid: int, argv: Sequence[str], cores: int, seconds: float) -> str:
     """What an agent is told when a program in its terminal kept many cores busy outside dibs (#158)."""
     command = shlex.join(argv) if argv else "this process"
+    minutes = max(1, round(seconds / 60))
     return (
-        f"dibs: `{command}` (pid {pid}) has kept about {cores} cores busy for {max(1, round(seconds / 60))} minutes "
-        "outside dibs, in your terminal.\n"
+        f"dibs: `{command}` (pid {pid}) has kept about {cores} cores busy for "
+        f"{'a minute' if minutes == 1 else f'{minutes} minutes'} outside dibs, in your terminal.\n"
         "dibs: CPU-heavy work goes through dibs, which gives it cores of its own: outside dibs it competes with "
         "jobs for theirs, and jobs come first. Next time, queue it:\n"
         f"dibs:   dibs run --cpus {cores} --mem SIZE --time ESTIMATE -- {command}\n"
@@ -329,6 +331,11 @@ def heavy_notice(cgroup_path: str, cores: float, seconds: float) -> dict | None:
     # The agent's session, from a process of the pane that carries it (its tool commands do).
     session = next((s for p in [pid, *pids] if (s := (procs.environ(p) or {}).get("DIBS_SESSION")
                     or (procs.environ(p) or {}).get("CLAUDE_CODE_SESSION_ID"))), None) or _session_of(pid, {})  # fmt: skip
+    # The program's own cores and time: the terminal's two-minute average also counts the time before it
+    # started, and gave a program told under a minute in half the cores it used (#217).
+    cores = max(cores, programs[pid])
+    started = procs.start_time(pid)
+    seconds = seconds if started is None else max(0.0, min(seconds, time.time() - started))
     message = heavy_message(pid, argv, max(1, round(cores)), seconds)
     return {"pid": pid, "command": argv, "cores": cores, "session": session, "message": message}
 
