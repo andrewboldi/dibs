@@ -1371,6 +1371,8 @@ def test_the_load_row_never_gets_in_the_way_of_scheduling(make_daemon, tmp_path)
     job_id = submit(d, tmp_path, [PY, "-c", "pass"])
     run_until(d, lambda: job(d, job_id).state == State.DONE)
     assert d.snapshot()["load"]["cores"] == []
+    assert d._display_failed  # it failed, and was only logged
+    d._display_failed.clear()  # meant here: the fixture fails a test that leaves one
 
 
 LONG = [PY, "-c", "import time; time.sleep(600)"]

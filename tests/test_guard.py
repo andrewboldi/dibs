@@ -1,3 +1,4 @@
+import logging
 import os
 import shlex
 import subprocess
@@ -951,6 +952,19 @@ def test_a_program_that_runs_after_the_heavy_one_ended_is_not_named(watched_pane
     rates[q] = 1.0
     busy_for(150, 1)
     assert told() == [] and len([e for e in d.store.events(0) if e["kind"] == "heavy"]) == 1
+
+
+def test_terminals_seen_for_the_first_time_are_watched_without_an_error(make_daemon, caplog):
+    # A terminal's first sample has none before it. The check that the last interval was busy (#213)
+    # read one anyway: the watch failed at each new terminal and skipped the others that pass.
+    state = {"now": time.time()}
+    panes = {"/app.slice/tmux-spawn-a.scope": 0, "/app.slice/tmux-spawn-b.scope": 0}
+    d = make_daemon(clock=lambda: state["now"], panes=lambda: dict(panes))
+    caplog.set_level(logging.INFO, logger="dibs")
+    for _ in range(3):
+        state["now"] += 15
+        d.tick()
+    assert [r.getMessage() for r in caplog.records if "failed" in r.getMessage()] == []
 
 
 def test_a_tool_server_the_agent_cli_started_itself_gets_no_notice(watched_pane, spawned, tmp_path):

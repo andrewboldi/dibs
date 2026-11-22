@@ -1186,9 +1186,10 @@ class Daemon:
             samples.append((now, usec))
             while samples[0][0] < now - HEAVY_FOR - PANE_EVERY:
                 samples.popleft()
-            (t0, u0), (tp, up), (t1, u1) = samples[0], samples[-2], samples[-1]
+            (t0, u0), (t1, u1) = samples[0], samples[-1]
             if t1 - t0 < HEAVY_FOR:
                 continue
+            tp, up = samples[-2]  # there's one: the samples span HEAVY_FOR
             cores = (u1 - u0) / 1e6 / (t1 - t0)
             # Busy over the last interval too: once a heavy program ends, the two-minute average stays
             # high for a while, and the busiest program left would be named with it (#213).

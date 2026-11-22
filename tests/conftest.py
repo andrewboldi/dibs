@@ -116,6 +116,9 @@ def make_daemon(tmp_path):
             stop_everything(d)
             d.close()
         launcher.sweep_job_tmps(d.paths, keep=())
+    # A display watcher's error is only logged, once, so a test can't see it: #213's fix raised one at
+    # each new terminal, and every test passed. No test may leave one.
+    assert [sorted(d._display_failed) for d in made if d._display_failed] == []
 
 
 @pytest.fixture
