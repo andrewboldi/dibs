@@ -142,11 +142,13 @@ CGROUP_ROOT = "/sys/fs/cgroup"  # where cgroup v2 is mounted
 
 
 def cpu_rate(pid: int) -> float | None:
-    """The cores a process has kept busy on average since it started (CPU seconds per second)."""
+    """The cores a process has kept busy on average since it started (CPU seconds per second), over at
+    least a second: CPU time counts in clock ticks, and one tick read milliseconds after a process
+    started came to several cores (#219)."""
     fields, started = _stat_fields(pid), start_time(pid)
     if not fields or started is None:
         return None
-    return (int(fields[11]) + int(fields[12])) / _CLK_TCK / max(1e-3, time.time() - started)
+    return (int(fields[11]) + int(fields[12])) / _CLK_TCK / max(1.0, time.time() - started)
 
 
 def cgroup_procs(cgroup_path: str) -> list[int]:

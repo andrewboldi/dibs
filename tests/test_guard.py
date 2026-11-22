@@ -792,6 +792,7 @@ def test_an_agent_is_told_when_a_program_in_its_terminal_keeps_many_cores_busy(m
     (scope / "cgroup.procs").write_text(f"{busy.pid}\n")
     monkeypatch.setattr(procs, "CGROUP_ROOT", str(tmp_path / "cgroup"))
     cores = len(d.capacity.cpus)
+    monkeypatch.setattr(procs, "cpu_rate", lambda pid: cores / 2 if pid == busy.pid else 0.0)  # the program's own use
 
     def busy_for(seconds):
         for _ in range(seconds // 15):  # half the machine's cores busy
@@ -969,6 +970,36 @@ def test_the_notice_gives_the_cores_the_program_itself_keeps_busy(watched_pane, 
     busy_for(75, cores)
     [notice] = told()
     assert f"has kept about {cores} cores busy for a minute outside dibs" in notice["message"]
+    assert f"dibs run --cpus {cores} --mem SIZE" in notice["message"]
+
+
+def test_a_terminal_busy_with_many_small_programs_names_none(watched_pane, spawned, tmp_path):
+    # A terminal shared by many subagents averaged just over the threshold from many short-lived
+    # processes, none using even half a core. The notice named one of them, a dibs status command, as
+    # having kept about 4 cores busy for 2 minutes (#219).
+    d, rates, place, busy_for, told = watched_pane
+    scripts = [_script(tmp_path, f"poll{i}.py", helpers=0) for i in range(3)]
+    agent = _agent(tmp_path, spawned, [[PY, str(s)] for s in scripts])
+    pids = [wait_for(lambda s=s: _running(agent.pid, s))[0] for s in scripts]
+    place(agent.pid, *{procs.parent(p) for p in pids}, *pids)
+    rates.update({p: 1.0 for p in pids})
+    busy_for(150, len(d.capacity.cpus) // 2)
+    assert told() == [] and [e for e in d.store.events(0) if e["kind"] == "heavy"] == []
+
+
+def test_the_cores_given_are_never_more_than_the_terminal_used(watched_pane, spawned, tmp_path):
+    # A process read within milliseconds of its start can show many cores from one tick of CPU time:
+    # the notice's figure, and its --cpus, can't be more than the whole terminal used (#219).
+    d, rates, place, busy_for, told = watched_pane
+    script = _script(tmp_path, "sweep.py", helpers=0)
+    agent = _agent(tmp_path, spawned, [[PY, str(script)]])
+    [s] = wait_for(lambda: _running(agent.pid, script))
+    place(agent.pid, procs.parent(s), s)
+    cores = len(d.capacity.cpus) // 2
+    rates[s] = 10 * len(d.capacity.cpus)
+    busy_for(150, cores)
+    [notice] = told()
+    assert f"has kept about {cores} cores busy" in notice["message"]
     assert f"dibs run --cpus {cores} --mem SIZE" in notice["message"]
 
 

@@ -258,6 +258,13 @@ def test_cpu_busy_seconds_reads_proc_stat(monkeypatch):
 
 
 
+def test_a_process_just_started_shows_no_more_cores_than_its_cpu_time_allows(monkeypatch):
+    # CPU time counts in clock ticks: one tick read 2 ms after a process started came to 5 cores (#219).
+    monkeypatch.setattr(procs, "_stat_fields", lambda pid: ["S", *["0"] * 10, "1", "0", *["0"] * 30])
+    monkeypatch.setattr(procs, "start_time", lambda pid: time.time() - 0.002)
+    assert procs.cpu_rate(4321) <= 0.02
+
+
 def test_pane_cpu_reads_each_terminal_panes_cpu_time(tmp_path, monkeypatch):
     # Issue #158: dibs tells an agent when its terminal keeps many cores busy, from the pane's cgroup.
     uid = os.getuid()

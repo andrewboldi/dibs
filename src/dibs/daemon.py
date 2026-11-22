@@ -1193,9 +1193,10 @@ class Daemon:
             cores = (u1 - u0) / 1e6 / (t1 - t0)
             # Busy over the last interval too: once a heavy program ends, the two-minute average stays
             # high for a while, and the busiest program left would be named with it (#213).
-            if cores < heavy or (u1 - up) / 1e6 / (t1 - tp) < heavy:
+            recent = (u1 - up) / 1e6 / (t1 - tp)
+            if cores < heavy or recent < heavy:
                 continue
-            event = guard.heavy_notice(path, cores, t1 - t0)
+            event = guard.heavy_notice(path, cores, t1 - t0, least=heavy, recent=recent)
             if event is None:
                 continue
             # The same program is the same script, whatever its arguments: a sweep gets one notice an hour.

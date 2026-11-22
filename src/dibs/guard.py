@@ -5,6 +5,7 @@ It watches the GPUs and the machine's memory, not the agents, so it works whiche
 started the process, including ones dibs has never heard of.
 """
 
+import math
 import os
 import re
 import shlex
@@ -313,10 +314,13 @@ def _program_of(pid: int, pane: Collection[int]) -> int | None:
     return path[-2] if len(path) > 1 and _is_shell(path[-1]) else path[-1]
 
 
-def heavy_notice(cgroup_path: str, cores: float, seconds: float) -> dict | None:
-    """What to tell the agent whose terminal (a pane's cgroup) kept `cores` busy outside dibs: about the
-    program it ran whose processes together keep the most cores busy. Nothing is stopped, and nothing is
-    written into the program's output, which may be data. None when there's no such program."""
+def heavy_notice(
+    cgroup_path: str, cores: float, seconds: float, *, least: float = 0.0, recent: float = math.inf
+) -> dict | None:
+    """What to tell the agent whose terminal (a pane's cgroup) kept `cores` busy outside dibs (`recent`
+    over its last interval): about the program it ran whose processes together keep the most cores
+    busy, if that's at least `least`. Nothing is stopped, and nothing is written into the program's
+    output, which may be data. None when there's no such program."""
     pids = procs.cgroup_procs(cgroup_path)
     pane, programs = set(pids), {}
     for pid in pids:
@@ -327,13 +331,16 @@ def heavy_notice(cgroup_path: str, cores: float, seconds: float) -> dict | None:
     if not programs:
         return None
     pid = max(programs, key=programs.__getitem__)
+    if programs[pid] < least:  # many small programs, none heavy itself: none to name (#219)
+        return None
     argv = procs.cmdline(pid) or [name for name in [procs.exe_name(pid)] if name]
     # The agent's session, from a process of the pane that carries it (its tool commands do).
     session = next((s for p in [pid, *pids] if (s := (procs.environ(p) or {}).get("DIBS_SESSION")
                     or (procs.environ(p) or {}).get("CLAUDE_CODE_SESSION_ID"))), None) or _session_of(pid, {})  # fmt: skip
     # The program's own cores and time: the terminal's two-minute average also counts the time before it
-    # started, and gave a program told under a minute in half the cores it used (#217).
-    cores = max(cores, programs[pid])
+    # started, and gave a program told under a minute in half the cores it used (#217). Never more than
+    # the whole terminal kept busy (#219).
+    cores = min(max(cores, programs[pid]), max(cores, recent))
     started = procs.start_time(pid)
     seconds = seconds if started is None else max(0.0, min(seconds, time.time() - started))
     message = heavy_message(pid, argv, max(1, round(cores)), seconds)
