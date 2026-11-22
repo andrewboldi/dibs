@@ -140,6 +140,44 @@ def test_stop_with_message_ignores_gone_pids(spawn):
     procs.stop_with_message([p.pid, 2**22 + 7], "x")
 
 
+def test_a_test_run_whose_output_pytest_captures_still_shows_the_message(spawn, tmp_path):
+    # While a test runs, pytest points stdout and stderr at files without a name, and nobody reads
+    # them after the kill: the message goes where the shell that ran pytest writes (#222).
+    (tmp_path / "test_sleeps.py").write_text(
+        "import pathlib, time\n\n\ndef test_sleeps():\n    pathlib.Path('running').touch()\n    time.sleep(30)\n"
+    )
+    command = f"'{PY}' -m pytest -q -p no:cacheprovider test_sleeps.py; echo exit=$?"
+    shell = spawn(["sh", "-c", command], cwd=tmp_path, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    wait_for(lambda: (tmp_path / "running").exists(), timeout=30)
+    test = next(pid for pid in procs.descendants(shell.pid) if "pytest" in (procs.cmdline(pid) or []))
+    procs.stop_with_message([test], "dibs: stopped it")
+    out = shell.communicate(timeout=10)[0].decode()
+    assert out.count("dibs: stopped it") == 1, out
+    assert "exit=137" in out, out
+
+
+def test_a_program_a_test_started_leaves_the_message_in_the_test_report(spawn, tmp_path):
+    # pytest outlives a program one of its tests started, and shows what the test printed in its
+    # report: the message goes there, not into whatever ran pytest (#222).
+    (tmp_path / "test_starts.py").write_text(
+        "import pathlib, subprocess, time\n\n\ndef test_starts():\n"
+        "    program = subprocess.Popen(['sleep', '31.5'])\n"
+        "    pathlib.Path('running').touch()\n"
+        "    program.wait()\n"
+        "    time.sleep(0.5)  # the test goes on a little after its program ends\n"
+        "    assert False\n"
+    )
+    command = f"'{PY}' -m pytest -q -p no:cacheprovider test_starts.py; echo exit=$?"
+    shell = spawn(["sh", "-c", command], cwd=tmp_path, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    wait_for(lambda: (tmp_path / "running").exists(), timeout=30)
+    program = wait_for(lambda: next((p for p in procs.descendants(shell.pid) if procs.cmdline(p) == ["sleep", "31.5"]), None))
+    procs.stop_with_message([program], "dibs: stopped it")
+    out = shell.communicate(timeout=30)[0].decode()
+    assert "Captured stdout call" in out, out
+    before, report = out.split("Captured stdout call")
+    assert "dibs: stopped it" in report and "dibs: stopped it" not in before, out
+
+
 def test_start_time_is_precise(spawn):
     # The guard compares start times with the moment it was switched on, so whole seconds won't do.
     errors = []

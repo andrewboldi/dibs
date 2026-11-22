@@ -5,6 +5,7 @@ Every reader returns None when the process is gone or can't be read, rather than
 
 import os
 import signal
+import stat
 import time
 from collections.abc import Sequence
 
@@ -381,10 +382,10 @@ def _open_outputs(pids: Sequence[int]) -> list[int]:
     Destinations that can't be opened (sockets, gone processes) are skipped, and so is /dev/null.
     O_APPEND puts what we write at the end of a log file even if the process kept its own offset.
     """
-    seen, fds = set(), []
+    seen, fds, stopping = set(), [], set(pids)
     for pid in pids:
         for n in (1, 2):
-            path = f"/proc/{pid}/fd/{n}"
+            path = _read_output(pid, n, stopping)
             try:
                 st = os.stat(path)
                 if os.path.realpath(path) == "/dev/null" or (st.st_dev, st.st_ino) in seen:
@@ -395,6 +396,28 @@ def _open_outputs(pids: Sequence[int]) -> list[int]:
             seen.add((st.st_dev, st.st_ino))
             fds.append(fd)
     return fds
+
+
+def _read_output(pid: int, n: int, stopping: set[int]) -> str:
+    """Where what the process writes to fd n gets read: the /proc path of that destination.
+
+    A file without a name is a program's own capture (pytest's, while a test runs): nobody reads it
+    once every process holding it is killed. Then it's where the parent's fd n goes, and so on up,
+    to the first process that isn't being stopped (#222).
+    """
+    path = f"/proc/{pid}/fd/{n}"
+    while pid in stopping and _unnamed(path):
+        pid = parent(pid) or 0
+        path = f"/proc/{pid}/fd/{n}"
+    return path
+
+
+def _unnamed(path: str) -> bool:
+    try:
+        st = os.stat(path)
+    except OSError:
+        return False
+    return stat.S_ISREG(st.st_mode) and st.st_nlink == 0
 
 
 def _write(fd: int, data: bytes) -> None:
