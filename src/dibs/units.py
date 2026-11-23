@@ -98,6 +98,15 @@ def format_duration(seconds: float) -> str:
     return f"{days}d{hours}h" if hours else f"{days}d"
 
 
+def suggest_mem(peak: int) -> int:
+    """The RAM to suggest for a job whose runs peaked at `peak`: the peak plus a quarter, as agents are told
+    to ask (#212, #230), rounded up in steps that print as they are: 256M below 1G, half a G to 8G, then
+    whole G."""
+    want = peak * 1.25
+    step = 256 * MiB if want < GiB else GiB // 2 if want < 8 * GiB else GiB
+    return max(step, math.ceil(want / step) * step)
+
+
 def suggest_size(n: int) -> int:
     """A reservation to suggest for something seen using n bytes: n plus 10%, rounded up to a whole GiB."""
     return max(1, math.ceil(n * 1.1 / GiB)) * GiB

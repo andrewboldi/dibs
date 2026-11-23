@@ -9,6 +9,7 @@ from dibs.units import (
     format_size_against,
     parse_duration,
     parse_size,
+    suggest_mem,
     suggest_size,
 )
 
@@ -120,6 +121,28 @@ def test_format_duration(seconds, expected):
 )
 def test_suggest_size(n, expected):
     assert suggest_size(n) == expected
+
+
+@pytest.mark.parametrize(
+    "peak,expected",
+    [
+        (300 * MiB, 512 * MiB),  # a quarter over the peak, in steps that print as they are
+        (500 * MiB, 768 * MiB),
+        (700 * MiB, 1 * GiB),
+        (1 * GiB, int(1.5 * GiB)),
+        (int(1.4 * GiB), 2 * GiB),
+        (int(3.5 * GiB), int(4.5 * GiB)),
+        (int(7.1 * GiB), 9 * GiB),
+        (0, 256 * MiB),
+    ],
+)
+def test_suggest_mem_is_the_peak_plus_a_quarter(peak, expected):
+    # Issue #212: the RAM dibs suggests matches what agents are told to ask (#230): the peak plus about a
+    # quarter, not the next whole GiB above it plus 10%.
+    from dibs.units import format_size, parse_size
+
+    assert suggest_mem(peak) == expected and suggest_mem(peak) >= peak * 1.25
+    assert parse_size(format_size(expected)) == expected
 
 
 @pytest.mark.parametrize("bad", ["9" * 400, "1e999s", "9" * 400 + "h"])

@@ -136,16 +136,28 @@ def render_estimates(estimates: dict | None) -> str:
     return ""
 
 
+def _sizing(job: dict) -> str:
+    """What the job's earlier runs say its RAM request could be, for submit's first line (#212)."""
+    sizing = job.get("sizing")
+    if not sizing:
+        return ""
+    fact = f" Its last {sizing['runs']} runs peaked at {format_size(sizing['peak'])}: --mem {format_size(sizing['suggest'])}"
+    if job["state"] == "queued":
+        return f"{fact} would start it sooner (--replace {job['id']} keeps its place)."
+    return f"{fact} would do."
+
+
 def render_submit(job: dict, now: float) -> str:
     name, job_id = f"Job {job['id']} ({job['name']})", job["id"]
     if job["state"] == "running":
-        head = f"{name} started."
+        head = f"{name} started.{_sizing(job)}"
     elif job["state"] == "queued" and job.get("predicted_start") is None:
         head = f"{name} queued, but it can't run on this machine as it is: {job['waiting_for']}"
     elif job["state"] == "queued":
         head = (
             f"{name} queued: {ordinal(job['position'])} in line, "
             f"expected to start {_after(job['after']) if job.get('after') else when(job['predicted_start'], now)}."
+            f"{_sizing(job)}"
         )
         if job.get("waiting_for"):
             head += f"\n  Waiting: {job['waiting_for']}"
