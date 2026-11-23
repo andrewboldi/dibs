@@ -660,7 +660,7 @@ def _tell(paths, seen: list[int] | None = None, failures: bool = True, at_submit
             if failures and id(notice) in shown:
                 print(f"dibs: {render.failed_notice(notice)}", file=sys.stderr)
             continue
-        if notice.get("kind") == "advice":  # a request that doesn't match earlier runs (#169)
+        if notice.get("kind") in ("advice", "disk", "disk_writer"):  # a request off its runs (#169); a low disk (#211)
             print(f"dibs: {notice['message']}", file=sys.stderr)
             continue
         when = time.strftime("%H:%M", time.localtime(notice["time"]))

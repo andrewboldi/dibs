@@ -58,6 +58,11 @@ RETENTION_EVERY = 3600.0
 MAX_RETRIES = 2  # runs again after a resource failure, at most (#84)
 YOUNG = 600.0  # seconds: a job with no earlier runs counts at its whole RAM reservation this long (#86)
 SESSION_RUNS_AGE = 7 * 86400.0  # seconds: how far back a session's runs in other folders count (#229)
+DISK_EVERY = 30.0  # seconds between looks at the free space of the disks the jobs use (#211)
+DISK_WINDOW = 1800.0  # seconds: how far back a disk's drop, and what the jobs wrote, are measured
+DISK_LOW = 5 * GiB  # bytes: under this much free, every dibs command says so
+DISK_DROP = GiB // 2  # bytes: a smaller drop than this isn't explained
+DISK_TELL_EVERY = 3600.0  # seconds: the session that used the drop is told at most this often
 PRESSURE_LIMIT = 10.0  # percent (PSI some avg10): above it, no job starts on borrowed RAM
 EVICT_PRESSURE = procs.SHORT_PRESSURE  # percent: memory pressure this high for EVICT_AFTER stops a borrower (#114)
 EVICT_AFTER = 10.0  # seconds
@@ -204,6 +209,8 @@ class Daemon:
         programs: Callable[[int], list[tuple[int, int]]] = lambda minimum: [],
         set_mem_limit: Callable[[Job, int], bool] | None = None,
         panes: Callable[[], dict[str, int]] = lambda: {},
+        disk_free: Callable[[str], int | None] = lambda path: None,
+        written: Callable[[str], int | None] = lambda cgroup: None,
     ):
         self.paths = paths
         self.config = config
@@ -246,6 +253,15 @@ class Daemon:
         self._outside_vram: dict[str, int] = {}
         self._load: deque[tuple[float, float, float]] = deque()  # (time, machine busy core-seconds, time asleep)
         self._display_failed: set[str] = set()  # display-only watchers that raised, logged once each
+        # Free space of the disks the jobs use, and what the jobs wrote (#211): None and nothing unless
+        # given, so only the real daemon (run) reads the real disks.
+        self.disk_free = disk_free
+        self.written = written
+        self._disk: dict[int, deque[tuple[float, int]]] = {}  # disk (st_dev) -> (time, bytes free)
+        self._writes: dict[int, deque[tuple[float, int]]] = {}  # job -> (time, bytes it had written)
+        self._disk_at = -math.inf
+        self._disk_line: str | None = None  # what every command says while a disk is low
+        self._copy_sizes: dict[int, int] = {}  # job -> bytes of its --snapshot copy
         ensure_dirs(paths)
         self.store = Store(paths.db)
         # A restart in a shortage resumes its wait, rather than starting it over (#190).
@@ -586,6 +602,7 @@ class Daemon:
             "load": {"every": LOAD_EVERY, "cores": self._load_history()},
             "cpu_cap": procs.cpu_cap(),  # only read, for dibs top (#179)
             # What holds the RAM in use outside dibs, and files in a RAM-backed /tmp (#164).
+            "disk": self._disk_line,
             "outside_holders": self._ram_holders(now)[0],
             "tmp_files": self._ram_holders(now)[1],
         }
@@ -939,7 +956,7 @@ class Daemon:
         self._watch_gpus(now)
         self.schedule()
         self._grow(now)  # after starting what can start: growth takes only RAM left unreserved
-        for watch in (self._watch_outside_cpu, self._watch_load, self._watch_panes):  # only shown by dibs top, after scheduling
+        for watch in (self._watch_outside_cpu, self._watch_load, self._watch_panes, self._watch_disk):  # only shown, after scheduling
             try:
                 watch(now)
             except Exception:
@@ -1096,7 +1113,7 @@ class Daemon:
         key = f"told:{session}"
         told = float(self.store.get_meta(key) or 0.0)
         events = [e for e in self.store.events(min(max(told, now - TOLD_WINDOW), now - FAILED_FOR)) if e.get("session") == session]
-        stops = [e for e in events if e["kind"] in ("stop", "heavy", "idle_gpu") and e["time"] > told and e.get("message")]
+        stops = [e for e in events if e["kind"] in ("stop", "heavy", "idle_gpu", "disk_writer") and e["time"] > told and e.get("message")]
         if stops:
             self.store.set_meta(key, repr(stops[-1]["time"]))
         told_now = [{"time": e["time"], "message": e["message"], "kind": e["kind"]} for e in stops]
@@ -1110,6 +1127,8 @@ class Daemon:
             if advice:
                 self.store.set_meta(key, repr(advice[-1]["time"]))
             told_now += [{"time": e["time"], "message": e["message"], "kind": "advice"} for e in advice]
+        if self._disk_line:  # machine-wide, so every command of every session says it (#211)
+            told_now.append({"time": now, "message": self._disk_line, "kind": "disk"})
         return {"ok": True, "notices": told_now}
 
     def _advise(self, job: Job, view: dict, now: float) -> None:
@@ -1435,6 +1454,103 @@ class Daemon:
         self._load.append((now, busy, self.slept()))
         while len(self._load) > LOAD_WINDOW / LOAD_EVERY + 1:
             self._load.popleft()
+
+    def _job_written(self, job: Job) -> int | None:
+        """Bytes a running job's processes have had written to disk (procs.written_bytes); None if unseen."""
+        if not (job.unit and job.shim_pid):
+            return None
+        cg = procs.cgroup(job.shim_pid)
+        if not cg or not cg.endswith(f"/{job.unit}.scope"):
+            return None
+        return self.written(cg)
+
+    def _watch_disk(self, now: float) -> None:
+        """Every DISK_EVERY, the free space of the disks the jobs use (their folders and outputs, and
+        dibs's own, which holds --snapshot copies) and what each running job has written. Under DISK_LOW
+        free, every dibs command says so, and what used the space lately; the session behind it is told
+        once an hour (#211). Nothing is stopped."""
+        if now - self._disk_at < DISK_EVERY:
+            return
+        self._disk_at = now
+        jobs = self.store.jobs([State.RUNNING, State.QUEUED])
+        disks: dict[int, str] = {}
+        for path in (str(self.paths.state_dir), *(p for j in jobs for p in (j.cwd, os.path.dirname(j.output or "")))):
+            try:
+                disks.setdefault(os.stat(path).st_dev, path)
+            except OSError:
+                continue
+        for dev in [d for d in self._disk if d not in disks]:
+            del self._disk[dev]
+        for dev, path in disks.items():
+            free = self.disk_free(path)
+            if free is not None:
+                samples = self._disk.setdefault(dev, deque())
+                samples.append((now, free))
+                while samples[0][0] < now - DISK_WINDOW:
+                    samples.popleft()
+        for job in jobs:
+            if job.state == State.RUNNING and (wrote := self._job_written(job)) is not None:
+                self._writes.setdefault(job.id, deque()).append((now, wrote))
+        for job_id in list(self._writes):  # a job that ended lately still counts for what it wrote
+            samples = self._writes[job_id]
+            while samples and samples[0][0] < now - DISK_WINDOW:
+                samples.popleft()
+            if not samples:
+                del self._writes[job_id]
+        self._disk_line, told = self._disk_report(jobs)
+        if told:
+            session, message = told
+            key = f"disk_told:{session}"
+            if now - float(self.store.get_meta(key) or -math.inf) >= DISK_TELL_EVERY:
+                self.store.set_meta(key, repr(now))
+                self.store.add_event("disk_writer", {"session": session, "message": message}, now)
+
+    def _disk_report(self, jobs: list[Job]) -> tuple[str | None, tuple[str, str] | None]:
+        """The line every command says while a disk is low, and (session, what it's told) when one
+        session's jobs used most of the drop: by writing, or by --snapshot copies taken lately."""
+        low = [(samples[-1][1], dev) for dev, samples in self._disk.items() if samples and samples[-1][1] < DISK_LOW]
+        if not low:
+            return None, None
+        free, dev = min(low)
+        (t0, free0), (t1, _) = self._disk[dev][0], self._disk[dev][-1]
+        line = f"the disk has {format_size(free)} free"
+        drop = free0 - free
+        if drop < DISK_DROP or t1 - t0 < 60:
+            return line + ".", None
+        minutes = round((t1 - t0) / 60)
+        line += f", {format_size(drop)} less than {minutes} minutes ago"
+        copies = [(j, self._copy_size(j)) for j in jobs if j.snapshot and j.submitted >= t0]
+        copied = sum(size for _, size in copies)
+        wrote = {job_id: s[-1][1] - s[0][1] for job_id, s in self._writes.items() if len(s) >= 2}
+        top = max(wrote, key=wrote.__getitem__, default=None)
+        if copies and copied >= drop / 2:
+            by: dict[str, int] = {}
+            for j, size in copies:
+                by[j.session] = by.get(j.session, 0) + size
+            owner = max(by, key=by.__getitem__)
+            mine = [j for j, _ in copies if j.session == owner]
+            n = len(copies)
+            what = f"{n} job's code copy" if n == 1 else f"{n} jobs' code copies"
+            told = (f"Your {len(mine)} job{'' if len(mine) == 1 else 's'} with --snapshot hold "
+                    f"{format_size(by[owner])} of code copies until they end, and the disk has {format_size(free)} free.")  # fmt: skip
+            return f"{line}: {what} (--snapshot) took {format_size(copied)} of it.", (owner, told)
+        if top is not None and wrote[top] >= drop / 2:
+            j = next((j for j in jobs if j.id == top), None) or self.store.get_job(top)
+            name = f"job {top} ({j.name})" if j else f"job {top}"
+            told = (f"{name[0].upper()}{name[1:]} wrote {format_size(wrote[top])} in the last {minutes} minutes, "
+                    f"and the disk has {format_size(free)} free.")  # fmt: skip
+            return f"{line}: {name} wrote {format_size(wrote[top])} of it.", (j.session, told) if j else None
+        return f"{line}, mostly written outside dibs.", None
+
+    def _copy_size(self, job: Job) -> int:
+        """Bytes of a job's --snapshot copy, from the list of files it copied (#172)."""
+        if job.id not in self._copy_sizes:
+            try:
+                files = json.loads((self.paths.job_dir(job.id) / "snapshot" / snapshot.MANIFEST).read_text())["files"]
+                self._copy_sizes[job.id] = sum(size for size, _ in files.values())
+            except (OSError, ValueError, KeyError, TypeError):
+                return 0
+        return self._copy_sizes[job.id]
 
     def _load_history(self) -> list[float | None]:
         """Busy cores between consecutive samples, oldest first; None for an interval the machine slept."""
@@ -1895,7 +2011,7 @@ def run_daemon(env: Mapping[str, str] = os.environ) -> int:
     use_systemd = launcher.systemd_available(env)
     daemon = Daemon(paths, config, capacity, backend, use_systemd=use_systemd, programs=procs.big_programs,
                     set_mem_limit=launcher.set_memory_max if use_systemd else None,
-                    panes=lambda: procs.pane_cpu(PANE_SCOPES))  # fmt: skip
+                    panes=lambda: procs.pane_cpu(PANE_SCOPES), disk_free=procs.disk_free, written=procs.written_bytes)  # fmt: skip
     daemon.recover()
     gpus = ", ".join(f"GPU {g.index} {format_size(g.vram)}" for g in capacity.gpus) or "no GPUs"
     log.info(

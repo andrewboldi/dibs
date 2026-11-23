@@ -687,6 +687,8 @@ def _machine(snapshot: dict, width: int) -> list[_Line]:
         holders.append(f"files in /tmp {format_size(snapshot['tmp_files'])}")
     if holders:
         lines.append(_Line(("       ", None), ("outside dibs: " + ", ".join(holders), "2")))
+    if snapshot.get("disk"):  # a disk the jobs use is low (#211)
+        lines.append(_Line(("       ", None), ("disk: " + snapshot["disk"], _WARN_SGR)))
     load = snapshot.get("load") or {}
     cores = load.get("cores") or []
     if sum(v is not None for v in cores) >= 2:
