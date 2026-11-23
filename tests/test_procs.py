@@ -319,3 +319,17 @@ def test_pane_cpu_reads_each_terminal_panes_cpu_time(tmp_path, monkeypatch):
         f"{base}/app-org.gnome.Terminal.slice/tmux-spawn-1.scope": 5_000_000,
         f"{base}/app-org.gnome.Terminal.slice/vte-spawn-2.scope": 7_000_000,
     }
+
+
+def test_written_bytes_adds_up_what_a_cgroups_processes_had_written_to_disk(monkeypatch):
+    # Issue #211: the io controller isn't delegated to user services here, so a job's writes come from
+    # its processes' /proc/PID/io: written, less what was deleted before it reached the disk.
+    files = {
+        "/proc/11/io": "rchar: 5\nwchar: 900\nwrite_bytes: 4096000\ncancelled_write_bytes: 96000\n",
+        "/proc/12/io": "write_bytes: 1000\ncancelled_write_bytes: 0\n",
+    }
+    monkeypatch.setattr(procs, "cgroup_procs", lambda cg: [11, 12, 13])  # 13 is gone
+    monkeypatch.setattr(procs, "_read", lambda path, binary=False: files.get(path))
+    assert procs.written_bytes("/app.slice/job.scope") == 4096000 - 96000 + 1000
+    monkeypatch.setattr(procs, "cgroup_procs", lambda cg: [13])
+    assert procs.written_bytes("/app.slice/job.scope") is None

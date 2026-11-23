@@ -204,6 +204,33 @@ def keyed_numbers(text: str | None) -> dict[str, int]:
     return stat
 
 
+def disk_free(path: str) -> int | None:
+    """Bytes free on the disk that holds `path`, for programs that aren't root."""
+    try:
+        st = os.statvfs(path)
+    except OSError:
+        return None
+    return st.f_bavail * st.f_frsize
+
+
+def written_bytes(cgroup_path: str) -> int | None:
+    """Bytes a cgroup's processes have had written to disk, at least: each one's write_bytes less its
+    cancelled_write_bytes (written, then deleted before reaching the disk), from /proc/PID/io, which
+    also holds what the children it waited for wrote. Not io.stat: user services don't always get the
+    io controller (#211). None if no process's count can be read."""
+    total, seen = 0, False
+    for pid in cgroup_procs(cgroup_path):
+        fields = {}
+        for line in (_read(f"/proc/{pid}/io") or "").splitlines():
+            key, _, value = line.partition(":")
+            if value.strip().isdigit():
+                fields[key] = int(value)
+        if "write_bytes" in fields:
+            seen = True
+            total += max(0, fields["write_bytes"] - fields.get("cancelled_write_bytes", 0))
+    return total if seen else None
+
+
 def memory_in_use(cgroup_path: str) -> tuple[int, int, tuple[int, int]] | None:
     """What a cgroup's processes hold (anon + shmem), leaving out the file cache that memory.current
     and memory.peak also count: the kernel drops that cache when memory runs short. With it, the
