@@ -11,6 +11,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import uuid
 from pathlib import Path
@@ -31,7 +32,35 @@ def _git(cwd: str, *args: str) -> bytes:
     return subprocess.run(["git", "-C", cwd, *args], capture_output=True, check=True, timeout=60).stdout
 
 
-def take(cwd: str, into: Path) -> dict:
+def _newest_copy(jobs_dir: Path | None, root: str) -> tuple[Path | None, dict]:
+    """The newest live copy of this repository among the jobs' folders, and the files it copied (#233)."""
+    best: tuple[float, Path, dict] | None = None
+    for manifest in jobs_dir.glob(f"*/snapshot/{MANIFEST}") if jobs_dir else []:
+        try:
+            taken = json.loads(manifest.read_text())
+            when = manifest.stat().st_mtime
+        except (OSError, ValueError):
+            continue
+        if taken.get("root") == root and isinstance(taken.get("files"), dict) and (best is None or when > best[0]):
+            best = (when, manifest.parent / "tree", taken["files"])
+    return (best[1], best[2]) if best else (None, {})
+
+
+def _shared(source_stat: os.stat_result, rel: str, tree: Path | None, files: dict) -> os.stat_result | None:
+    """The stat of the old copy's file to share for `rel`, when the repository's file, the old copy's
+    record of it and the old copy's file as it stands all agree on size and modification time: a
+    copy its job wrote into, or a file edited since, is copied afresh (#233)."""
+    if tree is None or files.get(rel) != [source_stat.st_size, source_stat.st_mtime_ns]:
+        return None
+    try:
+        old = os.lstat(tree / rel)
+    except OSError:
+        return None
+    same = stat.S_ISREG(old.st_mode) and (old.st_size, old.st_mtime_ns) == (source_stat.st_size, source_stat.st_mtime_ns)
+    return old if same else None
+
+
+def take(cwd: str, into: Path, jobs_dir: Path | None = None) -> dict:
     """Copy the repository around `cwd` into `into` (which mustn't exist): {"root": the repository,
     "copy": into, "files": {path: [size, mtime_ns]}} for each file copied."""
     try:
@@ -41,7 +70,12 @@ def take(cwd: str, into: Path) -> dict:
     listed = _git(root, "ls-files", "-z", "--cached", "--others", "--exclude-standard").split(b"\0")
     files = sorted({p.decode() for p in listed if p})
     files = [f for f in files if os.path.lexists(os.path.join(root, f))]  # tracked, but deleted now
-    size = sum(os.lstat(os.path.join(root, f)).st_size for f in files)
+    stats = {f: os.lstat(os.path.join(root, f)) for f in files}
+    size = sum(st.st_size for st in stats.values())
+    # Files unchanged since the newest copy of this repository are shared with it, not copied (#233).
+    tree, old_files = _newest_copy(jobs_dir, root)
+    shared = {f: old for f in files if stat.S_ISREG(stats[f].st_mode) and (old := _shared(stats[f], f, tree, old_files))}
+    to_copy = sum(st.st_size for f, st in stats.items() if f not in shared)
     if size > SNAPSHOT_MAX:
         raise SnapshotError(
             f"--snapshot would copy {format_size(size)} of code from {root}, more than {format_size(SNAPSHOT_MAX)}: "
@@ -49,26 +83,36 @@ def take(cwd: str, into: Path) -> dict:
         )
     into.parent.mkdir(parents=True, exist_ok=True)
     free = shutil.disk_usage(into.parent).free
-    if free - size < DISK_KEEP:
+    if free - to_copy < DISK_KEEP:
         raise SnapshotError(f"--snapshot would leave the disk with less than {format_size(DISK_KEEP)} free")
     ignored = _git(root, "ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--directory").split(b"\0")
     into.mkdir()
-    copied = {}
+    copied, copied_bytes = {}, 0
     for rel in files:
         source, target = os.path.join(root, rel), into / rel
         target.parent.mkdir(parents=True, exist_ok=True)
         if os.path.islink(source) or os.path.isdir(source):  # a link as it is; a submodule linked
             os.symlink(os.readlink(source) if os.path.islink(source) else source, target)
             continue
-        shutil.copy2(source, target)
-        stat = os.lstat(target)
-        copied[rel] = [stat.st_size, stat.st_mtime_ns]
+        if rel in shared:  # the same file as the old copy's: one inode, read-only so neither job's changes
+            try:
+                os.link(tree / rel, target)
+                os.chmod(target, stat.S_IMODE(shared[rel].st_mode) & ~0o222)
+            except OSError:  # the old copy may be going as its job ends: copy it instead
+                shared.pop(rel)
+                if os.path.lexists(target):
+                    os.unlink(target)
+        if rel not in shared:
+            shutil.copy2(source, target)
+            copied_bytes += os.lstat(target).st_size
+        st = os.lstat(target)
+        copied[rel] = [st.st_size, st.st_mtime_ns]
     for rel in [p.decode().rstrip("/") for p in ignored if p] + [".git"]:
         target = into / rel
         if not os.path.lexists(target) and os.path.lexists(os.path.join(root, rel)):
             target.parent.mkdir(parents=True, exist_ok=True)
             os.symlink(os.path.join(root, rel), target)  # the real one: environments, data, outputs, history
-    return {"root": root, "copy": str(into), "files": copied}
+    return {"root": root, "copy": str(into), "files": copied, "copied": copied_bytes}
 
 
 def stage(paths: Paths, cwd: str) -> str:
@@ -76,7 +120,7 @@ def stage(paths: Paths, cwd: str) -> str:
     the job's folder at submit. Returns that folder."""
     folder = paths.state_dir / "snapshots" / uuid.uuid4().hex
     try:
-        taken = take(cwd, folder / "tree")
+        taken = take(cwd, folder / "tree", paths.jobs_dir)
     except BaseException:
         shutil.rmtree(folder, ignore_errors=True)
         raise
