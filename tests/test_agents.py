@@ -397,6 +397,16 @@ def test_agent_help_gives_no_advice_on_where_to_keep_files_in_tmp():
     assert "/tmp where it is a tmpfs" in AGENT_HELP.split("## Sizing a request", 1)[1].split("\n## ", 1)[0]
 
 
+def test_sizing_says_what_a_padded_ram_request_costs_and_how_to_fix_one():
+    # Issue #230: one session's jobs peaked at a median 33% of the RAM they asked for, while jobs waited
+    # for RAM. Agents are told the size to ask, what padding costs, and how to shrink a waiting job.
+    sizing = " ".join(AGENT_HELP.split("## Sizing a request", 1)[1].split("\n## ", 1)[0].split())
+    for phrase in ("RAM peak plus about a quarter", "run one job first and size the rest from its peak",
+                   "holds back every job behind it", "--replace ID"):  # fmt: skip
+        assert phrase in sizing, phrase
+    assert sizing in " ".join(SKILL.split())  # the installed skill says the same
+
+
 def test_session_names_come_from_claude_codes_session_files(tmp_path):
     # Issue #167: dibs top heads each agent's panel with the name the user knows the session by.
     # Claude Code keeps a file per running session, with the session id dibs stores with each job.
