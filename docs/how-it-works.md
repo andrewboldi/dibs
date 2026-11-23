@@ -173,6 +173,8 @@ guard = "all"        # "all" stops GPU processes outside dibs, and the largest p
 guard_allow = ["ollama"]
 guard_desktop = true # leave alone GPU programs launched from the desktop (not terminals or editors)
 borrow_ram = true    # let jobs start in RAM other jobs reserved but aren't using
+huge_pages = false   # true lets jobs have transparent huge pages; off, a job never waits on the
+                     # kernel to find or make one
 keep_days = 14       # how long finished jobs' logs are kept
 agent_files = ["~/.cursor/rules/dibs.mdc"]   # more instructions files for dibs setup
 ```

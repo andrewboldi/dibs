@@ -79,6 +79,18 @@ def _write_exit(job_dir: Path, result: dict) -> None:
     os.replace(tmp, job_dir / "exit.json")
 
 
+def _no_huge_pages() -> None:
+    """Switch transparent huge pages off for this process and what it starts (PR_SET_THP_DISABLE): a
+    program asking for a huge page the kernel can't find makes it stall, or wake its reclaim, which
+    pushes idle programs' memory to swap while RAM is free (#225)."""
+    try:
+        import ctypes
+
+        ctypes.CDLL(None, use_errno=True).prctl(41, 1, 0, 0, 0)
+    except (OSError, AttributeError):
+        pass
+
+
 def main(argv: list[str]) -> int:
     job_dir = Path(argv[0])
     with open(job_dir / "spec.json") as f:
@@ -98,6 +110,8 @@ def main(argv: list[str]) -> int:
     if out is not None and not os.path.isdir(spec["cwd"]):
         reason = f"couldn't start: working directory {spec['cwd']} no longer exists"
     elif out is not None:
+        if not spec.get("huge_pages"):  # the command inherits it, and everything it starts (#225)
+            _no_huge_pages()
         if spec.get("oom_score_adj") is not None:  # the command inherits it; raising it needs no privilege
             try:
                 with open("/proc/self/oom_score_adj", "w") as f:

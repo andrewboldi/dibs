@@ -24,7 +24,7 @@ def test_load_config_values(tmp_path):
     path = write(
         tmp_path,
         'cpus = 20\nmem = "24G"\ngpus = [0]\nvram = "7.5G"\nkeep_days = 3\n'
-        'guard = "warn"\nguard_allow = ["ollama"]\nguard_desktop = false\nborrow_ram = false\n',
+        'guard = "warn"\nguard_allow = ["ollama"]\nguard_desktop = false\nborrow_ram = false\nhuge_pages = true\n',
     )
     assert load_config(path) == Config(
         cpus=20,
@@ -36,6 +36,7 @@ def test_load_config_values(tmp_path):
         guard_allow=("ollama",),
         guard_desktop=False,
         borrow_ram=False,
+        huge_pages=True,
     )
 
 
@@ -50,6 +51,7 @@ def test_load_config_values(tmp_path):
         ("keep_days = -1", "keep_days"),
         ('guard_desktop = "yes"', "guard_desktop"),
         ("borrow_ram = 1", "borrow_ram"),
+        ('huge_pages = "on"', "huge_pages"),
         ("this is not toml", "config"),
     ],
 )

@@ -161,7 +161,8 @@ def _write_private(path: Path, text: str) -> None:
     os.replace(tmp, path)
 
 
-def launch(job: Job, paths: Paths, *, use_systemd: bool, vendor: str = "nvidia") -> tuple[int, int | None, str | None]:
+def launch(job: Job, paths: Paths, *, use_systemd: bool, vendor: str = "nvidia",
+           huge_pages: bool = False) -> tuple[int, int | None, str | None]:  # fmt: skip
     """Start the job's shim, detached. Returns (shim pid, its start ticks, systemd unit or None)."""
     job_dir = paths.job_dir(job.id)
     job_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -183,6 +184,7 @@ def launch(job: Job, paths: Paths, *, use_systemd: bool, vendor: str = "nvidia")
         "unit": unit,
         # Started on borrowed RAM: if the machine runs out, the kernel kills this job first (#86).
         "oom_score_adj": BORROWER_OOM_SCORE if job.borrowed_ram else None,
+        "huge_pages": huge_pages,  # off unless the config keeps them (#225)
     }
     _write_private(job_dir / "spec.json", json.dumps(spec))
     command = [sys.executable, "-m", "dibs.shim", str(job_dir)]
