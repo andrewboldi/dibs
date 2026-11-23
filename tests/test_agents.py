@@ -412,7 +412,7 @@ def test_sizing_doesnt_promise_a_tight_request_is_safe(tmp_path):
     # limit within seconds, faster than dibs grows a job; the other's run needed more than earlier ones.
     sizing = " ".join(AGENT_HELP.split("## Sizing a request", 1)[1].split("\n## ", 1)[0].split())
     assert "costs little" not in sizing
-    for phrase in ("jumps past it faster than dibs can act is killed at it",
+    for phrase in ("jumps past that room faster than dibs can act is killed",
                    "add `--retry` to a tightly sized job that is safe to run again",
                    "from the run with its largest input"):  # fmt: skip
         assert phrase in sizing, phrase
