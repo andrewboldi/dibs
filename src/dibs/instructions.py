@@ -57,8 +57,10 @@ when those resources are free, so jobs never crash each other by running out of 
   while the machine has RAM free, into the room dibs keeps beside other jobs; if the machine then
   runs short, a job grown that way is the first one stopped. Only --mem is promised: size it for
   the job's real peak.
-- `--vram SIZE`: GPU memory on each GPU it uses. Leave it out for a CPU-only job, which then
-  can't see any GPU. A job may use more VRAM than it reserved while nobody else needs that memory,
+- `--vram SIZE`: GPU memory on each GPU it uses. Leave it out for a CPU-only job: CUDA can't see a
+  GPU in it then, though a browser or a graphics library may still open one. Such a job may hold up
+  to 64M on a GPU, and is stopped past that; to keep a program off the GPU, use its own switch (a
+  browser's --disable-gpu). A job may use more VRAM than it reserved while nobody else needs that memory,
   but it is stopped as soon as it reaches memory another job reserved. A job keeps the GPU memory
   it took until its processes free it or exit, so a long CPU-only stretch after the GPU work can be
   a job of its own, without --vram.

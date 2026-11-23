@@ -49,7 +49,7 @@ from dibs.model import (
 from dibs.paths import Paths, ensure_dirs, get_paths
 from dibs.planner import Plan, Queued, Running, plan
 from dibs.store import Store
-from dibs.units import GiB, format_duration, format_size, format_size_against, parse_size, suggest_mem, suggest_size
+from dibs.units import GiB, MiB, format_duration, format_size, format_size_against, parse_size, suggest_mem, suggest_size
 
 KILL_AFTER = 10.0  # seconds between asking a job to stop (SIGTERM) and forcing it (SIGKILL)
 OWED_FOR = 86400.0  # seconds: what a session owes (or is owed) for its priorities lapses after a day
@@ -60,6 +60,7 @@ MAX_RETRIES = 2  # runs again after a resource failure, at most (#84)
 YOUNG = 600.0  # seconds: a job with no earlier runs counts at its whole RAM reservation this long (#86)
 SESSION_RUNS_AGE = 7 * 86400.0  # seconds: how far back a session's runs in other folders count (#229)
 MARGIN_PRESSURE = 5.0  # % memory pressure (some, avg10) under which a job may grow into other jobs' margins (#228)
+UNASKED_GPU = 64 * MiB  # bytes a job that asked for no GPU may hold on one: a browser's GPU process (#246)
 MARGIN_KEEP = 0.10  # share of RAM still available after such a step
 DISK_EVERY = 30.0  # seconds between looks at the free space of the disks the jobs use (#211)
 DISK_WINDOW = 1800.0  # seconds: how far back a disk's drop, and what the jobs wrote, are measured
@@ -1202,7 +1203,8 @@ class Daemon:
         key = f"told:{session}"
         told = float(self.store.get_meta(key) or 0.0)
         events = [e for e in self.store.events(min(max(told, now - TOLD_WINDOW), now - FAILED_FOR)) if e.get("session") == session]
-        stops = [e for e in events if e["kind"] in ("stop", "heavy", "idle_gpu", "disk_writer") and e["time"] > told and e.get("message")]
+        stops = [e for e in events if e["kind"] in ("stop", "heavy", "idle_gpu", "disk_writer", "gpu_unasked")
+                 and e["time"] > told and e.get("message")]  # fmt: skip
         if stops:
             self.store.set_meta(key, repr(stops[-1]["time"]))
         told_now = [{"time": e["time"], "message": e["message"], "kind": e["kind"]} for e in stops]
@@ -1854,10 +1856,13 @@ class Daemon:
             return max(j.request.vram, usage.get(j.id, {}).get(g, 0)) if g in j.gpu_ids else 0
 
         def allowed(j: Job, g: int) -> int:
-            if g not in j.gpu_ids:
-                return 0
             others = sum(holds(o, g) for o in running.values() if o.id != j.id)
-            return max(j.request.vram, capacity_of.get(g, 0) - others - outside_use.get(g, 0))
+            free = capacity_of.get(g, 0) - others - outside_use.get(g, 0)
+            if g not in j.gpu_ids:
+                # A job that asked for no GPU may hold a little that nobody reserved: CUDA can't see a GPU
+                # in it, but a browser's own GPU process opens one anyway (#246). A GPU job may not.
+                return 0 if j.request.gpus else max(0, min(UNASKED_GPU, free))
+            return max(j.request.vram, free)
 
         for job_id, per_gpu_pids in held.items():
             job = running[job_id]
@@ -1867,6 +1872,18 @@ class Daemon:
             if changed:
                 job.peak_vram = peak
             over = [(g, used) for g, used in sorted(per_gpu.items()) if used > allowed(job, g)]
+            if per_gpu and not over and not job.request.gpus and not job.gpu_unasked_told:
+                job.gpu_unasked_told = True  # told once, the first time it's seen (#246)
+                changed = True
+                g, used = max(per_gpu.items(), key=lambda kv: kv[1])
+                pid = max(per_gpu_pids.get(g, {}).items(), key=lambda kv: kv[1], default=(None, 0))[0]
+                program = os.path.basename((procs.cmdline(pid) or [""])[0]) if pid else ""
+                self.store.add_event("gpu_unasked", {"session": job.session, "job": job.id, "message": (
+                    f"Job {job.id} ({job.name}) asked for no GPU, and {f'its program {program}' if program else 'it'} "
+                    f"holds {format_size(used)} on GPU {g}: CUDA can't see a GPU in it, but a browser or a graphics "
+                    f"library may open one anyway. A job without --vram may hold up to {format_size(UNASKED_GPU)} on "
+                    "a GPU, and is stopped past that. To keep it off the GPU, use the program's own switch (a "
+                    "browser's --disable-gpu).")}, now)  # fmt: skip
             if over and job.stop_reason is None:
                 gpu, used = over[0]
                 reserved = job.request.vram if gpu in job.gpu_ids else 0
@@ -1961,7 +1978,10 @@ class Daemon:
         else:
             job.state = State.FAILED
         if job.stop_reason:
-            job.reason = job.stop_reason + (f"; resubmit with --vram {self._vram_text(job.retry_vram)}" if job.retry_vram else "")
+            more = f"; resubmit with --vram {self._vram_text(job.retry_vram)}" if job.retry_vram else ""
+            if more and not job.request.gpus:  # it asked for no GPU: maybe it needn't use one (#246)
+                more = f"; keep its program off the GPU (a browser's --disable-gpu), or resubmit with --vram {self._vram_text(job.retry_vram)}"
+            job.reason = job.stop_reason + more
         elif job.cancel_requested is not None:
             job.reason = "cancelled"
         elif result.get("oom_killed"):
