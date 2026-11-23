@@ -648,8 +648,12 @@ def _tell(paths, seen: list[int] | None = None, failures: bool = True, at_submit
     that failed in the last hour, at each command until one looks at them (seen) (#176). failures=False
     for JSON output, which a program reads."""
     try:
+        try:
+            cwd = os.getcwd()  # a job's notices go to commands from its own folder (#221)
+        except OSError:
+            cwd = None
         notices = dc.Client(paths).call(
-            "notices", session=dc.current_session()[0], seen=seen or [], at_submit=at_submit
+            "notices", session=dc.current_session()[0], seen=seen or [], at_submit=at_submit, cwd=cwd
         ).get("notices", [])
     except (dc.DibsError, OSError):
         return  # the command itself will say what's wrong

@@ -209,9 +209,9 @@ class Store:
 
     def events(self, since: float) -> list[dict]:
         rows = self._db.execute(
-            "SELECT kind, time, data FROM events WHERE time >= ? ORDER BY id", (since,)
+            "SELECT id, kind, time, data FROM events WHERE time >= ? ORDER BY id", (since,)
         ).fetchall()
-        return [{"kind": kind, "time": time, **json.loads(data)} for kind, time, data in rows]
+        return [{"kind": kind, "time": time, **json.loads(data), "event_id": i} for i, kind, time, data in rows]
 
     def delete_events_before(self, t: float) -> None:
         with self._db:
