@@ -38,6 +38,7 @@ from dibs.model import (
     DEFAULT_PRIORITY,
     compute_tag,
     default_name,
+    folder_places,
     next_owed,
     job_to_dict,
     resolve_request,
@@ -367,6 +368,7 @@ class Daemon:
             # replaces paid for its place, and passed the session's lower-priority jobs, when it was queued.
             tag, plain_tag = min(tag, replaced.tag), min(plain_tag, _plain(replaced))
             carried, left, passed = replaced.owed_carried, replaced.owed_left, []
+            kept = [tag, plain_tag]
         job = Job(
             id=0,
             name=req.get("name") or default_name(argv),
@@ -387,6 +389,7 @@ class Daemon:
             history_mem=self._history_mem(cwd, list(argv), session),
             history_vram=self._history_vram(cwd, list(argv), request, session),
             history_longest=self._history_longest(cwd, list(argv), request, session),
+            kept=kept if keeps else None,
             state=State.QUEUED,
             output=output or "",
         )
@@ -409,6 +412,7 @@ class Daemon:
         if replaced is not None and replaced.state == State.CANCELLED:
             replaced.reason = f"replaced by job {job.id}"
             self.store.update_job(replaced)
+        self._reline(session, folders_only=True)  # its folders take turns at its places (#226): after job's last save
         self.schedule()
         response = self.show(job.id)
         if sizing := self._sizing(job):  # on submit's first line, the one line agents keep (#212)
@@ -454,6 +458,21 @@ class Daemon:
         if job.owed_left > 0 and not self._passed_another_session(job):
             delta -= job.owed_left
         self._add_owed(job.session, delta, now)
+        if job.owed_left > 0 and self._passed_a_sibling(job, now):  # its own folder pays it back (#226)
+            key = f"owed:{job.session}:{self._place(job.cwd)}"
+            owed = json.loads(self.store.get_meta(key) or "{}").get("owed", 0.0) if now - json.loads(
+                self.store.get_meta(key) or "{}").get("time", -math.inf) <= OWED_FOR else 0.0  # fmt: skip
+            self.store.set_meta(key, json.dumps({"owed": owed + job.owed_left, "time": now}))
+
+    def _passed_a_sibling(self, job: Job, now: float) -> bool:
+        """Whether a waiting job of another of the session's folders would, without priorities, have gone
+        ahead of this one, which just started (#226)."""
+        place = self._place(job.cwd)
+        others = [j for j in self.store.jobs([State.QUEUED]) if j.session == job.session and self._place(j.cwd) != place]
+        if not others:
+            return False
+        places = folder_places([*others, job], self._place, self._turn_owed(job.session, now))
+        return any(places[j.id][1] < places[job.id][1] for j in others)
 
     def _passed_another_session(self, job: Job) -> bool:
         """Whether another session's job is still waiting that, without priorities, would have gone first."""
@@ -532,11 +551,18 @@ class Daemon:
         self.schedule()
         return {"ok": True, "cancelled": cancelled, "errors": errors}
 
-    def _reline(self, session: str) -> None:
+    def _reline(self, session: str, folders_only: bool = False) -> None:
         """Line a session's waiting jobs up again by submit()'s rules, in the order they came, behind its
         jobs still waiting only: one that started or was cancelled no longer holds back those after it,
-        so a busy session's line can't run hours ahead of the clock (#150). Places only move earlier."""
+        so a busy session's line can't run hours ahead of the clock (#150). Places only move earlier.
+        A session waiting in two or more folders takes the fresh line as its places, which its folders
+        then take in turns (#226): the earlier of a job's old and new place would let the session's
+        places drift earlier and duplicate, as the turns move them between its jobs. Only a replacement's
+        kept place (#184) stays. folders_only: nothing to do for a session in one folder."""
         own = sorted((j for j in self.store.jobs([State.QUEUED]) if j.session == session), key=lambda j: (j.submitted, j.id))
+        folders = len({self._place(j.cwd) for j in own}) >= 2
+        if folders_only and not folders:
+            return
         lined: list[Job] = []
         new: dict[int, list[float]] = {}  # job id -> [tag, plain tag]
         for j in own:
@@ -552,10 +578,38 @@ class Daemon:
             lined.append(j)
         for j in own:
             tag, plain = new[j.id]
-            tag, plain = min(tag, j.tag), min(plain, j.plain_tag if j.plain_tag is not None else plain)
+            if not folders:
+                tag, plain = min(tag, j.tag), min(plain, j.plain_tag if j.plain_tag is not None else plain)
+            elif j.kept is not None:
+                tag, plain = min(tag, j.kept[0]), min(plain, j.kept[1])
             if (tag, plain) != (j.tag, j.plain_tag):
                 j.tag, j.plain_tag = tag, plain
                 self.store.update_job(j)
+        self._turns(session, self.clock())
+
+    def _turns(self, session: str, now: float) -> None:
+        """Hand a session's places in line to its waiting jobs in the order its folders take turns (#226):
+        a coding agent's subagents share its session id, and one subagent's batch held its siblings'
+        jobs back for hours. The places stay the session's, so no other session's job moves; and with
+        one folder waiting, the order is the one the places were made in."""
+        own = [j for j in self.store.jobs([State.QUEUED]) if j.session == session]
+        if len({self._place(j.cwd) for j in own}) < 2:
+            return
+        places = folder_places(own, self._place, self._turn_owed(session, now))
+        order = sorted(own, key=lambda j: (places[j.id][0], j.submitted, j.id))
+        slots = sorted((j.tag, j.plain_tag if j.plain_tag is not None else j.tag) for j in own)
+        for j, (tag, plain) in zip(order, slots):
+            tag, plain = max(tag, j.submitted), max(plain, j.submitted)  # never ahead of its own submit
+            if (tag, plain) != (j.tag, j.plain_tag):
+                j.tag, j.plain_tag = tag, plain
+                self.store.update_job(j)
+
+    def _turn_owed(self, session: str, now: float) -> dict[str, float]:
+        """What each of the session's folders owes for boosts that passed a sibling's job (#226), by folder;
+        as a session's debt, it lapses after OWED_FOR."""
+        prefix = f"owed:{session}:"
+        return {key[len(prefix):]: entry["owed"] for key, value in self.store.meta_items(prefix)
+                if now - (entry := json.loads(value)).get("time", -math.inf) <= OWED_FOR}  # fmt: skip
 
     def _cancel_job(self, job: Job, now: float, in_place: bool = False) -> bool:
         """Cancel one job without scheduling: a queued one ends now, a running one is asked to stop.

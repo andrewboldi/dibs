@@ -3,7 +3,7 @@
 import math
 import shlex
 import os
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from enum import StrEnum
 from typing import Any
@@ -106,6 +106,7 @@ class Job:
     gpu_idle_told: float | None = None
     history_vram: int | None = None  # the most GPU memory earlier runs of the same command held, at submit (#183)
     history_longest: float | None = None  # the longest earlier run of its script with its estimate, at submit (#227)
+    kept: list[float] | None = None  # [tag, plain tag] a replacement kept from the job it replaced (#184, #226)
     borrowed_ram: bool = False  # this run started on RAM other jobs reserved but weren't using
     no_borrow: bool = False  # must start within RAM nobody reserved (after the machine ran out once)
     evicted: bool = False  # stopped by dibs to give borrowed RAM back under memory pressure (#114)
@@ -141,6 +142,34 @@ def compute_tag(
     num, den = PRIORITY_SHARE[priority]
     start = max(submitted, max(session_queued_tags, default=-math.inf))
     return max(submitted, start + owed + estimate * num / den)
+
+
+def folder_places(jobs: Iterable["Job"], place_of: Callable[[str], str], offsets: Mapping[str, float]) -> dict[int, tuple[float, float]]:
+    """Each waiting job's place among its session's folders, with and without its priority (#226): a coding
+    agent's subagents share their session's id, so its folders take turns at the session's places.
+    Each folder's jobs line up as a session's do (compute_tag): in the order they came, behind the
+    folder's jobs of at least their priority, and ahead of its lower-priority ones, which move back by
+    their counted time. A folder's offset, what its boosts that passed a sibling saved, moves the start
+    of every one of its jobs back once. A folder that had nothing waiting counts from its own submit."""
+    by_place: dict[str, list[Job]] = {}
+    for j in jobs:
+        by_place.setdefault(place_of(j.cwd), []).append(j)
+    places: dict[int, list[float]] = {}
+    for place, own in by_place.items():
+        offset = offsets.get(place, 0.0)
+        lined: list[Job] = []
+        for j in sorted(own, key=lambda j: (j.submitted, j.id)):
+            counted = j.own_time if j.own_time is not None else j.request.time
+            backlog = [places[r.id][1] for r in lined if r.priority >= j.priority]
+            start = max([j.submitted + offset, *backlog])
+            for r in lined:
+                if r.priority < j.priority and places[r.id][1] > start:
+                    places[r.id][0] += counted
+                    places[r.id][1] += counted
+            places[j.id] = [compute_tag(j.submitted + offset, counted, backlog, j.priority, j.owed_carried),
+                            compute_tag(j.submitted + offset, counted, backlog)]  # fmt: skip
+            lined.append(j)
+    return {i: (tag, plain) for i, (tag, plain) in places.items()}
 
 
 def vram_to_ask(peak: int, gpu_vram: int | None, early: bool = False) -> str:
