@@ -7,7 +7,8 @@ from test_daemon import PY, finished, job, submit
 
 from dibs import snapshot
 from dibs.render import top_screen
-from dibs.units import GiB
+from dibs.model import State
+from dibs.units import GiB, MiB
 
 SLEEP = [PY, "-c", "import time; time.sleep(30)"]
 
@@ -102,5 +103,46 @@ def test_dibs_top_shows_the_disk_line(make_daemon, tmp_path):
     assert snap["disk"].startswith("the disk has 4G free")
     screen, _, _ = top_screen(snap, width=160, height=60, color=False)
     assert "disk: the disk has 4G free" in screen
+    d.cancel([j])
+    run_until(d, lambda: finished(d, j))
+
+
+def test_the_job_writing_most_of_the_drop_is_stopped_when_the_disk_is_nearly_full(make_daemon, tmp_path):
+    # Issue #224: two jobs once wrote 13.7G in an hour and filled the disk, and agent CLIs crash when it
+    # is full. Under 1G free, the job that wrote at least half of the last 10 minutes' drop is stopped.
+    d = make_daemon()
+    j = submit(d, tmp_path, SLEEP, name="bench", retry=True)
+    _feed(d, [(1000.0, 3 * GiB, {j: 0}), (1300.0, 800 * MiB, {j: int(2.2 * GiB)})])
+    assert job(d, j).stop_reason == "stopped: it wrote 2.2G in the last 5 minutes, and the disk had 800M free"
+    run_until(d, lambda: finished(d, j))
+    ended = job(d, j)
+    assert ended.state == State.FAILED and ended.reason == ended.stop_reason
+    assert ended.attempts == []  # --retry doesn't run it again: it would fill the disk again
+
+
+def test_no_job_is_stopped_when_the_disk_fills_from_outside_dibs(make_daemon, tmp_path):
+    d = make_daemon()
+    j = submit(d, tmp_path, SLEEP)
+    _feed(d, [(1000.0, 3 * GiB, {j: 0}), (1300.0, 800 * MiB, {j: 300 * MiB})])
+    assert job(d, j).stop_reason is None and job(d, j).state == State.RUNNING
+    d.cancel([j])
+    run_until(d, lambda: finished(d, j))
+
+
+def test_no_job_is_stopped_while_the_disk_has_a_gigabyte_free(make_daemon, tmp_path):
+    d = make_daemon()
+    j = submit(d, tmp_path, SLEEP)
+    _feed(d, [(1000.0, 5 * GiB, {j: 0}), (1300.0, int(1.5 * GiB), {j: int(3.5 * GiB)})])
+    assert job(d, j).stop_reason is None  # only the warning
+    d.cancel([j])
+    run_until(d, lambda: finished(d, j))
+
+
+def test_what_a_job_wrote_more_than_ten_minutes_ago_doesnt_stop_it(make_daemon, tmp_path):
+    d = make_daemon()
+    j = submit(d, tmp_path, SLEEP)
+    _feed(d, [(1000.0, 9 * GiB, {j: 0}), (1600.0, 3 * GiB, {j: 6 * GiB}),
+              (2200.0, 900 * MiB, {j: int(6.1 * GiB)})])  # fmt: skip
+    assert job(d, j).stop_reason is None  # the last 10 minutes' drop came from elsewhere
     d.cancel([j])
     run_until(d, lambda: finished(d, j))

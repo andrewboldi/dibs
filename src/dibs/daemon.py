@@ -63,6 +63,8 @@ DISK_WINDOW = 1800.0  # seconds: how far back a disk's drop, and what the jobs w
 DISK_LOW = 5 * GiB  # bytes: under this much free, every dibs command says so
 DISK_DROP = GiB // 2  # bytes: a smaller drop than this isn't explained
 DISK_TELL_EVERY = 3600.0  # seconds: the session that used the drop is told at most this often
+DISK_STOP_FREE = GiB  # bytes: under this much free, the job that wrote most of the drop is stopped (#224)
+DISK_STOP_WINDOW = 600.0  # seconds: the drop, and what each job wrote, that a stop looks at
 PRESSURE_LIMIT = 10.0  # percent (PSI some avg10): above it, no job starts on borrowed RAM
 EVICT_PRESSURE = procs.SHORT_PRESSURE  # percent: memory pressure this high for EVICT_AFTER stops a borrower (#114)
 EVICT_AFTER = 10.0  # seconds
@@ -1497,6 +1499,7 @@ class Daemon:
                 samples.popleft()
             if not samples:
                 del self._writes[job_id]
+        self._stop_disk_writer(now, jobs)
         self._disk_line, told = self._disk_report(jobs)
         if told:
             session, message = told
@@ -1504,6 +1507,44 @@ class Daemon:
             if now - float(self.store.get_meta(key) or -math.inf) >= DISK_TELL_EVERY:
                 self.store.set_meta(key, repr(now))
                 self.store.add_event("disk_writer", {"session": session, "message": message}, now)
+
+    def _stop_disk_writer(self, now: float, jobs: list[Job]) -> None:
+        """Under DISK_STOP_FREE free on a disk, stop the running job there that wrote at least half of its
+        drop over the last DISK_STOP_WINDOW, before the disk fills: programs that can't write then fail,
+        agent CLIs among them (#224). A disk filling from outside dibs stops no job, and --retry doesn't
+        run the stopped one again."""
+        for dev, samples in self._disk.items():
+            recent = [s for s in samples if s[0] >= now - DISK_STOP_WINDOW]
+            (t0, free0), (t1, free) = recent[0], recent[-1]
+            if free >= DISK_STOP_FREE or free0 <= free or t1 - t0 < 60:
+                continue
+            wrote = {}
+            for job in jobs:
+                if job.state == State.RUNNING and job.stop_reason is None and self._on_disk(job, dev):
+                    counts = [w for t, w in self._writes.get(job.id, ()) if t >= now - DISK_STOP_WINDOW]
+                    if len(counts) >= 2:
+                        wrote[job.id] = counts[-1] - counts[0]
+            top = max(wrote, key=wrote.__getitem__, default=None)
+            if top is None or wrote[top] < (free0 - free) / 2:
+                continue
+            job = next(j for j in jobs if j.id == top)
+            job.stop_reason = (f"stopped: it wrote {format_size(wrote[top])} in the last {max(1, round((t1 - t0) / 60))} "
+                               f"minutes, and the disk had {format_size(free)} free")  # fmt: skip
+            job.stop_requested = now
+            self.store.update_job(job)
+            log.info("job %d %s", job.id, job.stop_reason)
+            self._push_stop(job, now)
+
+    @staticmethod
+    def _on_disk(job: Job, dev: int) -> bool:
+        """Whether the job's folder or its output is on this disk."""
+        for path in (job.cwd, os.path.dirname(job.output or "")):
+            try:
+                if os.stat(path).st_dev == dev:
+                    return True
+            except OSError:
+                continue
+        return False
 
     def _disk_report(self, jobs: list[Job]) -> tuple[str | None, tuple[str, str] | None]:
         """The line every command says while a disk is low, and (session, what it's told) when one
