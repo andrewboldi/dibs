@@ -1708,8 +1708,9 @@ class Daemon:
         """Bytes of a job's --snapshot copy, from the list of files it copied (#172)."""
         if job.id not in self._copy_sizes:
             try:
-                files = json.loads((self.paths.job_dir(job.id) / "snapshot" / snapshot.MANIFEST).read_text())["files"]
-                self._copy_sizes[job.id] = sum(size for size, _ in files.values())
+                taken = json.loads((self.paths.job_dir(job.id) / "snapshot" / snapshot.MANIFEST).read_text())
+                # What it copied, not what it shares with an earlier copy (#233); older copies shared nothing.
+                self._copy_sizes[job.id] = taken.get("copied", sum(size for size, _ in taken["files"].values()))
             except (OSError, ValueError, KeyError, TypeError):
                 return 0
         return self._copy_sizes[job.id]

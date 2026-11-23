@@ -115,3 +115,67 @@ def test_the_snapshot_help_says_what_still_points_at_the_real_files():
 
     assert "~/ paths in a shell string and paths in environment variables still point at the real files" in " ".join(
         AGENT_HELP.split())
+
+
+def _live_copy(paths, root, job_id):
+    """A copy staged and moved into a job's folder, as the daemon does at submit."""
+    staged = snapshot.stage(paths, str(root))
+    paths.job_dir(job_id).mkdir(parents=True, exist_ok=True)
+    os.rename(staged, paths.job_dir(job_id) / "snapshot")
+    return paths.job_dir(job_id) / "snapshot" / "tree"
+
+
+def _paths(tmp_path):
+    from dibs.paths import ensure_dirs, get_paths
+
+    paths = get_paths({"DIBS_HOME": str(tmp_path / "home"), "HOME": str(tmp_path)})
+    ensure_dirs(paths)
+    return paths
+
+
+def test_a_copy_shares_unchanged_files_with_the_newest_copy_and_copies_the_rest(tmp_path):
+    # Issue #233: seven waiting jobs' copies of one repository took 755M each, 5G in 12 minutes.
+    import json
+
+    root, paths = _repo(tmp_path), _paths(tmp_path)
+    first = _live_copy(paths, root, 1)
+    (root / "train.py").write_text("print('changed')\n")  # edited between the two submits
+    second = _live_copy(paths, root, 2)
+    same = lambda rel: os.stat(first / rel).st_ino == os.stat(second / rel).st_ino  # noqa: E731
+    assert same("src/model.py") and same("notes.py") and not same("train.py")
+    assert (second / "train.py").read_text() == "print('changed')\n"
+    assert not os.access(second / "src" / "model.py", os.W_OK)  # shared, so nobody writes it in place
+    assert os.stat(root / "src" / "model.py").st_ino not in (os.stat(first / "src" / "model.py").st_ino,)  # never the repository's
+    manifest = json.loads((paths.job_dir(2) / "snapshot" / snapshot.MANIFEST).read_text())
+    assert manifest["copied"] == len("print('changed')\n")  # only what it copied
+    assert snapshot.clear(paths.job_dir(2) / "snapshot") is None  # shared files aren't taken for written ones
+    assert (first / "src" / "model.py").read_text() == "SIZE = 2\n"  # the other copy keeps its files
+
+
+def test_a_file_changed_in_the_old_copy_is_copied_not_shared(tmp_path):
+    root, paths = _repo(tmp_path), _paths(tmp_path)
+    first = _live_copy(paths, root, 1)
+    (first / "notes.py").write_text("a job wrote here\n")
+    second = _live_copy(paths, root, 2)
+    assert os.stat(first / "notes.py").st_ino != os.stat(second / "notes.py").st_ino
+    assert (second / "notes.py").read_text() == "new, not yet added\n"
+
+
+def test_a_file_that_cant_be_linked_is_copied(tmp_path, monkeypatch):
+    root, paths = _repo(tmp_path), _paths(tmp_path)
+    _live_copy(paths, root, 1)
+
+    def refuse(*a, **k):
+        raise OSError("the old copy went meanwhile")
+
+    monkeypatch.setattr(snapshot.os, "link", refuse)
+    second = _live_copy(paths, root, 2)
+    assert (second / "src" / "model.py").read_text() == "SIZE = 2\n"
+
+
+def test_shared_files_dont_count_against_the_free_disk_a_copy_needs(tmp_path, monkeypatch):
+    root, paths = _repo(tmp_path), _paths(tmp_path)
+    _live_copy(paths, root, 1)
+    size = sum(os.lstat(root / f).st_size for f in (".gitignore", "notes.py", "src/model.py", "train.py"))
+    monkeypatch.setattr(snapshot.shutil, "disk_usage", lambda p: type("u", (), {"free": 2 * GiB + size - 1})())
+    _live_copy(paths, root, 2)  # nothing changed: it copies nothing, so it fits
