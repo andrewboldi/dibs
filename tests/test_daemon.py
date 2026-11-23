@@ -1637,6 +1637,28 @@ def test_a_waiting_jobs_view_names_the_job_past_its_estimate_it_waits_for(make_d
     run_until(d, lambda: finished(d, running))
 
 
+def test_submits_first_line_says_when_earlier_runs_used_far_less_ram():
+    # Issue #212: agents keep only the first line of submit's output, and act on what it says.
+    from dibs.model import Job, Request, State, job_to_dict
+    from dibs.render import render_submit
+
+    t = 1_000_000.0
+    job = Job(id=31, name="game", argv=["python", "game.py"], cwd="/w", env={}, session="s", session_label="w·s",
+              request=Request(cpus=1, mem=5 * GiB, gpus=0, vram=0, time=600.0), submitted=t, tag=t + 600,
+              state=State.QUEUED, output="/w/out")  # fmt: skip
+    sizing = {"runs": 5, "peak": 1 * GiB, "suggest": int(1.5 * GiB)}
+    queued = {**job_to_dict(job), "position": 3, "predicted_start": t + 600, "predicted_end": t + 1200,
+              "waiting_for": "needs 5G RAM (2G free)", "lacks": ["RAM"], "behind": None, "sizing": sizing}  # fmt: skip
+    first = render_submit(queued, t).splitlines()[0]
+    assert first.startswith("Job 31 (game) queued: 3rd in line, expected to start")
+    assert first.endswith(" Its last 5 runs peaked at 1G: --mem 1.5G would start it sooner (--replace 31 keeps its place).")
+    started = {**queued, "state": "running", "started": t}
+    assert render_submit(started, t).splitlines()[0] == (
+        "Job 31 (game) started. Its last 5 runs peaked at 1G: --mem 1.5G would do."
+    )
+    assert "peaked" not in render_submit({**queued, "sizing": None}, t)
+
+
 def test_a_start_waiting_on_a_job_past_its_estimate_is_shown_as_that_job_ending():
     from dibs.model import Job, Request, State, job_to_dict
     from dibs.render import _when_cell, render_show, render_submit, top_screen

@@ -48,7 +48,7 @@ from dibs.model import (
 from dibs.paths import Paths, ensure_dirs, get_paths
 from dibs.planner import Plan, Queued, Running, plan
 from dibs.store import Store
-from dibs.units import GiB, format_duration, format_size, format_size_against, parse_size, suggest_size
+from dibs.units import GiB, format_duration, format_size, format_size_against, parse_size, suggest_mem, suggest_size
 
 KILL_AFTER = 10.0  # seconds between asking a job to stop (SIGTERM) and forcing it (SIGKILL)
 OWED_FOR = 86400.0  # seconds: what a session owes (or is owed) for its priorities lapses after a day
@@ -386,6 +386,8 @@ class Daemon:
             self.store.update_job(replaced)
         self.schedule()
         response = self.show(job.id)
+        if sizing := self._sizing(job):  # on submit's first line, the one line agents keep (#212)
+            response["job"]["sizing"] = sizing
         self._advise(job, response["job"], now)
         if replaced is not None:
             response["replaced"] = replaced.id
@@ -788,6 +790,18 @@ class Daemon:
         runs, _ = self._earlier(cwd, argv, session, lambda j: j.peak_mem)
         return max((j.peak_mem for j in runs), default=None)
 
+    def _sizing(self, job: Job) -> dict | None:
+        """When the job's last ADVISE_RUNS or more runs say its RAM request could be a quarter smaller or more:
+        {"runs", "peak", "suggest"}, where suggest is their peak plus a quarter (#212)."""
+        runs, _ = self._earlier(job.cwd, job.argv, job.session, lambda j: j.peak_mem)
+        if len(runs) < ADVISE_RUNS:
+            return None
+        peak = max(j.peak_mem for j in runs)
+        suggest = suggest_mem(peak)
+        if suggest > job.request.mem * 0.75:
+            return None
+        return {"runs": len(runs), "peak": peak, "suggest": suggest}
+
     def _earlier(self, cwd: str, argv: list[str], session: str, keep, limit: int = 6) -> tuple[list[Job], str]:
         """Earlier runs to size a job from, newest first, and what they match: runs of the same command
         here ("command"), else of the same script here with other arguments ("script"), else the
@@ -1119,10 +1133,10 @@ class Daemon:
                              f"command (#{last[0].id}) was killed at its {format_size(limit)} RAM limit"
                              + (f"; dibs suggested --mem {format_size(more)}" if more else "")
                              + f". dibs submit --replace {job.id} with more RAM fixes it before it runs."))  # fmt: skip
-        peaks = [r.peak_mem for r in runs if r.peak_mem]
-        if "RAM" in (view.get("lacks") or []) and len(peaks) >= ADVISE_RUNS and max(peaks) < req.mem / 2:
-            said.append(("ram_high", f"Job {job.id} waits for {format_size(req.mem)} of RAM; the last {len(peaks)} runs of "
-                         f"{name} peaked at {format_size(max(peaks))} at most: --mem {format_size(suggest_size(max(peaks)))} "
+        sizing = view.get("sizing")
+        if "RAM" in (view.get("lacks") or []) and sizing:  # the rule on submit's first line (#212)
+            said.append(("ram_high", f"Job {job.id} waits for {format_size(req.mem)} of RAM; the last {sizing['runs']} runs of "
+                         f"{name} peaked at {format_size(sizing['peak'])} at most: --mem {format_size(sizing['suggest'])} "
                          f"would do (dibs submit --replace {job.id})."))  # fmt: skip
         if req.gpus:
             vram = [r.peak_vram for r in runs if r.peak_vram is not None and r.request.gpus]
