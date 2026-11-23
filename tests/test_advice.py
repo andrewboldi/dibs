@@ -1,6 +1,8 @@
 """Telling an agent, at its other dibs commands, when a request doesn't match how the same script ran
 before (#169): told once, at most once an hour per script for each kind."""
 
+import time
+
 from conftest import capacity, run_until
 from test_daemon import PY, finished, job, submit
 
@@ -8,11 +10,11 @@ from dibs.model import Job, Request, State
 from dibs.units import GiB, MiB
 
 
-def _runs(d, tmp_path, script, n, *, request=None, ran=480.0, state=State.DONE, **fields):
+def _runs(d, tmp_path, script, n, *, request=None, ran=480.0, state=State.DONE, start=1_000_000.0, **fields):
     """n finished runs of `script` here, newest last."""
     req = {"cpus": 1, "mem": 5 * GiB, "gpus": 0, "vram": 0, "time": 600.0, **(request or {})}
     for i in range(n):
-        t = 1_000_000.0 + i * 1000
+        t = start + i * 1000
         d.store.add_job(Job(id=0, name="run", argv=[PY, str(script), str(i)], cwd=str(tmp_path), env={},
                             request=Request(**req), session="s1", session_label="w·s1", submitted=t, tag=t + 600,
                             state=state, output="/dev/null", started=t, ended=t + ran, exit_code=0, **fields))  # fmt: skip
@@ -61,6 +63,22 @@ def test_a_job_waiting_for_ram_far_above_what_its_scripts_runs_used_is_told(make
     (told,) = _advice(d)
     assert f"Job {waiting} waits for 5G of RAM" in told and "the last 5 runs of train.py peaked at 1G at most" in told
     assert "--mem 2G would do" in told
+    go.touch()
+    run_until(d, lambda: finished(d, holder) and finished(d, waiting))
+
+
+def test_runs_of_the_same_script_in_the_sessions_other_folders_count(make_daemon, tmp_path):
+    # Issue #229: a batch submitted from a fresh copy of the code is told what the copies before it used.
+    d = make_daemon(cap=capacity(mem=8 * GiB))
+    (tmp_path / "old").mkdir()
+    (tmp_path / "new").mkdir()
+    _runs(d, tmp_path / "old", _script(tmp_path / "old"), 5, peak_mem=1 * GiB, start=time.time() - 86400)
+    go = tmp_path / "go"
+    holder = submit(d, tmp_path, [PY, "-c", f"import os, time\nwhile not os.path.exists({str(go)!r}): time.sleep(0.02)"],
+                    mem=5 * GiB, session="s0")  # fmt: skip
+    waiting = submit(d, tmp_path / "new", [PY, str(_script(tmp_path / "new")), "9"], mem=5 * GiB, session="s1")
+    (told,) = _advice(d)
+    assert f"Job {waiting} waits for 5G of RAM" in told and "the last 5 runs of train.py peaked at 1G at most" in told
     go.touch()
     run_until(d, lambda: finished(d, holder) and finished(d, waiting))
 

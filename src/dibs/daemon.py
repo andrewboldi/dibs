@@ -41,6 +41,7 @@ from dibs.model import (
     next_owed,
     job_to_dict,
     resolve_request,
+    script_name,
     script_of,
     vram_to_ask,
 )
@@ -56,6 +57,7 @@ JOBS_RAM_WINDOW = 10.0  # seconds: RAM dibs jobs hold counts as its peak over th
 RETENTION_EVERY = 3600.0
 MAX_RETRIES = 2  # runs again after a resource failure, at most (#84)
 YOUNG = 600.0  # seconds: a job with no earlier runs counts at its whole RAM reservation this long (#86)
+SESSION_RUNS_AGE = 7 * 86400.0  # seconds: how far back a session's runs in other folders count (#229)
 PRESSURE_LIMIT = 10.0  # percent (PSI some avg10): above it, no job starts on borrowed RAM
 EVICT_PRESSURE = procs.SHORT_PRESSURE  # percent: memory pressure this high for EVICT_AFTER stops a borrower (#114)
 EVICT_AFTER = 10.0  # seconds
@@ -358,8 +360,8 @@ class Daemon:
             retry=req.get("retry") is True,  # the agent's choice: only it knows the job is safe to repeat (#116)
             owed_carried=carried,
             owed_left=left,
-            history_mem=self._history_mem(cwd, list(argv)),
-            history_vram=self._history_vram(cwd, list(argv), request),
+            history_mem=self._history_mem(cwd, list(argv), session),
+            history_vram=self._history_vram(cwd, list(argv), request, session),
             state=State.QUEUED,
             output=output or "",
         )
@@ -389,12 +391,7 @@ class Daemon:
             response["replaced"] = replaced.id
             response["kept_place"] = keeps
         # What the same command used before, so the agent can size its next request from it.
-        earlier = [j for j in self.store.earlier_runs(job.cwd, job.argv, limit=6) if j.started is not None]
-        match = "command"
-        script = script_of(job.argv)
-        if not earlier and script:  # none of this exact command: the same script with other arguments
-            earlier = [j for j in self.store.earlier_runs_of_script(job.cwd, script, limit=6) if j.started is not None]
-            match = "script"
+        earlier, match = self._earlier(job.cwd, job.argv, session, lambda j: j.started is not None)
         response["earlier"] = [job_to_dict(j) for j in earlier[:3]]
         response["earlier_match"] = match
         # How the session's recent estimates compared with real run times (#95): feedback only, the
@@ -771,15 +768,12 @@ class Daemon:
             self._holders = (now, holders, procs.tmp_files())
         return self._holders[1], self._holders[2]
 
-    def _history_vram(self, cwd: str, argv: list[str], request: Request) -> int | None:
+    def _history_vram(self, cwd: str, argv: list[str], request: Request, session: str) -> int | None:
         """The most GPU memory earlier runs of the same command here (or the same script) held, at most a
         GPU's worth, for a job that asks for a GPU (#183); None for one that doesn't."""
         if not request.gpus:
             return None
-        runs = [j for j in self.store.earlier_runs(cwd, argv, limit=6) if j.peak_vram]
-        script = script_of(argv)
-        if not runs and script:
-            runs = [j for j in self.store.earlier_runs_of_script(cwd, script, limit=6) if j.peak_vram]
+        runs, _ = self._earlier(cwd, argv, session, lambda j: j.peak_vram)
         most = max((j.peak_vram for j in runs), default=0)
         return min(most, max((g.vram for g in self.capacity.gpus), default=0)) or None
 
@@ -789,13 +783,29 @@ class Daemon:
         ran = now - (job.started or now) - self._asleep(job)
         return job.history_vram if job.history_vram and ran < YOUNG else None
 
-    def _history_mem(self, cwd: str, argv: list[str]) -> int | None:
+    def _history_mem(self, cwd: str, argv: list[str], session: str) -> int | None:
         """The peak RAM of earlier runs of the same command here (or the same script), if any."""
-        runs = [j for j in self.store.earlier_runs(cwd, argv, limit=6) if j.peak_mem]
-        script = script_of(argv)
-        if not runs and script:
-            runs = [j for j in self.store.earlier_runs_of_script(cwd, script, limit=6) if j.peak_mem]
+        runs, _ = self._earlier(cwd, argv, session, lambda j: j.peak_mem)
         return max((j.peak_mem for j in runs), default=None)
+
+    def _earlier(self, cwd: str, argv: list[str], session: str, keep, limit: int = 6) -> tuple[list[Job], str]:
+        """Earlier runs to size a job from, newest first, and what they match: runs of the same command
+        here ("command"), else of the same script here with other arguments ("script"), else the
+        session's recent runs of a script of the same file name in any folder ("session"), since agents
+        submit from fresh copies of their code (#229). Only runs `keep` accepts count."""
+        runs = [j for j in self.store.earlier_runs(cwd, argv, limit=limit) if keep(j)]
+        if runs:
+            return runs, "command"
+        script = script_of(argv)
+        if script:
+            runs = [j for j in self.store.earlier_runs_of_script(cwd, script, limit=limit) if keep(j)]
+            if runs:
+                return runs, "script"
+            since = self.clock() - SESSION_RUNS_AGE
+            runs = [j for j in self.store.earlier_runs_in_session(session, script_name(argv), since, limit=limit) if keep(j)]
+            if runs:
+                return runs, "session"
+        return [], "command"
 
     def _borrowing(self) -> bool:
         """Whether jobs may start on RAM other jobs reserved but aren't using (#86): unless switched off,
@@ -1096,7 +1106,10 @@ class Daemon:
         name = os.path.basename(script) if script and not script.startswith("-m ") else (script or os.path.basename(job.argv[0]))
         by_command = self.store.earlier_runs(job.cwd, job.argv, limit=6)
         by_script = self.store.earlier_runs_of_script(job.cwd, script, limit=6) if script else []
-        runs, req, said = by_script or by_command, job.request, []
+        by_session = []
+        if script and not (by_command or by_script):  # a fresh copy of the code: the session's other folders (#229)
+            by_session = self.store.earlier_runs_in_session(job.session, script_name(job.argv), now - SESSION_RUNS_AGE, limit=6)
+        runs, req, said = by_script or by_command or by_session, job.request, []
         last = (by_command or by_script)[:1]
         if last and last[0].state == State.FAILED and (last[0].reason or "").startswith("killed: went over its"):
             limit = max(last[0].request.mem, last[0].ram_limit or 0)
