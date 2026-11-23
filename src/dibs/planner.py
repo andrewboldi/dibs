@@ -29,6 +29,7 @@ class Running:
     cpu_ids: tuple[int, ...]
     gpu_ids: tuple[int, ...]
     started: float
+    longest: float | None = None  # the longest earlier run of the same script with the same estimate (#227)
 
 
 @dataclass(frozen=True)
@@ -72,14 +73,16 @@ class Plan:
 def expected_end(job: Running, now: float) -> float:
     """When a running job should end. Past its estimate, it's assumed to need a little longer; once it
     has run three times its estimate, as long again as it has run past it (#185): "a little longer"
-    is wrong pass after pass then, and holds back every job that would still be running at that end."""
+    is wrong pass after pass then, and holds back every job that would still be running at that end.
+    And at least as long as the longest earlier run like it, when there's one (#227): a big job waiting
+    for it then isn't planned to start within minutes, pass after pass, holding back every shorter one."""
     end = job.started + job.request.time
     if end > now:
         return end
     longer = max(OVERRUN_MIN, OVERRUN_FRACTION * job.request.time)
     if now - job.started >= OVERRUN_LONG * job.request.time:
         longer = max(longer, now - end)
-    return now + longer
+    return max(now + longer, job.started + (job.longest or 0.0))
 
 
 class _Profile:
