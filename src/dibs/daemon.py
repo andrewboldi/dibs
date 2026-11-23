@@ -122,7 +122,7 @@ def _ram_kill_reason(job: Job, result: dict) -> str:
         if job.ram_limit and job.ram_limit > job.request.mem:  # a grown job is the kernel's first pick (#155)
             borrowed += f", after its limit grew past its {format_size(job.request.mem)} reservation"
         return "killed when the machine ran out of RAM" + borrowed
-    if job.hard_limit and job.hard_limit > max(job.request.mem, job.ram_limit or 0):  # its headroom (#249)
+    if job.hard_limit and job.hard_limit > job.request.mem and job.hard_limit >= (job.ram_limit or 0):  # its headroom (#249)
         return (f"killed: went over its RAM limit of {format_size(job.hard_limit)} ({format_size(job.request.mem)} "
                 "reserved, the rest room dibs gave it while the machine had RAM free)" + _shared_part(job))  # fmt: skip
     if job.ram_limit and job.ram_limit > job.request.mem:  # it had grown into RAM nobody reserved (#155)
@@ -1224,7 +1224,12 @@ class Daemon:
         if not info or not self.config.borrow_ram or self.pressure() >= MARGIN_PRESSURE:
             return 0, 0
         unused = sum(j.hard_limit - _limit(j) for j in running if j.hard_limit and j.hard_limit > _limit(j))
-        return info[0] - info[1] - unused, int(info[0] * MARGIN_KEEP)
+        # A young job with no earlier runs may still be growing into its request, which free memory
+        # doesn't show yet: the plan counts it whole, and so does this (#249).
+        now = self.clock()
+        growing = sum(max(0, j.request.mem - (self._held.get(j.id) or 0)) for j in running
+                      if not j.history_mem and now - (j.started or now) - self._asleep(j) < YOUNG)  # fmt: skip
+        return info[0] - info[1] - unused - growing, int(info[0] * MARGIN_KEEP)
 
     def notices(self, session: str, now: float, seen: Sequence[int] = (), at_submit: bool = False,
                 cwd: str | None = None) -> dict:  # fmt: skip
@@ -1309,7 +1314,7 @@ class Daemon:
         runs, req, said = by_script or by_command or by_session, job.request, []
         last = (by_command or by_script)[:1]
         if last and last[0].state == State.FAILED and (last[0].reason or "").startswith("killed: went over its"):
-            limit = max(last[0].request.mem, last[0].ram_limit or 0)
+            limit = max(last[0].request.mem, last[0].ram_limit or 0, last[0].hard_limit or 0)
             if req.mem <= limit:
                 more = self._more_ram(last[0])
                 said.append(("ram_kill", f"Job {job.id} asks for {format_size(req.mem)} of RAM, and the last run of this "

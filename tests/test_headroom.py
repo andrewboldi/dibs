@@ -86,9 +86,10 @@ def test_a_kill_at_the_headroom_limit_names_it():
     j = Job(id=1, name="x", argv=["x"], cwd="/w", env={}, session="s", session_label="w·s",
             request=Request(cpus=1, mem=2 * GiB, gpus=0, vram=0, time=60.0), submitted=0.0, tag=0.0,
             state=State.RUNNING, output="/dev/null", hard_limit=3 * GiB)  # fmt: skip
-    assert _ram_kill_reason(j, {"hit_limit": True}).startswith(
-        "killed: went over its RAM limit of 3G (2G reserved, the rest room dibs gave it while the machine had RAM free)"
-    )
+    said = "killed: went over its RAM limit of 3G (2G reserved, the rest room dibs gave it while the machine had RAM free)"
+    assert _ram_kill_reason(j, {"hit_limit": True}).startswith(said)
+    j.ram_limit = 3 * GiB  # its use of the headroom recorded: the same limit, the same words
+    assert _ram_kill_reason(j, {"hit_limit": True}).startswith(said)
 
 
 def test_the_help_says_a_job_has_a_step_of_room_past_its_mem_while_ram_is_free():
@@ -96,3 +97,24 @@ def test_the_help_says_a_job_has_a_step_of_room_past_its_mem_while_ram_is_free()
 
     text = " ".join(AGENT_HELP.split())
     assert "While the machine has RAM free, a job's limit sits a step (a quarter of --mem, at least 1G) above it" in text
+    assert "so a quick jump past --mem isn't killed before dibs can count it" in text
+
+
+def test_a_young_jobs_unallocated_request_counts_against_headroom_in_later_passes(make_daemon, tmp_path, monkeypatch):
+    # Free memory lags a young job: it hasn't allocated its request yet. Job b, started a pass after a,
+    # mustn't get headroom out of RAM a is about to use.
+    d, limits = _daemon(make_daemon, monkeypatch, used=10 * GiB)  # 6G available
+    hold = [PY, "-c", "import time; time.sleep(30)"]
+    a = submit(d, tmp_path, hold, mem=2 * GiB)  # 6 - 2 leaves 4: a 1G step fits
+    assert limits[a] == 3 * GiB
+    b = submit(d, tmp_path, [*hold, "b"], mem=2 * GiB)  # 6 - a's unused 1G step - a's 2G not yet used - 2
+    assert limits[b] is None
+    d.cancel([b])
+    run_until(d, lambda: finished(d, b))
+    started = job(d, a)
+    started.history_mem = GiB  # with earlier runs to go by, a counts at what it uses, as the plan counts it
+    d.store.update_job(started)
+    c = submit(d, tmp_path, [*hold, "c"], mem=2 * GiB)
+    assert limits[c] == 3 * GiB
+    d.cancel([a, b, c])
+    run_until(d, lambda: all(finished(d, j) for j in (a, b, c)))

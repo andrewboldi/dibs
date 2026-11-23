@@ -50,8 +50,8 @@ when those resources are free, so jobs never crash each other by running out of 
   set to N.
 - `--mem SIZE`: RAM, like 16G or 512M. Where the system allows it, a job that goes over is killed,
   all of it, even when only one of its processes went over. While the machine has RAM free, a job's
-  limit sits a step (a quarter of --mem, at least 1G) above it, so a quick jump past --mem lasts
-  until dibs counts it.
+  limit sits a step (a quarter of --mem, at least 1G) above it, so a quick jump past --mem isn't
+  killed before dibs can count it.
   While a running job uses less than it reserved, dibs may start other jobs in the difference; if
   the machine then runs short, a job started that way is the one stopped: with --retry dibs runs it
   again, otherwise it fails with a note to resubmit it. A job that nears its --mem may grow past it
@@ -114,7 +114,7 @@ when those resources are free, so jobs never crash each other by running out of 
   job first and size the rest from its peak.
 - Don't pad a request. RAM a job reserves but doesn't use holds back every job behind it, your own
   included. A job that nears its --mem is given more when the machine has RAM to spare, but one
-  whose memory jumps past it faster than dibs can act is killed at it: add `--retry` to a tightly
+  whose memory jumps past that room faster than dibs can act is killed: add `--retry` to a tightly
   sized job that is safe to run again, and dibs runs it again with more. Size a script whose memory
   depends on its input from the run with its largest input. To shrink a job that is still waiting
   without losing its place, submit the same command with a smaller --mem and `--replace ID`.

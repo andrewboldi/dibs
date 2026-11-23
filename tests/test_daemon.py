@@ -1466,7 +1466,7 @@ def test_a_restart_lines_every_session_up_again(daemon, tmp_path):
     daemon.cancel([hold, b])
 
 
-def _growing(make_daemon, tmp_path, monkeypatch, *, mem=8 * GiB, ok=True, setter=True, retry=False):
+def _growing(make_daemon, tmp_path, monkeypatch, *, mem=8 * GiB, ok=True, setter=True, retry=False, config=None):
     """A running job reserving `mem` of a 16G machine, 1G of it in use outside dibs, and the limits dibs
     gives it (recorded, never set for real: the jobs here have no scopes)."""
     state, limits = {"held": 1 * GiB}, []
@@ -1475,7 +1475,10 @@ def _growing(make_daemon, tmp_path, monkeypatch, *, mem=8 * GiB, ok=True, setter
         limits.append((j.id, limit))
         return ok
 
-    d = make_daemon(meminfo=lambda: (16 * GiB, state["held"] + 1 * GiB), set_mem_limit=set_limit if setter else None)
+    from dibs.machine import Config
+
+    d = make_daemon(config=config or Config(), meminfo=lambda: (16 * GiB, state["held"] + 1 * GiB),
+                    set_mem_limit=set_limit if setter else None)  # fmt: skip
     a, stat, go = _job_holding(d, tmp_path, monkeypatch, mem, retry=retry)
     run_until(d, lambda: launcher.job_pids(job(d, a)))  # its command runs: a job near its limit has processes
 
@@ -1529,7 +1532,10 @@ def test_a_job_grows_only_when_its_limit_can_really_be_raised(make_daemon, tmp_p
 
 
 def test_a_job_killed_at_a_raised_limit_says_so_and_what_to_ask_for(make_daemon, tmp_path, monkeypatch):
-    d, a, hold, limits, go = _growing(make_daemon, tmp_path, monkeypatch)
+    # Grown into RAM nobody reserved (#155). Borrowing off, so it isn't launched with headroom (#249).
+    from dibs.machine import Config
+
+    d, a, hold, limits, go = _growing(make_daemon, tmp_path, monkeypatch, config=Config(borrow_ram=False))
     hold(int(7.2 * GiB))
     real_read_exit = launcher.read_exit
     monkeypatch.setattr(

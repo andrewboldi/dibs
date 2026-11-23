@@ -98,6 +98,10 @@ def _no_lend(make_daemon, tmp_path, *, used, pressure=0.0, borrow=True):
     c = submit(d, tmp_path, [*holding, "c"], mem=6 * GiB)
     run_until(d, lambda: job(d, a).shim_pid and job(d, c).shim_pid)
     in_use[0] = used
+    for known in (a, c):  # with earlier runs: not young jobs that may still grow into their requests (#249)
+        j = job(d, known)
+        j.history_mem = GiB
+        d.store.update_job(j)
     d._outside_mem = lambda now, running: 1 * GiB
     d._planned_mem = lambda j, now: j.request.mem
     d._held = {a: int(7.2 * GiB)}
