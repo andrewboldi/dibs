@@ -332,3 +332,35 @@ def test_a_job_runs_with_first_claim_on_its_cores(paths):
     job = run(paths, make_job(paths, [PY, "-c", code]), use_systemd=True)
     wait_exit(paths, job)
     assert output(job).strip() == "1000"
+
+
+def _huge_pages_shown_by_a_job(tmp_path, monkeypatch, **launch):
+    """Start a job that prints THP_enabled from its /proc status, from a process that has huge pages on
+    (an agent's shell may have them off, and a job would inherit that), and return what it printed."""
+    import ctypes
+
+    libc = ctypes.CDLL(None, use_errno=True)
+    before = int(open("/proc/self/status").read().split("THP_enabled:")[1].split()[0])
+    libc.prctl(41, 0, 0, 0, 0)  # PR_SET_THP_DISABLE off for this process: what a daemon under systemd has
+    try:
+        paths = get_paths({"DIBS_HOME": str(tmp_path / "home"), "HOME": str(tmp_path)})
+        ensure_dirs(paths)
+        code = "print(open('/proc/self/status').read().split('THP_enabled:')[1].split()[0])"
+        job = make_job(paths, [sys.executable, "-c", code])
+        launcher.launch(job, paths, use_systemd=False, **launch)
+        deadline = time.time() + 10
+        while launcher.read_exit(paths, job.id) is None and time.time() < deadline:
+            time.sleep(0.05)
+        return open(job.output).read().strip()
+    finally:
+        libc.prctl(41, 0 if before else 1, 0, 0, 0)
+
+
+def test_jobs_get_no_transparent_huge_pages(tmp_path, monkeypatch):
+    # Issue #225: a job asking for a huge page the kernel can't find woke its reclaim, which pushed idle
+    # programs' memory to swap while RAM was free. Everything a job starts inherits the setting.
+    assert _huge_pages_shown_by_a_job(tmp_path, monkeypatch) == "0"
+
+
+def test_huge_pages_stay_on_when_the_config_keeps_them(tmp_path, monkeypatch):
+    assert _huge_pages_shown_by_a_job(tmp_path, monkeypatch, huge_pages=True) == "1"
