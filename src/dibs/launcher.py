@@ -162,7 +162,7 @@ def _write_private(path: Path, text: str) -> None:
 
 
 def launch(job: Job, paths: Paths, *, use_systemd: bool, vendor: str = "nvidia",
-           huge_pages: bool = False) -> tuple[int, int | None, str | None]:  # fmt: skip
+           huge_pages: bool = False, mem_limit: int | None = None) -> tuple[int, int | None, str | None]:  # fmt: skip
     """Start the job's shim, detached. Returns (shim pid, its start ticks, systemd unit or None)."""
     job_dir = paths.job_dir(job.id)
     job_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -191,7 +191,7 @@ def launch(job: Job, paths: Paths, *, use_systemd: bool, vendor: str = "nvidia",
     if unit:
         command = [
             "systemd-run", "--user", "--scope", "--quiet", "--collect", f"--unit={unit}",
-            *scope_properties(job.request.mem), "--", *command,
+            *scope_properties(mem_limit or job.request.mem), "--", *command,
         ]  # fmt: skip
     with open(job_dir / "shim.log", "ab") as log:
         child = subprocess.Popen(

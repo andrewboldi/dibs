@@ -122,10 +122,19 @@ def _ram_kill_reason(job: Job, result: dict) -> str:
         if job.ram_limit and job.ram_limit > job.request.mem:  # a grown job is the kernel's first pick (#155)
             borrowed += f", after its limit grew past its {format_size(job.request.mem)} reservation"
         return "killed when the machine ran out of RAM" + borrowed
+    if job.hard_limit and job.hard_limit > max(job.request.mem, job.ram_limit or 0):  # its headroom (#249)
+        return (f"killed: went over its RAM limit of {format_size(job.hard_limit)} ({format_size(job.request.mem)} "
+                "reserved, the rest room dibs gave it while the machine had RAM free)" + _shared_part(job))  # fmt: skip
     if job.ram_limit and job.ram_limit > job.request.mem:  # it had grown into RAM nobody reserved (#155)
         return (f"killed: went over its RAM limit of {format_size(job.ram_limit)} ({format_size(job.request.mem)} "
                 "reserved, the rest grown into RAM nobody reserved)" + _shared_part(job))  # fmt: skip
     return f"killed: went over its {format_size(job.request.mem)} RAM reservation" + _shared_part(job)
+
+
+def _room_for(step: int, spare: int, keep: int) -> bool:
+    """Whether the machine has room for one more step beyond what dibs planned: after it, at least
+    another step and `keep` still free (#228, #249)."""
+    return spare - step >= max(step, keep)
 
 
 def _limit(job: Job) -> int:
@@ -967,12 +976,21 @@ class Daemon:
         # using, as a borrower (#86), which a job retried after the machine ran out may not do. Any
         # job may borrow (#148): --retry decides whether one dibs has to stop runs again.
         unreserved = self.capacity.mem - self._outside_mem(now, running) - sum(_limit(j) for j in running)
+        spare, keep = self._spare(running)  # for headroom at launch (#249)
         for start in current.starts:
             job = by_id[start.job_id]
             borrowed = job.request.mem > unreserved
             if borrowed and job.no_borrow:
                 continue
             unreserved -= job.request.mem
+            # While the machine has RAM free, its hard limit sits a step above its request, which the plan
+            # still counts: a fast jump past the request is caught at dibs's next look (#249). What starts
+            # in this pass, and what it's given, comes off the free RAM first, so grants don't compound.
+            spare -= job.request.mem
+            step = max(GiB, int(job.request.mem * GROW_SHARE))
+            job.hard_limit = None
+            if not (job.request.exclusive or job.no_borrow or borrowed) and _room_for(step, spare, keep):
+                job.hard_limit, spare = job.request.mem + step, spare - step
             job.borrowed_ram = borrowed
             job.cpu_ids, job.gpu_ids = list(start.cpu_ids), list(start.gpu_ids)
             job.started, job.state = now, State.RUNNING
@@ -983,7 +1001,7 @@ class Daemon:
             try:
                 job.shim_pid, job.shim_ticks, job.unit = launcher.launch(
                     job, self.paths, use_systemd=self.use_systemd, vendor=getattr(self.backend, "vendor", "nvidia"),
-                    huge_pages=self.config.huge_pages,
+                    huge_pages=self.config.huge_pages, mem_limit=job.hard_limit,
                 )
             except Exception as e:  # anything that stops the launch fails this job, not the daemon
                 job.state, job.ended, job.exit_code = State.FAILED, now, 127
@@ -1155,10 +1173,20 @@ class Daemon:
         lend = lend if self._borrowing() else 0
         # Failing both, the margins dibs keeps over other jobs' peaks, when the machine really has room:
         # a kill at the limit loses the work for certain, and the margins may never be used (#228).
-        info = self._meminfo()
-        spare = info[0] - info[1] if info and self.config.borrow_ram and self.pressure() < MARGIN_PRESSURE else 0
-        keep = int(info[0] * MARGIN_KEEP) if info else 0
+        spare, keep = self._spare(running)
         for job in sorted(running, key=lambda j: (j.started or 0, j.id)):
+            held = self._held.get(job.id)
+            # Past its request into the headroom it was launched with (#249): the kernel already let it,
+            # so the plan counts it now, whatever room there is, and it is given back first.
+            if held is not None and job.hard_limit and (job.ram_limit or 0) < job.hard_limit and held > job.request.mem:
+                extra = job.hard_limit - _limit(job)
+                if job.ram_limit is None:
+                    launcher.raise_oom_score(job)
+                job.ram_limit, job.grew_borrowed = job.hard_limit, job.grew_borrowed or room < extra
+                room, lend = room - extra, lend - extra
+                self.store.update_job(job)
+                log.info("job %d used the headroom past its %s RAM reservation: its limit is %s", job.id,
+                         format_size(job.request.mem), format_size(job.hard_limit))  # fmt: skip
             held = self._held.get(job.id)
             if held is None or job.request.exclusive or job.stop_requested is not None or job.cancel_requested is not None:
                 continue
@@ -1169,7 +1197,7 @@ class Daemon:
             margins = borrowing and lend < step  # neither unreserved nor lendable: the machine's own room
             if held < limit - min(step // 2, limit // 8) or (borrowing and job.no_borrow):
                 continue
-            if margins and spare - step < max(step, keep):
+            if margins and not _room_for(step, spare, keep):
                 continue
             if now - self._grow_failed.get(job.id, -math.inf) < GROW_RETRY:
                 continue
@@ -1186,6 +1214,17 @@ class Daemon:
                     else "other jobs reserved but weren't using" if borrowing else "nobody reserved")  # fmt: skip
             log.info("job %d grew past its %s RAM reservation into RAM %s: its limit is now %s", job.id,
                      format_size(job.request.mem), into, format_size(job.ram_limit))  # fmt: skip
+
+    def _spare(self, running: list[Job]) -> tuple[int, int]:
+        """RAM the machine really has free beyond what dibs planned, and what must stay free: available
+        memory, less headroom running jobs were launched with and haven't used yet (it doesn't show as
+        used), when borrowing is on and memory pressure is low; 0 otherwise. Used for growing into other
+        jobs' margins (#228) and for headroom at launch (#249)."""
+        info = self._meminfo()
+        if not info or not self.config.borrow_ram or self.pressure() >= MARGIN_PRESSURE:
+            return 0, 0
+        unused = sum(j.hard_limit - _limit(j) for j in running if j.hard_limit and j.hard_limit > _limit(j))
+        return info[0] - info[1] - unused, int(info[0] * MARGIN_KEEP)
 
     def notices(self, session: str, now: float, seen: Sequence[int] = (), at_submit: bool = False,
                 cwd: str | None = None) -> dict:  # fmt: skip

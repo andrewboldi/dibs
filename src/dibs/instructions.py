@@ -49,7 +49,9 @@ when those resources are free, so jobs never crash each other by running out of 
 - `--cpus N`: CPU cores. The job is pinned to exactly these, and OMP_NUM_THREADS and friends are
   set to N.
 - `--mem SIZE`: RAM, like 16G or 512M. Where the system allows it, a job that goes over is killed,
-  all of it, even when only one of its processes went over.
+  all of it, even when only one of its processes went over. While the machine has RAM free, a job's
+  limit sits a step (a quarter of --mem, at least 1G) above it, so a quick jump past --mem lasts
+  until dibs counts it.
   While a running job uses less than it reserved, dibs may start other jobs in the difference; if
   the machine then runs short, a job started that way is the one stopped: with --retry dibs runs it
   again, otherwise it fails with a note to resubmit it. A job that nears its --mem may grow past it
