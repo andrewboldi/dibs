@@ -38,6 +38,7 @@ from dibs.model import (
     DEFAULT_PRIORITY,
     compute_tag,
     default_name,
+    folder_places,
     next_owed,
     job_to_dict,
     resolve_request,
@@ -409,6 +410,7 @@ class Daemon:
         if replaced is not None and replaced.state == State.CANCELLED:
             replaced.reason = f"replaced by job {job.id}"
             self.store.update_job(replaced)
+        self._turns(session, now)  # its folders take turns at the session's places (#226): after job's last save
         self.schedule()
         response = self.show(job.id)
         if sizing := self._sizing(job):  # on submit's first line, the one line agents keep (#212)
@@ -454,6 +456,21 @@ class Daemon:
         if job.owed_left > 0 and not self._passed_another_session(job):
             delta -= job.owed_left
         self._add_owed(job.session, delta, now)
+        if job.owed_left > 0 and self._passed_a_sibling(job, now):  # its own folder pays it back (#226)
+            key = f"owed:{job.session}:{self._place(job.cwd)}"
+            owed = json.loads(self.store.get_meta(key) or "{}").get("owed", 0.0) if now - json.loads(
+                self.store.get_meta(key) or "{}").get("time", -math.inf) <= OWED_FOR else 0.0  # fmt: skip
+            self.store.set_meta(key, json.dumps({"owed": owed + job.owed_left, "time": now}))
+
+    def _passed_a_sibling(self, job: Job, now: float) -> bool:
+        """Whether a waiting job of another of the session's folders would, without priorities, have gone
+        ahead of this one, which just started (#226)."""
+        place = self._place(job.cwd)
+        others = [j for j in self.store.jobs([State.QUEUED]) if j.session == job.session and self._place(j.cwd) != place]
+        if not others:
+            return False
+        places = folder_places([*others, job], self._place, self._turn_owed(job.session, now))
+        return any(places[j.id][1] < places[job.id][1] for j in others)
 
     def _passed_another_session(self, job: Job) -> bool:
         """Whether another session's job is still waiting that, without priorities, would have gone first."""
@@ -556,6 +573,31 @@ class Daemon:
             if (tag, plain) != (j.tag, j.plain_tag):
                 j.tag, j.plain_tag = tag, plain
                 self.store.update_job(j)
+        self._turns(session, self.clock())
+
+    def _turns(self, session: str, now: float) -> None:
+        """Hand a session's places in line to its waiting jobs in the order its folders take turns (#226):
+        a coding agent's subagents share its session id, and one subagent's batch held its siblings'
+        jobs back for hours. The places stay the session's, so no other session's job moves; and with
+        one folder waiting, the order is the one the places were made in."""
+        own = [j for j in self.store.jobs([State.QUEUED]) if j.session == session]
+        if len({self._place(j.cwd) for j in own}) < 2:
+            return
+        places = folder_places(own, self._place, self._turn_owed(session, now))
+        order = sorted(own, key=lambda j: (places[j.id][0], j.submitted, j.id))
+        slots = sorted((j.tag, j.plain_tag if j.plain_tag is not None else j.tag) for j in own)
+        for j, (tag, plain) in zip(order, slots):
+            tag, plain = max(tag, j.submitted), max(plain, j.submitted)  # never ahead of its own submit
+            if (tag, plain) != (j.tag, j.plain_tag):
+                j.tag, j.plain_tag = tag, plain
+                self.store.update_job(j)
+
+    def _turn_owed(self, session: str, now: float) -> dict[str, float]:
+        """What each of the session's folders owes for boosts that passed a sibling's job (#226), by folder;
+        as a session's debt, it lapses after OWED_FOR."""
+        prefix = f"owed:{session}:"
+        return {key[len(prefix):]: entry["owed"] for key, value in self.store.meta_items(prefix)
+                if now - (entry := json.loads(value)).get("time", -math.inf) <= OWED_FOR}  # fmt: skip
 
     def _cancel_job(self, job: Job, now: float, in_place: bool = False) -> bool:
         """Cancel one job without scheduling: a queued one ends now, a running one is asked to stop.
