@@ -83,3 +83,54 @@ def test_the_agent_help_says_a_job_may_grow_into_ram_others_reserved_and_is_stop
 
     text = " ".join(AGENT_HELP.split())
     assert "into RAM other jobs reserved but aren't using" in text and "the first one stopped" in text
+    assert "or, while the machine has RAM free, into the room dibs keeps beside other jobs" in text  # #228
+
+
+def _no_lend(make_daemon, tmp_path, *, used, pressure=0.0, borrow=True):
+    """As _two_jobs, but job c counts at its whole 6G by plan, so nothing is unreserved or lendable, while
+    the machine has `used` of its 16G in use."""
+    limits, in_use = [], [1 * GiB]  # little in use until both jobs have started
+    d = make_daemon(config=Config(borrow_ram=borrow), meminfo=lambda: (16 * GiB, in_use[0]), pressure=lambda: pressure,
+                    set_mem_limit=lambda j, limit: limits.append((j.id, limit)) or True)  # fmt: skip
+    go = tmp_path / "go"
+    holding = [PY, "-c", f"import os, time\nwhile not os.path.exists({str(go)!r}): time.sleep(0.02)"]
+    a = submit(d, tmp_path, holding, mem=8 * GiB)
+    c = submit(d, tmp_path, [*holding, "c"], mem=6 * GiB)
+    run_until(d, lambda: job(d, a).shim_pid and job(d, c).shim_pid)
+    in_use[0] = used
+    d._outside_mem = lambda now, running: 1 * GiB
+    d._planned_mem = lambda j, now: j.request.mem
+    d._held = {a: int(7.2 * GiB)}
+    return d, a, c, limits, go
+
+
+def test_a_job_at_its_limit_grows_into_other_jobs_margins_when_the_machine_has_room(make_daemon, tmp_path):
+    # Issue #228: a 5G job was killed at its limit with 9.6G available and no memory pressure, because the
+    # margins dibs keeps over other jobs' peaks counted as taken. Its work was lost for certain; the
+    # margins might never have been used.
+    d, a, c, limits, go = _no_lend(make_daemon, tmp_path, used=6 * GiB)
+    d._grow(d.clock())
+    assert limits == [(a, 10 * GiB)] and job(d, a).grew_borrowed  # given back first in a shortage
+    _end(d, go, a, c)
+
+
+def test_no_growth_into_margins_when_the_machine_has_little_available(make_daemon, tmp_path):
+    # 3G available: after a 2G step, less than a further step and less than a tenth of RAM would be left.
+    d, a, c, limits, go = _no_lend(make_daemon, tmp_path, used=13 * GiB)
+    d._grow(d.clock())
+    assert limits == []
+    _end(d, go, a, c)
+
+
+def test_no_growth_into_margins_under_memory_pressure(make_daemon, tmp_path):
+    d, a, c, limits, go = _no_lend(make_daemon, tmp_path, used=6 * GiB, pressure=6.0)
+    d._grow(d.clock())
+    assert limits == []
+    _end(d, go, a, c)
+
+
+def test_no_growth_into_margins_when_borrowing_is_off(make_daemon, tmp_path):
+    d, a, c, limits, go = _no_lend(make_daemon, tmp_path, used=6 * GiB, borrow=False)
+    d._grow(d.clock())
+    assert limits == []
+    _end(d, go, a, c)
