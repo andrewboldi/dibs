@@ -368,6 +368,7 @@ class Daemon:
             # replaces paid for its place, and passed the session's lower-priority jobs, when it was queued.
             tag, plain_tag = min(tag, replaced.tag), min(plain_tag, _plain(replaced))
             carried, left, passed = replaced.owed_carried, replaced.owed_left, []
+            kept = [tag, plain_tag]
         job = Job(
             id=0,
             name=req.get("name") or default_name(argv),
@@ -388,6 +389,7 @@ class Daemon:
             history_mem=self._history_mem(cwd, list(argv), session),
             history_vram=self._history_vram(cwd, list(argv), request, session),
             history_longest=self._history_longest(cwd, list(argv), request, session),
+            kept=kept if keeps else None,
             state=State.QUEUED,
             output=output or "",
         )
@@ -410,7 +412,7 @@ class Daemon:
         if replaced is not None and replaced.state == State.CANCELLED:
             replaced.reason = f"replaced by job {job.id}"
             self.store.update_job(replaced)
-        self._turns(session, now)  # its folders take turns at the session's places (#226): after job's last save
+        self._reline(session, folders_only=True)  # its folders take turns at its places (#226): after job's last save
         self.schedule()
         response = self.show(job.id)
         if sizing := self._sizing(job):  # on submit's first line, the one line agents keep (#212)
@@ -549,11 +551,18 @@ class Daemon:
         self.schedule()
         return {"ok": True, "cancelled": cancelled, "errors": errors}
 
-    def _reline(self, session: str) -> None:
+    def _reline(self, session: str, folders_only: bool = False) -> None:
         """Line a session's waiting jobs up again by submit()'s rules, in the order they came, behind its
         jobs still waiting only: one that started or was cancelled no longer holds back those after it,
-        so a busy session's line can't run hours ahead of the clock (#150). Places only move earlier."""
+        so a busy session's line can't run hours ahead of the clock (#150). Places only move earlier.
+        A session waiting in two or more folders takes the fresh line as its places, which its folders
+        then take in turns (#226): the earlier of a job's old and new place would let the session's
+        places drift earlier and duplicate, as the turns move them between its jobs. Only a replacement's
+        kept place (#184) stays. folders_only: nothing to do for a session in one folder."""
         own = sorted((j for j in self.store.jobs([State.QUEUED]) if j.session == session), key=lambda j: (j.submitted, j.id))
+        folders = len({self._place(j.cwd) for j in own}) >= 2
+        if folders_only and not folders:
+            return
         lined: list[Job] = []
         new: dict[int, list[float]] = {}  # job id -> [tag, plain tag]
         for j in own:
@@ -569,7 +578,10 @@ class Daemon:
             lined.append(j)
         for j in own:
             tag, plain = new[j.id]
-            tag, plain = min(tag, j.tag), min(plain, j.plain_tag if j.plain_tag is not None else plain)
+            if not folders:
+                tag, plain = min(tag, j.tag), min(plain, j.plain_tag if j.plain_tag is not None else plain)
+            elif j.kept is not None:
+                tag, plain = min(tag, j.kept[0]), min(plain, j.kept[1])
             if (tag, plain) != (j.tag, j.plain_tag):
                 j.tag, j.plain_tag = tag, plain
                 self.store.update_job(j)

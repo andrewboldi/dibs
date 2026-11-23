@@ -106,6 +106,7 @@ class Job:
     gpu_idle_told: float | None = None
     history_vram: int | None = None  # the most GPU memory earlier runs of the same command held, at submit (#183)
     history_longest: float | None = None  # the longest earlier run of its script with its estimate, at submit (#227)
+    kept: list[float] | None = None  # [tag, plain tag] a replacement kept from the job it replaced (#184, #226)
     borrowed_ram: bool = False  # this run started on RAM other jobs reserved but weren't using
     no_borrow: bool = False  # must start within RAM nobody reserved (after the machine ran out once)
     evicted: bool = False  # stopped by dibs to give borrowed RAM back under memory pressure (#114)

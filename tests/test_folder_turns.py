@@ -128,3 +128,51 @@ def test_a_boost_that_passed_only_its_own_folders_jobs_costs_its_folder_nothing(
     run_until(d, lambda: finished(d, mine) and job(d, own).started is not None)
     d.cancel([own])
     run_until(d, lambda: finished(d, own))
+
+
+def test_a_multi_folder_sessions_places_dont_drift_as_its_jobs_start_or_are_cancelled(make_daemon, tmp_path):
+    # Handing places out by folder turns, then lining the session up again after a start or a cancel,
+    # mustn't duplicate places or lose the last ones: the session would gain on other sessions each time.
+    from conftest import capacity
+    from test_daemon import PY, submit
+
+    now = [1000.0]
+    d = make_daemon(clock=lambda: now[0], cap=capacity(cpus=[0]))
+    submit(d, tmp_path, ["sleep", "30"], session="blocker")
+    a, b = _trees(tmp_path)
+    sweep = [submit(d, a, [PY, "-c", "pass"], time_=600.0, session="s1") for _ in range(5)]
+    now[0] += 60
+    sibling = submit(d, b, [PY, "-c", "pass"], time_=600.0, session="s1")
+
+    def places_match_one_folder():
+        own = [j for j in d.store.jobs([State.QUEUED]) if j.session == "s1"]
+        one = folder_places(own, lambda cwd: "one", {})  # the same jobs, lined up as one folder's
+        return sorted(j.tag for j in own) == sorted(tag for tag, _ in one.values())
+
+    assert places_match_one_folder()
+    for gone in (sweep[0], sweep[1], sibling, sweep[2]):
+        d.cancel([gone])
+        assert places_match_one_folder(), gone
+
+
+def test_a_replacements_kept_place_stays_the_sessions_in_a_multi_folder_session(make_daemon, tmp_path):
+    # #184: a replacement asking for no more keeps the earlier of its old place and a fresh one. Lining a
+    # multi-folder session up again takes the fresh line, but not past a place a replacement kept.
+    from conftest import capacity
+    from test_daemon import PY, job, submit
+
+    now = [1000.0]
+    d = make_daemon(clock=lambda: now[0], cap=capacity(cpus=[0]))
+    submit(d, tmp_path, ["sleep", "30"], session="blocker")
+    a, b = _trees(tmp_path)
+    first = submit(d, a, [PY, "-c", "pass"], time_=600.0, mem=2 * GiB, session="s1")  # its place: 1600
+    now[0] += 300
+    gone = submit(d, b, [PY, "-c", "pass"], time_=600.0, session="s1")
+    stays = submit(d, b, [PY, "-c", "pass", "x"], time_=600.0, session="s1")
+    now[0] += 600
+    again = submit(d, a, [PY, "-c", "pass"], time_=600.0, mem=1 * GiB, session="s1", replace=first)
+    assert job(d, again).kept is not None
+    d.cancel([gone])
+    own = [job(d, again), job(d, stays)]
+    # Lined up afresh, the two would hold 1900 and 2500: the 1600 the replacement kept stays the session's.
+    assert sorted(j.tag for j in own) == [1600.0, 1900.0]
