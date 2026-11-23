@@ -407,6 +407,17 @@ def test_sizing_says_what_a_padded_ram_request_costs_and_how_to_fix_one():
     assert sizing in " ".join(SKILL.split())  # the installed skill says the same
 
 
+def test_sizing_doesnt_promise_a_tight_request_is_safe(tmp_path):
+    # Issue #244: two tightly sized jobs were killed at their limits with RAM free: one jumped past its
+    # limit within seconds, faster than dibs grows a job; the other's run needed more than earlier ones.
+    sizing = " ".join(AGENT_HELP.split("## Sizing a request", 1)[1].split("\n## ", 1)[0].split())
+    assert "costs little" not in sizing
+    for phrase in ("jumps past it faster than dibs can act is killed at it",
+                   "add `--retry` to a tightly sized job that is safe to run again",
+                   "from the run with its largest input"):  # fmt: skip
+        assert phrase in sizing, phrase
+
+
 def test_session_names_come_from_claude_codes_session_files(tmp_path):
     # Issue #167: dibs top heads each agent's panel with the name the user knows the session by.
     # Claude Code keeps a file per running session, with the session id dibs stores with each job.

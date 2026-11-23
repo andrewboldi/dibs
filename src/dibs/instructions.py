@@ -109,9 +109,11 @@ when those resources are free, so jobs never crash each other by running out of 
   GPU's memory stays free for jobs that use it. For a batch whose script hasn't run yet, run one
   job first and size the rest from its peak.
 - Don't pad a request. RAM a job reserves but doesn't use holds back every job behind it, your own
-  included. A job that nears its --mem is given more when the machine has RAM to spare, so a tight
-  request costs little. To shrink a job that is still waiting without losing its place, submit the
-  same command with a smaller --mem and `--replace ID`.
+  included. A job that nears its --mem is given more when the machine has RAM to spare, but one
+  whose memory jumps past it faster than dibs can act is killed at it: add `--retry` to a tightly
+  sized job that is safe to run again, and dibs runs it again with more. Size a script whose memory
+  depends on its input from the run with its largest input. To shrink a job that is still waiting
+  without losing its place, submit the same command with a smaller --mem and `--replace ID`.
 - Add `--retry` when the job is safe to run again from the start, over whatever a stopped try left:
   it resumes from a checkpoint, or repeating it does no harm (not one that appends results, uploads
   or sends something, or one that refuses to start when its output already exists). Then, if it
