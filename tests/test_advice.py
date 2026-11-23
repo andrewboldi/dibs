@@ -178,3 +178,19 @@ def test_submit_asks_for_notices_as_a_submit(monkeypatch, tmp_path, capsys):
     monkeypatch.setattr(dc.Client, "call", call)
     cli.main(["submit", "--cpus", "1", "--mem", "1G", "--time", "1m", "--", "true"])
     assert ("notices", True) in asked
+
+
+def test_a_job_knows_the_longest_earlier_run_of_its_script_with_its_estimate(make_daemon, tmp_path):
+    # Issue #227: what an overrunning job is expected to need, from runs like it: 3 or more of the same
+    # script with the same estimate. Runs with another estimate are another kind of job.
+    d = make_daemon()
+    script = _script(tmp_path)
+    recent = time.time() - 86400
+    _runs(d, tmp_path, script, 2, ran=900.0, start=recent)
+    _runs(d, tmp_path, script, 1, ran=1500.0, start=recent + 3000)
+    _runs(d, tmp_path, script, 2, ran=3000.0, request={"time": 1200.0}, start=recent + 6000)
+    new = submit(d, tmp_path, [PY, str(script), "9"], time_=600.0)
+    assert job(d, new).history_longest == 1500.0
+    fewer = submit(d, tmp_path, [PY, str(script), "9"], time_=1200.0)  # only 2 runs with this estimate
+    assert job(d, fewer).history_longest is None
+    run_until(d, lambda: finished(d, new) and finished(d, fewer))

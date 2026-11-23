@@ -101,6 +101,7 @@ SHORTAGE_LOG_EVERY = 60.0  # seconds: while short of memory, what the relief did
 SLOW_PASS = 5.0  # seconds: a pass of the daemon's loop this long is logged (#191)
 HOLDERS_EVERY = 10.0  # seconds: what holds RAM outside dibs is read this often (#164)
 ADVISE_RUNS = 5  # runs of a script it takes to say how it uses what it asks for (#169)
+LONGEST_RUNS = 3  # earlier runs like a job it takes to expect an overrun as long as the longest (#227)
 WAIT_RECHECK = 5.0  # a long-polling wait re-checks its jobs at least this often
 LOG_MAX = 5 * 1024 * 1024
 
@@ -382,6 +383,7 @@ class Daemon:
             owed_left=left,
             history_mem=self._history_mem(cwd, list(argv), session),
             history_vram=self._history_vram(cwd, list(argv), request, session),
+            history_longest=self._history_longest(cwd, list(argv), request, session),
             state=State.QUEUED,
             output=output or "",
         )
@@ -767,7 +769,7 @@ class Daemon:
             # RAM it may yet use (#155).
             [Running(j.id, _holding(j, _limit(j) if j.ram_limit else self._planned_mem(j, now) if borrowing else None,
                                     self._young_vram(j, now)),
-                     tuple(j.cpu_ids), tuple(j.gpu_ids), (j.started or now) + self._asleep(j))
+                     tuple(j.cpu_ids), tuple(j.gpu_ids), (j.started or now) + self._asleep(j), j.history_longest)
              for j in running],
             # A job that asks for less GPU memory than its command's earlier runs held is planned at what
             # they held: nothing holds a job that renders to its reservation (#173, #183).
@@ -810,6 +812,16 @@ class Daemon:
         """The peak RAM of earlier runs of the same command here (or the same script), if any."""
         runs, _ = self._earlier(cwd, argv, session, lambda j: j.peak_mem)
         return max((j.peak_mem for j in runs), default=None)
+
+    def _history_longest(self, cwd: str, argv: list[str], request: Request, session: str) -> float | None:
+        """The longest of the earlier runs like this job, by its own running time (sleep left out): the same
+        script with the same estimate, when there are LONGEST_RUNS or more (#227); None otherwise."""
+        def alike(j: Job) -> bool:
+            return j.state == State.DONE and j.started is not None and j.ended is not None and j.request.time == request.time
+
+        runs, _ = self._earlier(cwd, argv, session, alike, limit=12)
+        took = [j.ended - j.started - (j.asleep or 0.0) for j in runs]
+        return max(took) if len(took) >= LONGEST_RUNS else None
 
     def _sizing(self, job: Job) -> dict | None:
         """When the job's last ADVISE_RUNS or more runs say its RAM request could be a quarter smaller or more:

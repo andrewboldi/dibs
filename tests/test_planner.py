@@ -158,6 +158,29 @@ def test_expected_end_far_past_its_estimate_is_as_long_again_as_it_has_overrun()
     assert expected_end(running(1, req(time=3000), (0,), started=NOW - 15600), NOW) == NOW + 12600
 
 
+def test_an_overrunning_job_is_expected_to_run_as_long_as_its_longest_similar_run():
+    # #227: a 40-minute job 45 minutes in, whose batch's other runs of the same script and estimate ran
+    # 14-89 minutes, is expected to end at 89 minutes, not 4 minutes from now pass after pass.
+    j = Running(1, req(time=2400), (0,), (), NOW - 2700, longest=89 * 60)
+    assert expected_end(j, NOW) == NOW - 2700 + 89 * 60
+    # Never sooner than the old rule: past the longest run, a little longer again.
+    late = Running(1, req(time=2400), (0,), (), NOW - 95 * 60, longest=89 * 60)
+    assert expected_end(late, NOW) == NOW + 240
+
+
+def test_short_jobs_start_beside_an_overrunning_job_whose_similar_runs_ran_long():
+    # #227, the 11-21 21:31 freeze: a big job waited for the RAM of a 40-minute job 45 minutes in, and
+    # every shorter job "would delay" it, since dibs expected the 40-minute job to end within 4 minutes.
+    old = running(1, req(mem=10 * GiB, time=2400), (0,), started=NOW - 2700)
+    big = queued(2, req(mem=14 * GiB, time=2400), submitted=NOW - 3600, tag=NOW - 3600)
+    short = queued(3, req(mem=4 * GiB, time=1200), submitted=NOW - 600)
+    assert plan(cap(mem=16 * GiB), [old], [big, short], NOW).starts == []
+    known = Running(1, old.request, old.cpu_ids, old.gpu_ids, old.started, longest=89 * 60)
+    p = plan(cap(mem=16 * GiB), [known], [big, short], NOW)
+    assert [s.job_id for s in p.starts] == [3]  # it ends in 20 minutes, before the 89 minutes are up
+    assert p.predictions[2].start == NOW - 2700 + 89 * 60
+
+
 def test_short_job_starts_beside_a_job_far_past_its_estimate():
     # #185, as seen: a GPU job 3h30m past its 50-minute estimate holds most of the GPU. A GPU job waits
     # for it, and a 15-minute CPU job that fits now would take RAM the GPU job needs when it starts.
