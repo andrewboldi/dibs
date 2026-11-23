@@ -79,7 +79,7 @@ def test_meta(store):
 def test_events_since(store):
     store.add_event("stop", {"pid": 1, "command": "python a.py"}, 10.0)
     store.add_event("stop", {"pid": 2, "command": "python b.py"}, 20.0)
-    assert store.events(15.0) == [{"kind": "stop", "time": 20.0, "pid": 2, "command": "python b.py"}]
+    assert store.events(15.0) == [{"kind": "stop", "time": 20.0, "pid": 2, "command": "python b.py", "event_id": 2}]
     store.delete_events_before(25.0)
     assert store.events(0.0) == []
 

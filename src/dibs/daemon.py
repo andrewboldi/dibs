@@ -91,6 +91,7 @@ HEAVY_SHARE = 1 / 6  # of the machine's cores, at least 2
 TELL_EVERY = 3600.0  # seconds: at most this often per terminal
 TOLD_WINDOW = 86400.0  # how far back a session is told, at its next dibs command, what the guard stopped (#135)
 FAILED_FOR = 3600.0  # seconds: a failed job is told at each of its session's dibs commands this long at most (#176)
+PLACE_WAIT = 1800.0  # seconds: a job's notice its own folder hasn't picked up then goes to any command of its session (#221)
 # A job holding GPU memory with the GPU idle (#180): a hold of at least a tenth of the GPU (1G or more), at
 # under IDLE_UTIL percent use, counts once it has gone on IDLE_AFTER; checked every IDLE_EVERY; its session
 # is told then, while other jobs wait for GPU memory, and at most once every IDLE_TELL_EVERY (#186).
@@ -258,6 +259,8 @@ class Daemon:
         self._outside_vram: dict[str, int] = {}
         self._load: deque[tuple[float, float, float]] = deque()  # (time, machine busy core-seconds, time asleep)
         self._display_failed: set[str] = set()  # display-only watchers that raised, logged once each
+        self._places: dict[str, str] = {}  # folder -> the git working tree around it, or itself (#221)
+        self._place_seen: dict[tuple[str, str], float] = {}  # (session, place) -> its last dibs command
         # Free space of the disks the jobs use, and what the jobs wrote (#211): None and nothing unless
         # given, so only the real daemon (run) reads the real disks.
         self.disk_free = disk_free
@@ -716,7 +719,7 @@ class Daemon:
                 return self.info()
             if op == "notices":
                 return self.notices(str(request["session"]), self.clock(), request.get("seen") or (),
-                                    at_submit=bool(request.get("at_submit")))  # fmt: skip
+                                    at_submit=bool(request.get("at_submit")), cwd=request.get("cwd"))  # fmt: skip
             if op == "seen":
                 self._mark_seen(str(request["session"]), request.get("ids") or (), self.clock())
                 return {"ok": True}
@@ -1129,13 +1132,19 @@ class Daemon:
             log.info("job %d grew past its %s RAM reservation into RAM %s: its limit is now %s", job.id,
                      format_size(job.request.mem), into, format_size(job.ram_limit))  # fmt: skip
 
-    def notices(self, session: str, now: float, seen: Sequence[int] = (), at_submit: bool = False) -> dict:
+    def notices(self, session: str, now: float, seen: Sequence[int] = (), at_submit: bool = False,
+                cwd: str | None = None) -> dict:  # fmt: skip
         """What the guard stopped of this session's since it was last told, each told once: the note in a
         stopped program's own output can be lost, in a pipe through grep or a log nobody reads (#135).
         And its jobs that failed in the last hour, at each of its dibs commands until one of them looks
         at the job (seen: the jobs this command shows), or it runs the same command again (#176): a failed
         job drops out of dibs queue as a finished one does, and a loop's command may be the one told."""
         self._mark_seen(session, seen, now)
+        # A job's failure and advice go to commands from its own folder or working tree (cwd), since a coding
+        # agent's subagents share its session id (#221). A command that names no folder gets them all.
+        place = self._place(cwd) if cwd else None
+        if place is not None:
+            self._place_seen[(session, place)] = now
         key = f"told:{session}"
         told = float(self.store.get_meta(key) or 0.0)
         events = [e for e in self.store.events(min(max(told, now - TOLD_WINDOW), now - FAILED_FOR)) if e.get("session") == session]
@@ -1144,18 +1153,52 @@ class Daemon:
             self.store.set_meta(key, repr(stops[-1]["time"]))
         told_now = [{"time": e["time"], "message": e["message"], "kind": e["kind"]} for e in stops]
         failed = [e for e in events if e["kind"] == "failed" and now - FAILED_FOR <= e["time"] <= now]
-        told_now += [n for n in (self._failure_notice(e, session) for e in failed) if n is not None]
+        told_now += [n for n in (self._failure_notice(e, session) for e in failed)
+                     if n is not None and self._here(n["job"], n["time"], session, place, now)]  # fmt: skip
         if not at_submit:  # advice on a request goes out at the session's other commands (#169)
-            key = f"told_advice:{session}"
+            key = f"told_advice:{session}"  # until #221, advice was told by session: what it told, it told
             advised = float(self.store.get_meta(key) or 0.0)
             advice = [e for e in self.store.events(max(advised, now - TOLD_WINDOW))
-                      if e["kind"] == "advice" and e.get("session") == session and e["time"] > advised]  # fmt: skip
-            if advice:
-                self.store.set_meta(key, repr(advice[-1]["time"]))
+                      if e["kind"] == "advice" and e.get("session") == session and e["time"] > advised
+                      and self.store.get_meta(f"told_advice_event:{e['event_id']}") is None
+                      and self._here(e.get("job"), e["time"], session, place, now)]  # fmt: skip
+            for e in advice:
+                if place is None:
+                    self.store.set_meta(key, repr(e["time"]))
+                else:
+                    self.store.set_meta(f"told_advice_event:{e['event_id']}", repr(now))
             told_now += [{"time": e["time"], "message": e["message"], "kind": "advice"} for e in advice]
         if self._disk_line:  # machine-wide, so every command of every session says it (#211)
             told_now.append({"time": now, "message": self._disk_line, "kind": "disk"})
         return {"ok": True, "notices": told_now}
+
+    def _place(self, path: str) -> str:
+        """Where a job or a command works (#221): the git working tree around `path` (the folder that holds
+        `.git`, a directory or a worktree's file), else the folder itself."""
+        if path not in self._places:
+            if len(self._places) > 10000:
+                self._places.clear()
+            place = here = os.path.normpath(path)
+            while True:
+                if os.path.exists(os.path.join(here, ".git")):
+                    place = here
+                    break
+                parent = os.path.dirname(here)
+                if parent == here:
+                    break
+                here = parent
+            self._places[path] = place
+        return self._places[path]
+
+    def _here(self, job_id: int | None, since: float, session: str, place: str | None, now: float) -> bool:
+        """Whether a notice about this job goes to a command from `place`: from the job's own folder or
+        working tree, or from any once nothing has run there in the PLACE_WAIT since `since`, as when the
+        subagent that submitted it has ended (#221)."""
+        job = self.store.get_job(int(job_id)) if place is not None and job_id is not None else None
+        if job is None:
+            return True
+        own = self._place(job.cwd)
+        return own == place or (now - since >= PLACE_WAIT and self._place_seen.get((session, own), -math.inf) < since)
 
     def _advise(self, job: Job, view: dict, now: float) -> None:
         """Tell the session, at its next dibs command other than a submit, when this job's request doesn't
