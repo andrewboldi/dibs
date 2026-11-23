@@ -1496,12 +1496,14 @@ def test_a_job_near_its_ram_limit_grows_into_ram_nobody_reserved(make_daemon, tm
     go.touch()
 
 
-def test_a_job_never_grows_into_ram_another_job_reserved(make_daemon, tmp_path, monkeypatch):
-    # Measured against reservations, not use: another job could grow back into RAM it reserved.
+def test_a_job_doesnt_grow_into_ram_another_job_reserved_while_the_machine_lacks_room(make_daemon, tmp_path, monkeypatch):
+    # Measured against reservations, not use: another job could grow back into RAM it reserved. Only
+    # when the machine itself has room may a job grow into other jobs' margins (#228).
     d, a, hold, limits, go = _growing(make_daemon, tmp_path, monkeypatch)
     # 16G, less 2G outside dibs (its peak over the last 2 minutes), 8G and 6G reserved: nothing left.
     c = submit(d, tmp_path, [PY, "-c", "import time; time.sleep(30)"], mem=6 * GiB)
     run_until(d, lambda: job(d, c).state == State.RUNNING)
+    d._meminfo = lambda: (16 * GiB, int(13.5 * GiB))  # 2.5G available: a 2G step would leave too little
     hold(int(7.2 * GiB))
     assert limits == [] and job(d, a).ram_limit is None
     go.touch()

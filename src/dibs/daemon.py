@@ -58,6 +58,8 @@ RETENTION_EVERY = 3600.0
 MAX_RETRIES = 2  # runs again after a resource failure, at most (#84)
 YOUNG = 600.0  # seconds: a job with no earlier runs counts at its whole RAM reservation this long (#86)
 SESSION_RUNS_AGE = 7 * 86400.0  # seconds: how far back a session's runs in other folders count (#229)
+MARGIN_PRESSURE = 5.0  # % memory pressure (some, avg10) under which a job may grow into other jobs' margins (#228)
+MARGIN_KEEP = 0.10  # share of RAM still available after such a step
 DISK_EVERY = 30.0  # seconds between looks at the free space of the disks the jobs use (#211)
 DISK_WINDOW = 1800.0  # seconds: how far back a disk's drop, and what the jobs wrote, are measured
 DISK_LOW = 5 * GiB  # bytes: under this much free, every dibs command says so
@@ -1081,6 +1083,11 @@ class Daemon:
         # job start in it (#149, #182): a job at its limit has work to lose, so it goes ahead of them.
         lend = self.capacity.mem - outside - sum(_limit(j) if j.ram_limit else self._planned_mem(j, now) for j in running)
         lend = lend if self._borrowing() else 0
+        # Failing both, the margins dibs keeps over other jobs' peaks, when the machine really has room:
+        # a kill at the limit loses the work for certain, and the margins may never be used (#228).
+        info = self._meminfo()
+        spare = info[0] - info[1] if info and self.config.borrow_ram and self.pressure() < MARGIN_PRESSURE else 0
+        keep = int(info[0] * MARGIN_KEEP) if info else 0
         for job in sorted(running, key=lambda j: (j.started or 0, j.id)):
             held = self._held.get(job.id)
             if held is None or job.request.exclusive or job.stop_requested is not None or job.cancel_requested is not None:
@@ -1089,7 +1096,10 @@ class Daemon:
             # Near its limit: within half a step, or an eighth of its limit for a small job, whose 1G step
             # would otherwise make its usual peak look like growth.
             borrowing = room < step
-            if held < limit - min(step // 2, limit // 8) or (borrowing and (job.no_borrow or lend < step)):
+            margins = borrowing and lend < step  # neither unreserved nor lendable: the machine's own room
+            if held < limit - min(step // 2, limit // 8) or (borrowing and job.no_borrow):
+                continue
+            if margins and spare - step < max(step, keep):
                 continue
             if now - self._grow_failed.get(job.id, -math.inf) < GROW_RETRY:
                 continue
@@ -1100,11 +1110,12 @@ class Daemon:
                 launcher.raise_oom_score(job)
             job.ram_limit = limit + step
             job.grew_borrowed = job.grew_borrowed or borrowing  # given back first in a shortage (#182)
-            room, lend = room - step, lend - step
+            room, lend, spare = room - step, lend - step, spare - step
             self.store.update_job(job)
+            into = ("the margins kept over other jobs' peaks, with the machine's RAM free" if margins
+                    else "other jobs reserved but weren't using" if borrowing else "nobody reserved")  # fmt: skip
             log.info("job %d grew past its %s RAM reservation into RAM %s: its limit is now %s", job.id,
-                     format_size(job.request.mem), "other jobs reserved but weren't using" if borrowing else "nobody reserved",
-                     format_size(job.ram_limit))  # fmt: skip
+                     format_size(job.request.mem), into, format_size(job.ram_limit))  # fmt: skip
 
     def notices(self, session: str, now: float, seen: Sequence[int] = (), at_submit: bool = False) -> dict:
         """What the guard stopped of this session's since it was last told, each told once: the note in a
