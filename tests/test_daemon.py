@@ -1092,6 +1092,16 @@ def test_cleanup_forgets_what_sessions_owed_more_than_a_day_ago(daemon):
     assert daemon.store.get_meta("owed:old") is None and daemon.store.get_meta("owed:new") is not None
 
 
+def test_cleanup_forgets_which_advice_was_told_after_a_day(daemon):
+    # #240 marks each advice event told, once per folder: the marks mustn't pile up.
+    now = time.time()
+    daemon.store.set_meta("told_advice_event:1", repr(now - 86400 - 60))
+    daemon.store.set_meta("told_advice_event:2", repr(now - 60))
+    daemon._retention(now)
+    assert daemon.store.get_meta("told_advice_event:1") is None
+    assert daemon.store.get_meta("told_advice_event:2") is not None
+
+
 def test_a_batch_of_high_priority_jobs_pays_back_after_the_first(make_daemon, tmp_path):
     # Issue #56: the session's jobs lined up behind the previous job's boosted tag, so a batch of
     # priority-10 jobs kept every boost. They must line up behind each job's priority-5 place.

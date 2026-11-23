@@ -2087,6 +2087,7 @@ class Daemon:
         lapsed = [k for k, v in self.store.meta_items("owed:") if now - json.loads(v).get("time", 0) > OWED_FOR]
         lapsed += [k for k, v in self.store.meta_items("seen:") if now - float(v) > TOLD_WINDOW]  # #176
         lapsed += [k for k, v in self.store.meta_items("advised:") if now - float(v) > TOLD_WINDOW]  # #169
+        lapsed += [k for k, v in self.store.meta_items("told_advice_event:") if now - float(v) > TOLD_WINDOW]  # #221
         staging = self.paths.state_dir / "snapshots"  # copies a submit never claimed (#172)
         for folder in staging.iterdir() if staging.is_dir() else ():
             with contextlib.suppress(OSError):
