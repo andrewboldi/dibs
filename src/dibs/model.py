@@ -280,6 +280,13 @@ def script_of(argv: Sequence[str]) -> str | None:
     return None
 
 
+def script_name(argv: Sequence[str]) -> str | None:
+    """What makes two runs in a session's different folders runs of the same script (#229): the script's
+    file name (a copy of the code puts it under another path), or "-m module"."""
+    script = script_of(argv)
+    return script if not script or script.startswith("-m ") else os.path.basename(script)
+
+
 def default_name(argv: Sequence[str]) -> str:
     """A short label for a job: its script's name if it runs one, else its program's name."""
     if not argv:

@@ -1181,6 +1181,25 @@ def test_submit_falls_back_to_earlier_runs_of_the_same_script(daemon, tmp_path):
     assert same["earlier_match"] == "command"
 
 
+def test_a_job_from_a_fresh_copy_gets_the_sessions_runs_of_the_same_script(daemon, tmp_path):
+    # Issue #229: agents that submit each batch from a fresh copy of their code had no earlier runs, so
+    # their jobs counted at their whole request and dibs had no facts to tell them.
+    for copy in ("copy1", "copy2"):
+        (tmp_path / copy).mkdir()
+        (tmp_path / copy / "train.py").write_text("pass\n")
+    first = submit(daemon, tmp_path / "copy1", [PY, str(tmp_path / "copy1" / "train.py")], session="s1")
+    run_until(daemon, lambda: finished(daemon, first))
+    ran = job(daemon, first)
+    ran.peak_mem = 300 * MiB
+    daemon.store.update_job(ran)
+    again = daemon.submit(req(tmp_path / "copy2", [PY, "train.py", "--lr", "2"], session="s1"))
+    assert job(daemon, again["job"]["id"]).history_mem == 300 * MiB
+    assert [e["id"] for e in again["earlier"]] == [first] and again["earlier_match"] == "session"
+    other = daemon.submit(req(tmp_path / "copy2", [PY, "train.py"], session="s2"))  # another session's runs don't count
+    assert job(daemon, other["job"]["id"]).history_mem is None and other["earlier"] == []
+    run_until(daemon, lambda: finished(daemon, again["job"]["id"]) and finished(daemon, other["job"]["id"]))
+
+
 def test_earlier_runs_of_the_script_say_so():
     from dibs.render import render_earlier
 
@@ -1189,6 +1208,7 @@ def test_earlier_runs_of_the_script_say_so():
            "request": {"cpus": 1, "mem": 1 << 30, "gpus": 0, "vram": 0, "time": 120.0}}  # fmt: skip
     assert render_earlier([run], "script").startswith("Earlier runs of train.py here, with other arguments:")
     assert render_earlier([run]).startswith("Earlier runs of this command here:")
+    assert render_earlier([run], "session").startswith("Earlier runs of train.py in this session's other folders:")
 
 
 def test_render_estimate_feedback():

@@ -10,7 +10,7 @@ import sqlite3
 from collections.abc import Iterable
 from pathlib import Path
 
-from dibs.model import TERMINAL, Job, State, job_from_dict, job_to_dict, script_of
+from dibs.model import TERMINAL, Job, State, job_from_dict, job_to_dict, script_name, script_of
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS jobs (id INTEGER PRIMARY KEY AUTOINCREMENT, state TEXT NOT NULL, data TEXT NOT NULL, ended REAL);
@@ -44,6 +44,7 @@ class Store:
             self._add_ended_column()
             self._add_command_column()
             self._add_script_column()
+            self._add_script_name_column()
 
     def _add_ended_column(self) -> None:
         """Databases from before the ended column get it, filled in from each job's data."""
@@ -82,6 +83,19 @@ class Store:
             self._db.executemany("UPDATE jobs SET script = ? WHERE id = ?", scripts)
         self._db.execute("CREATE INDEX IF NOT EXISTS jobs_script ON jobs (script)")
 
+    def _add_script_name_column(self) -> None:
+        """Databases from before the script_name column get it, filled in from each job's data."""
+        columns = {row[1] for row in self._db.execute("PRAGMA table_info(jobs)")}
+        if "script_name" not in columns:
+            self._db.execute("ALTER TABLE jobs ADD COLUMN script_name TEXT")
+            rows = self._db.execute("SELECT id, data FROM jobs").fetchall()
+            names = []
+            for i, data in rows:
+                d = json.loads(data) if data else {}
+                names.append((script_name(d.get("argv", [])), i))
+            self._db.executemany("UPDATE jobs SET script_name = ? WHERE id = ?", names)
+        self._db.execute("CREATE INDEX IF NOT EXISTS jobs_script_name ON jobs (script_name)")
+
     def close(self) -> None:
         self._db.close()
 
@@ -90,18 +104,18 @@ class Store:
             cur = self._db.execute("INSERT INTO jobs (state, data) VALUES (?, '')", (str(job.state),))
             job.id = cur.lastrowid
             self._db.execute(
-                "UPDATE jobs SET data = ?, ended = ?, command = ?, script = ? WHERE id = ?",
+                "UPDATE jobs SET data = ?, ended = ?, command = ?, script = ?, script_name = ? WHERE id = ?",
                 (json.dumps(job_to_dict(job, include_env=True)), job.ended, _command(job.cwd, job.argv),
-                 _script(job.cwd, job.argv), job.id),  # fmt: skip
+                 _script(job.cwd, job.argv), script_name(job.argv), job.id),  # fmt: skip
             )
         return job.id
 
     def update_job(self, job: Job) -> None:
         with self._db:
             self._db.execute(
-                "UPDATE jobs SET state = ?, data = ?, ended = ?, command = ?, script = ? WHERE id = ?",
+                "UPDATE jobs SET state = ?, data = ?, ended = ?, command = ?, script = ?, script_name = ? WHERE id = ?",
                 (str(job.state), json.dumps(job_to_dict(job, include_env=True)), job.ended,
-                 _command(job.cwd, job.argv), _script(job.cwd, job.argv), job.id),
+                 _command(job.cwd, job.argv), _script(job.cwd, job.argv), script_name(job.argv), job.id),
             )  # fmt: skip
 
     def earlier_runs(self, cwd: str, argv: list[str], limit: int = 3) -> list[Job]:
@@ -119,6 +133,17 @@ class Store:
         rows = self._db.execute(
             f"SELECT data FROM jobs WHERE script = ? AND state IN ({marks}) ORDER BY ended DESC, id DESC LIMIT ?",
             (json.dumps([cwd, script]), *_TERMINAL, limit),
+        ).fetchall()
+        return [job_from_dict(json.loads(r[0])) for r in rows]
+
+    def earlier_runs_in_session(self, session: str, name: str, since: float, limit: int = 3) -> list[Job]:
+        """Finished runs of a script of this file name (see _script_name) by this session, in any folder,
+        that ended at or after `since`, newest first (#229)."""
+        marks = ",".join("?" * len(_TERMINAL))
+        rows = self._db.execute(
+            f"SELECT data FROM jobs WHERE script_name = ? AND state IN ({marks}) AND ended >= ? "
+            "AND json_extract(data, '$.session') = ? ORDER BY ended DESC, id DESC LIMIT ?",
+            (name, *_TERMINAL, since, session, limit),
         ).fetchall()
         return [job_from_dict(json.loads(r[0])) for r in rows]
 

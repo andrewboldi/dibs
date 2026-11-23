@@ -186,6 +186,7 @@ def test_a_database_from_before_the_command_column_finds_earlier_runs(tmp_path):
     s = Store(path)
     assert [j.id for j in s.earlier_runs(job.cwd, job.argv)] == [1]
     assert [j.id for j in s.earlier_runs_of_script(job.cwd, "train.py")] == [1]  # make_job runs python train.py
+    assert [j.id for j in s.earlier_runs_in_session(job.session, "train.py", since=0.0)] == [1]
     s.close()
 
 
@@ -196,4 +197,20 @@ def test_earlier_runs_of_the_same_script_are_found_in_sql(tmp_path):
     s.add_job(make_job(state=State.DONE, ended=300.0, cwd="/w", argv=["python", "eval.py"]))
     s.add_job(make_job(state=State.DONE, ended=400.0, cwd="/x", argv=["python", "train.py"]))
     assert [j.id for j in s.earlier_runs_of_script("/w", "train.py")] == [2, 1]
+    s.close()
+
+
+def test_a_sessions_runs_of_a_script_of_the_same_name_are_found_in_any_folder(tmp_path):
+    # Issue #229: agents that submit each batch from a fresh copy of their code had no earlier runs.
+    s = Store(tmp_path / "dibs.db")
+    s.add_job(make_job(state=State.DONE, ended=100.0, cwd="/copy1", argv=["python", "/copy1/tools/train.py"]))  # 1
+    s.add_job(make_job(state=State.DONE, ended=200.0, cwd="/copy2", argv=["python", "tools/train.py", "--lr", "2"]))  # 2
+    s.add_job(make_job(state=State.DONE, ended=300.0, cwd="/copy3", argv=["python", "train.py"], session="s2"))  # 3
+    s.add_job(make_job(state=State.DONE, ended=50.0, cwd="/copy4", argv=["python", "train.py"]))  # 4: too old
+    s.add_job(make_job(state=State.RUNNING, cwd="/copy5", argv=["python", "train.py"]))  # 5: not finished
+    s.add_job(make_job(state=State.DONE, ended=400.0, cwd="/copy1", argv=["python", "eval.py"]))  # 6
+    s.add_job(make_job(state=State.DONE, ended=500.0, cwd="/w", argv=["python", "-m", "pkg.run", "x"]))  # 7
+    assert [j.id for j in s.earlier_runs_in_session("s1", "train.py", since=60.0)] == [2, 1]
+    assert [j.id for j in s.earlier_runs_in_session("s1", "train.py", since=60.0, limit=1)] == [2]
+    assert [j.id for j in s.earlier_runs_in_session("s1", "-m pkg.run", since=0.0)] == [7]
     s.close()

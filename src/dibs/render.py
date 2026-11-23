@@ -6,7 +6,7 @@ import shlex
 import time
 import unicodedata
 
-from dibs.model import GPU_IDLE_AFTER, script_of
+from dibs.model import GPU_IDLE_AFTER, script_name, script_of
 from dibs.units import format_duration, format_size
 
 _COLORS = {"running": "32", "queued": "33", "failed": "31", "done": "2", "cancelled": "2"}
@@ -91,6 +91,8 @@ def render_earlier(earlier: list[dict], match: str = "command") -> str:
         return ""
     if match == "script":
         lines = [f"Earlier runs of {script_of(earlier[0].get('argv') or []) or 'this script'} here, with other arguments:"]
+    elif match == "session":  # none here: the session's runs of a script of the same name elsewhere (#229)
+        lines = [f"Earlier runs of {script_name(earlier[0].get('argv') or []) or 'this script'} in this session's other folders:"]
     else:
         lines = ["Earlier runs of this command here:"]
     for e in earlier:
