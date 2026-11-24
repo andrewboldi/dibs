@@ -686,6 +686,13 @@ def _machine(snapshot: dict, width: int) -> list[_Line]:
     if cap.get("igpu"):  # the integrated GPU, by how busy each job keeps it (#274)
         shares = [(j["igpu_busy"], _job_color(j["id"])) for j in running if j.get("igpu_busy")]
         rows.append(("igpu", 100, shares, lambda n: f"{round(n)}%", 0, "busy outside"))
+    heat = snapshot.get("heat") or {}  # temperatures (#278)
+    temps = ([("cpu°C", heat["cpu"], heat.get("cpu_limit") or 100.0)] if heat.get("cpu") is not None else []) + [
+        (f"gpu{i}°C" if len(heat["gpus"]) > 1 else "gpu°C", t, 100.0) for i, t in sorted((heat.get("gpus") or {}).items())
+    ]
+    for name, temp, limit in temps:
+        hot = _WARN_SGR if temp >= 0.9 * limit else "36"
+        rows.append((name, limit, [(min(temp, limit), hot)], lambda n: f"{round(n)}°C", 0, ""))
     # The figures' room depends on the totals alone, so the meters keep one width as top redraws.
     room = max(len(f"{fmt(t)}/{fmt(t)}") + (len(f"   {fmt(t)} {verb}") if outside is not None else 0)
                for _, t, _, fmt, _, verb in rows) + 4  # fmt: skip
@@ -699,6 +706,8 @@ def _machine(snapshot: dict, width: int) -> list[_Line]:
             line.add(f"   {fmt(used_away)} {verb}", "2")
         if name == "cpu" and (speed := snapshot.get("cpu_cap")):  # every CPU job runs slower (#179)
             line.add(f"   capped at {speed['capped_mhz'] / 1000:.1f} GHz of {speed['max_mhz'] / 1000:.1f}", _WARN_SGR)
+        if name == "cpu°C" and (heat.get("slowed") or 0) >= 0.01:  # #278
+            line.add(f"   slowed itself for heat {round(heat['slowed'] * 100)}% of the last {format_duration(heat['over'])}", _WARN_SGR)
         lines.append(line)
     holders = [f"{h['name']} {format_size(h['ram'])}" + (f" (+{format_size(h['swap'])} swap)" if h["swap"] >= 2**27 else "")
                for h in snapshot.get("outside_holders") or []]  # fmt: skip
