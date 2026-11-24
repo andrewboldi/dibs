@@ -37,6 +37,26 @@ def test_the_largest_holders_of_ram_outside_dibs_are_named_with_their_swap(tmp_p
     ]
 
 
+def test_a_scope_dibs_counts_as_a_jobs_isnt_named_as_outside_dibs(tmp_path, monkeypatch):
+    # #269: a job's snap browser left its scope, and dibs counts it as the job's (#265); a waiting job's
+    # reason named it as the user's browser all the same.
+    monkeypatch.setattr(procs, "CGROUP_ROOT", _tree(tmp_path))
+    holders = procs.outside_holders(minimum=GiB, skip={"snap.chromium.chromium-776a4be7-f856-402c-827c-556237ea8bf6.scope"})
+    assert holders == [
+        {"name": "terminal pane", "ram": 2 * GiB, "swap": 0},
+        {"name": "chromium", "ram": GiB // 2, "swap": GiB},
+    ]
+
+
+def test_the_daemon_leaves_its_jobs_escaped_scopes_out_of_whats_outside(make_daemon, monkeypatch):
+    d = make_daemon()
+    asked = []
+    monkeypatch.setattr(procs, "outside_holders", lambda minimum, skip=frozenset(): asked.append(set(skip)) or [])
+    d._escaped_scopes = {"/user.slice/app.slice/snap.chromium.chromedriver-9f3c.scope": 7}
+    d._ram_holders(d.clock())
+    assert asked == [{"snap.chromium.chromedriver-9f3c.scope"}]
+
+
 def test_a_job_waiting_for_ram_names_the_largest_holder_outside_dibs():
     from dibs.model import Capacity, Request
     from dibs.planner import Queued, plan
@@ -63,7 +83,7 @@ def test_top_lists_the_holders_and_the_files_in_a_ram_backed_tmp():
 
 
 def test_the_snapshot_carries_the_holders(make_daemon, monkeypatch):
-    monkeypatch.setattr(procs, "outside_holders", lambda minimum: [{"name": "chromium", "ram": 7 * GiB, "swap": 0}])
+    monkeypatch.setattr(procs, "outside_holders", lambda minimum, skip=frozenset(): [{"name": "chromium", "ram": 7 * GiB, "swap": 0}])
     monkeypatch.setattr(procs, "tmp_files", lambda: 2 * GiB)
     snap = make_daemon().snapshot()
     assert snap["outside_holders"][0]["name"] == "chromium" and snap["tmp_files"] == 2 * GiB
