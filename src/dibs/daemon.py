@@ -40,6 +40,7 @@ from dibs.model import (
     compute_tag,
     default_name,
     folder_places,
+    lined_at,
     next_owed,
     job_to_dict,
     resolve_request,
@@ -467,6 +468,7 @@ class Daemon:
             history_vram=self._history_vram(cwd, list(argv), request, session),
             history_longest=self._history_longest(cwd, list(argv), request, session),
             kept=kept if keeps else None,
+            lined=lined_at(replaced) if keeps else None,  # it lines up where the job it replaced did (#282)
             state=State.QUEUED,
             output=output or "",
         )
@@ -634,9 +636,10 @@ class Daemon:
         so a busy session's line can't run hours ahead of the clock (#150). Places only move earlier.
         A session waiting in two or more folders takes the fresh line as its places, which its folders
         then take in turns (#226): the earlier of a job's old and new place would let the session's
-        places drift earlier and duplicate, as the turns move them between its jobs. Only a replacement's
-        kept place (#184) stays. folders_only: nothing to do for a session in one folder."""
-        own = sorted((j for j in self.store.jobs([State.QUEUED]) if j.session == session), key=lambda j: (j.submitted, j.id))
+        places drift earlier and duplicate, as the turns move them between its jobs. A replacement that kept
+        its place lines up where the job it replaced did (#184, #282); one made before #282 keeps the place it
+        kept. folders_only: nothing to do for a session in one folder."""
+        own = sorted((j for j in self.store.jobs([State.QUEUED]) if j.session == session), key=lambda j: (lined_at(j), j.id))
         folders = len({self._place(j.cwd) for j in own}) >= 2
         if folders_only and not folders:
             return
@@ -645,19 +648,19 @@ class Daemon:
         for j in own:
             counted = j.own_time if j.own_time is not None else j.request.time
             backlog = [new[r.id][1] for r in lined if r.priority >= j.priority]
-            start = max([j.submitted, *backlog])
+            start = max([lined_at(j), *backlog])
             for r in lined:  # it goes ahead of the session's lower-priority jobs, which move back by its estimate
                 if r.priority < j.priority and new[r.id][1] > start:
                     new[r.id][0] += counted
                     new[r.id][1] += counted
-            new[j.id] = [compute_tag(j.submitted, counted, backlog, j.priority, j.owed_carried),
-                         compute_tag(j.submitted, counted, backlog)]  # fmt: skip
+            new[j.id] = [compute_tag(lined_at(j), counted, backlog, j.priority, j.owed_carried),
+                         compute_tag(lined_at(j), counted, backlog)]  # fmt: skip
             lined.append(j)
         for j in own:
             tag, plain = new[j.id]
             if not folders:
                 tag, plain = min(tag, j.tag), min(plain, j.plain_tag if j.plain_tag is not None else plain)
-            elif j.kept is not None:
+            elif j.kept is not None and j.lined is None:  # made before #282, lined up at its own submit
                 tag, plain = min(tag, j.kept[0]), min(plain, j.kept[1])
             if (tag, plain) != (j.tag, j.plain_tag):
                 j.tag, j.plain_tag = tag, plain
@@ -673,10 +676,10 @@ class Daemon:
         if len({self._place(j.cwd) for j in own}) < 2:
             return
         places = folder_places(own, self._place, self._turn_owed(session, now))
-        order = sorted(own, key=lambda j: (places[j.id][0], j.submitted, j.id))
+        order = sorted(own, key=lambda j: (places[j.id][0], lined_at(j), j.id))
         slots = sorted((j.tag, j.plain_tag if j.plain_tag is not None else j.tag) for j in own)
         for j, (tag, plain) in zip(order, slots):
-            tag, plain = max(tag, j.submitted), max(plain, j.submitted)  # never ahead of its own submit
+            tag, plain = max(tag, lined_at(j)), max(plain, lined_at(j))  # never ahead of its own submit (#282)
             if (tag, plain) != (j.tag, j.plain_tag):
                 j.tag, j.plain_tag = tag, plain
                 self.store.update_job(j)

@@ -79,3 +79,104 @@ def test_the_help_and_agent_help_say_a_no_larger_replacement_keeps_its_place():
     help_text = subprocess.run([sys.executable, "-m", "dibs", "submit", "--help"], capture_output=True, text=True).stdout
     assert "asks for no more keeps its place in line" in " ".join(help_text.split())
     assert "asks for no more of anything keeps the job's place in line" in " ".join(AGENT_HELP.split())
+
+
+# #282: lining a session up again took a replacement as newly submitted, at the back of the session's line,
+# and also as holding the place it kept: the replaced job's estimate left the line while its place stayed.
+# An agent halved 20 waiting jobs' RAM with --replace; with no job starting, its session's other jobs moved
+# a median 6.5 hours ahead, and 18 came to share a place.
+
+
+def _session(make_daemon, tmp_path, folders=2):
+    """A daemon whose only CPU a blocker holds, a clock to move, and session s1's folders."""
+    from conftest import capacity
+    from test_folder_turns import _trees
+
+    now = [1000.0]
+    d = make_daemon(clock=lambda: now[0], cap=capacity(cpus=[0]))
+    submit(d, tmp_path, ["sleep", "30"], session="blocker")
+    trees = _trees(tmp_path)
+    return d, now, trees[:folders]
+
+
+def _wait(d, now, folder, n):
+    """Session s1 submits a 10-minute job in a folder, a second later than the last."""
+    now[0] += 1
+    return submit(d, folder, [PY, "-c", "pass", str(n)], time_=600.0, mem=2 * GiB, session="s1")
+
+
+def _places(d):
+    from dibs.model import State
+
+    return {j.id: (j.tag, j.plain_tag) for j in d.store.jobs([State.QUEUED]) if j.session == "s1"}
+
+
+def _again(d, old):
+    """The same command, asking for less RAM: it keeps its place (#184)."""
+    j = job(d, old)
+    resp = d.submit(req(j.cwd, j.argv, mem=1 * GiB, time_=600.0, session="s1", replace=old))
+    assert resp["ok"] and resp["kept_place"], resp
+    return resp["job"]["id"]
+
+
+def test_a_replacement_keeping_its_place_moves_no_other_job_of_a_multi_folder_session(make_daemon, tmp_path):
+    d, now, (a, b) = _session(make_daemon, tmp_path)
+    a1, a2, b1 = _wait(d, now, a, 1), _wait(d, now, a, 2), _wait(d, now, b, 3)
+    before = _places(d)
+    assert sorted(t for t, _ in before.values()) == [1601.0, 2201.0, 2801.0]
+    assert before[b1][0] < before[a2][0]  # the folders take turns: b1 has an earlier place than its submit's
+    b2 = _again(d, b1)
+    after = _places(d)
+    assert after[b2] == before[b1] and {i: after[i] for i in (a1, a2)} == {i: before[i] for i in (a1, a2)}
+    b3 = _again(d, b2)  # replacing the replacement keeps that place too
+    assert _places(d) == {a1: before[a1], a2: before[a2], b3: before[b1]}
+
+
+def test_a_replacement_keeping_its_place_moves_nothing_in_a_one_folder_sessions_next_lining_up(make_daemon, tmp_path):
+    d, now, (a,) = _session(make_daemon, tmp_path, folders=1)
+    j1, j2, j3, j4 = (_wait(d, now, a, n) for n in range(4))
+    before = _places(d)
+    j2b = _again(d, j2)
+    d.cancel([j4])  # the session's last waiting job held nothing back: its line is lined up again
+    assert _places(d) == {j1: before[j1], j2b: before[j2], j3: before[j3]}
+
+
+def test_a_replacement_of_a_job_whose_place_has_come_due_keeps_that_place(make_daemon, tmp_path):
+    d, now, (a, b) = _session(make_daemon, tmp_path)
+    a1, b1 = _wait(d, now, a, 1), _wait(d, now, b, 2)
+    before = _places(d)
+    now[0] = 2500.0  # both places have come due; the blocker still holds the CPU
+    a2 = _again(d, a1)
+    assert _places(d) == {a2: before[a1], b1: before[b1]}
+
+
+def test_replacing_a_folders_waiting_jobs_one_by_one_leaves_the_session_the_places_it_had(make_daemon, tmp_path):
+    d, now, (a, b) = _session(make_daemon, tmp_path)
+    sweep = [_wait(d, now, a, n) for n in range(6)]
+    [_wait(d, now, b, 10 + n) for n in range(3)]
+    before = sorted(_places(d).values())
+    for old in sweep:
+        _again(d, old)
+    assert sorted(_places(d).values()) == before  # none gained, none shared
+
+
+def test_a_replacement_queued_before_282_keeps_its_place_and_nothing_moves_across_the_restart(make_daemon, tmp_path):
+    # Dropping the place such a replacement kept would move its session's jobs at the restart, and could put
+    # it behind jobs submitted after the one it replaced, after dibs told its agent it kept its place.
+    d, now, (a, b) = _session(make_daemon, tmp_path)
+    a1, b1 = _wait(d, now, a, 1), _wait(d, now, b, 2)
+    now[0] = 1500.0
+    a3 = _wait(d, now, a, 3)
+    now[0] = 1600.0
+    b2 = _again(d, b1)
+    # As dibs before #282 saved them: the replacement without the time it lines up at, and the places that
+    # lining it up at its own submit, while keeping 2201 for it too, gave the session.
+    old = {a1: 1601.0, b2: 2201.0, a3: 2201.0}
+    for i, place in old.items():
+        j = job(d, i)
+        j.tag = j.plain_tag = place
+        if i == b2:
+            j.lined = None
+        d.store.update_job(j)
+    d.recover()  # the restart that installs #282 lines every session up again
+    assert {i: tag for i, (tag, _) in _places(d).items()} == old
