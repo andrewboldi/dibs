@@ -401,7 +401,7 @@ def test_sizing_says_what_a_padded_ram_request_costs_and_how_to_fix_one():
     # Issue #230: one session's jobs peaked at a median 33% of the RAM they asked for, while jobs waited
     # for RAM. Agents are told the size to ask, what padding costs, and how to shrink a waiting job.
     sizing = " ".join(AGENT_HELP.split("## Sizing a request", 1)[1].split("\n## ", 1)[0].split())
-    for phrase in ("RAM peak plus about a quarter", "run one job first and size the rest from its peak",
+    for phrase in ("the RAM peak, with no margin", "run one job first and size the rest from its peak",
                    "holds back every job behind it", "--replace ID"):  # fmt: skip
         assert phrase in sizing, phrase
     assert sizing in " ".join(SKILL.split())  # the installed skill says the same
@@ -412,7 +412,7 @@ def test_sizing_doesnt_promise_a_tight_request_is_safe(tmp_path):
     # limit within seconds, faster than dibs grows a job; the other's run needed more than earlier ones.
     sizing = " ".join(AGENT_HELP.split("## Sizing a request", 1)[1].split("\n## ", 1)[0].split())
     assert "costs little" not in sizing
-    for phrase in ("jumps past that room faster than dibs can act is killed",
+    for phrase in ("one that ends up waiting on swap most of the time is stopped",
                    "add `--retry` to a tightly sized job that is safe to run again",
                    "from the run with its largest input"):  # fmt: skip
         assert phrase in sizing, phrase

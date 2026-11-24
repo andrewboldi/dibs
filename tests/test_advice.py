@@ -63,20 +63,20 @@ def test_a_job_waiting_for_ram_far_above_what_its_scripts_runs_used_is_told(make
     assert job(d, waiting).state == State.QUEUED
     (told,) = _advice(d)
     assert f"Job {waiting} waits for 5G of RAM" in told and "the last 5 runs of train.py peaked at 1G at most" in told
-    assert "--mem 1.5G would do" in told  # the peak plus a quarter (#212)
+    assert "--mem 1G would do" in told  # the peak, with no margin (#212, #257)
     go.touch()
     run_until(d, lambda: finished(d, holder) and finished(d, waiting))
 
 
 def test_submit_carries_the_sizing_fact_when_earlier_runs_used_far_less(make_daemon, tmp_path):
     # Issue #212: the fact goes on submit's first line, the one line agents keep: 5+ runs, and the peak
-    # plus a quarter at most three quarters of the request.
+    # (with no margin since #257) at most three quarters of the request.
     d = make_daemon()
     script = _script(tmp_path)
     _runs(d, tmp_path, script, 5, peak_mem=1 * GiB)
     padded = d.submit(req_for(tmp_path, [PY, str(script), "9"], mem=2 * GiB))
-    assert padded["job"]["sizing"] == {"runs": 5, "peak": 1 * GiB, "suggest": int(1.5 * GiB)}
-    close = d.submit(req_for(tmp_path, [PY, str(script), "9"], mem=int(1.75 * GiB)))  # 1.5G isn't a quarter less
+    assert padded["job"]["sizing"] == {"runs": 5, "peak": 1 * GiB, "suggest": 1 * GiB}
+    close = d.submit(req_for(tmp_path, [PY, str(script), "9"], mem=int(1.25 * GiB)))  # 1G isn't a quarter less
     assert close["job"].get("sizing") is None
     run_until(d, lambda: finished(d, padded["job"]["id"]) and finished(d, close["job"]["id"]))
 
