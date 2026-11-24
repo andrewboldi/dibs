@@ -53,7 +53,9 @@ from dibs.units import GiB, MiB, format_duration, format_size, format_size_again
 
 KILL_AFTER = 10.0  # seconds between asking a job to stop (SIGTERM) and forcing it (SIGKILL)
 OWED_FOR = 86400.0  # seconds: what a session owes (or is owed) for its priorities lapses after a day
-OUTSIDE_WINDOW = 120.0  # seconds: RAM in use outside dibs counts as its peak over this long
+OUTSIDE_WINDOW = 30.0  # seconds: RAM in use outside dibs counts as its peak over this long (was 120 s, #255)
+RECENT_PEAK = 600.0  # seconds: a running job counts at the most it used over this long (#255)
+SEEN_FROM_START = 60.0  # seconds: a job dibs first saw within this of its start was watched all along
 JOBS_RAM_WINDOW = 10.0  # seconds: RAM dibs jobs hold counts as its peak over this long, when taken off the in-use total
 RETENTION_EVERY = 3600.0
 MAX_RETRIES = 2  # runs again after a resource failure, at most (#84)
@@ -250,6 +252,8 @@ class Daemon:
         self._shortage_logged = -math.inf
         self._passes: deque[tuple[float, float]] = deque()  # (time, seconds the pass took), the last minute
         self._held: dict[int, int] = {}  # job id -> what it held (anon + shmem) at this tick's sample
+        self._recent_held: dict[int, deque[tuple[float, int]]] = {}  # job id -> (time, held), RECENT_PEAK of them
+        self._watching: dict[int, float] = {}  # job id -> when this daemon first read its memory
         self._grow_failed: dict[int, float] = {}  # job id -> when raising its RAM limit last failed
         self.cpu_busy = cpu_busy
         # (pid, RAM held) of the machine's programs holding at least `minimum` bytes, for the guard
@@ -832,13 +836,18 @@ class Daemon:
         queued = self.store.jobs([State.QUEUED])
         borrowing = self._borrowing()
         outside_mem = self._shown_outside_mem = self._outside_mem(now, running)  # dibs top draws it (#120)
+        planned = {j.id: self._planned_mem(j, now) for j in running} if borrowing else {}
+        # Planning by use bets RAM running jobs reserved but aren't using. A job started on it leaves the
+        # machine its reserve (#255); one that fits in RAM nobody reserved starts as before.
+        bet = sum(_limit(j) - planned[j.id] for j in running) if borrowing else 0
+        capacity = replace(self.capacity, mem=self.capacity.mem - min(self.config.ram_reserve, bet))
         current = plan(
-            self.capacity,
+            capacity,
             # A job's estimate is of its running time, so the time the machine slept moves its start on.
             # A job that borrows VRAM (#88) counts at what it has used, so nothing starts into it.
             # A job that grew past its RAM reservation counts at its raised limit, so nothing starts into
             # RAM it may yet use (#155).
-            [Running(j.id, _holding(j, _limit(j) if j.ram_limit else self._planned_mem(j, now) if borrowing else None,
+            [Running(j.id, _holding(j, planned[j.id] if borrowing else _limit(j) if j.ram_limit else None,
                                     self._young_vram(j, now)),
                      tuple(j.cpu_ids), tuple(j.gpu_ids), (j.started or now) + self._asleep(j), j.history_longest)
              for j in running],
@@ -931,17 +940,26 @@ class Daemon:
         return self.config.borrow_ram and self.pressure() < PRESSURE_LIMIT
 
     def _planned_mem(self, job: Job, now: float) -> int:
-        """What a running job counts as holding when RAM is planned by use (#86): the larger of its peak
-        so far (which only grows) and earlier runs' peak, plus 25% or 1G, whichever is more, never more
-        than its reservation. A job with no earlier runs counts at its whole reservation for its first
-        ten minutes, while it may still be growing, and an exclusive job always does."""
+        """What a running job counts as holding when RAM is planned by use (#86): the most it used over
+        the last RECENT_PEAK, with no margin and never past its limit, so the machine fills with what
+        jobs really use, keeping only its reserve (#255). Until dibs has watched it that long (after a
+        restart), its peak so far. A job with no earlier runs counts at its whole reservation for its
+        first ten minutes, while it may still be growing, and one with earlier runs at least at their
+        peak then; an exclusive job always counts whole."""
         if job.request.exclusive:
-            return job.request.mem
-        known = max(job.peak_mem or 0, job.history_mem or 0)
+            return _limit(job)
         ran = now - (job.started or now) - self._asleep(job)
-        if not known or (not job.history_mem and ran < YOUNG):
-            return job.request.mem
-        return min(job.request.mem, max(int(known * 1.25), known + GiB))
+        if not job.history_mem and ran < YOUNG:
+            return _limit(job)  # its reservation, or the limit it already grew to
+        samples = self._recent_held.get(job.id) or ()
+        recent = max((held for t, held in samples if t >= now - RECENT_PEAK), default=0)
+        since = self._watching.get(job.id)
+        watched = since is not None and (now - since >= RECENT_PEAK or since - (job.started or since) <= SEEN_FROM_START)
+        if not watched:  # dibs (re)started while it ran: what it used before counts too
+            recent = max(recent, job.peak_mem or 0)
+        if ran < YOUNG:  # still young: as much as its earlier runs used, at least
+            recent = max(recent, job.history_mem or 0)
+        return min(_limit(job), recent) if recent else _limit(job)
 
     def _outside_mem(self, now: float, running: list[Job]) -> int:
         """RAM in use outside dibs jobs that eats into what dibs hands out, as its peak over the last
@@ -1127,10 +1145,20 @@ class Daemon:
         memory.peak also counts file cache, so a job that wrote big files looked as if it had filled
         its reservation."""
         self._held = {}  # only this tick's samples: a retried job never grows on its last try's reading
-        for job in self.store.jobs([State.RUNNING]):
+        now = self.clock()
+        running = self.store.jobs([State.RUNNING])
+        for gone in set(self._recent_held) - {j.id for j in running}:
+            del self._recent_held[gone]
+            self._watching.pop(gone, None)
+        for job in running:
             held = self._memory_in_use(job)
             if held is not None:
                 self._held[job.id] = held[0]
+                self._watching.setdefault(job.id, now)
+                samples = self._recent_held.setdefault(job.id, deque())
+                samples.append((now, held[0]))
+                while samples[0][0] < now - RECENT_PEAK:
+                    samples.popleft()
             if held is not None and (job.peak_mem is None or held[0] > job.peak_mem):
                 job.peak_mem, job.peak_shmem, mapped = held
                 job.peak_shmem_mapped = list(mapped)
@@ -1174,7 +1202,7 @@ class Daemon:
         room = self.capacity.mem - outside - sum(_limit(j) for j in running)
         # Failing that, RAM other jobs reserved but aren't using, by the plan by use that lets a waiting
         # job start in it (#149, #182): a job at its limit has work to lose, so it goes ahead of them.
-        lend = self.capacity.mem - outside - sum(_limit(j) if j.ram_limit else self._planned_mem(j, now) for j in running)
+        lend = self.capacity.mem - self.config.ram_reserve - outside - sum(self._planned_mem(j, now) for j in running)
         lend = lend if self._borrowing() else 0
         # Failing both, the margins dibs keeps over other jobs' peaks, when the machine really has room:
         # a kill at the limit loses the work for certain, and the margins may never be used (#228).

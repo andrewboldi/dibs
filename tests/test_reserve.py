@@ -2,8 +2,12 @@
 anything outside dibs: the newest job started on RAM other jobs reserved goes first (#253)."""
 
 import time
+from collections import deque
 
+import pytest
 from test_daemon import _borrowing, job
+
+from dibs.model import State
 
 from dibs.machine import Config, ConfigError, load_config
 from dibs.units import GiB
@@ -57,6 +61,37 @@ def test_with_no_borrower_left_a_program_outside_dibs_is_stopped_as_before(make_
         d.tick()
         d.clock = (lambda t: (lambda: t))(d.clock() + 6.0)
     assert hogs
+    go.touch()
+
+
+@pytest.mark.parametrize("asks, starts", [(13 * GiB, False), (int(12.5 * GiB), True)])
+def test_a_job_starts_on_unused_ram_only_leaving_the_reserve(make_daemon, tmp_path, monkeypatch, asks, starts):
+    # A reserves 12G of 16G and counts at the 2G it uses (#255): 14G free by the count. Asking 13G
+    # would leave 1G, under the 1.5G reserve; 12.5G leaves it.
+    d, a, b, go = _borrowing(make_daemon, tmp_path, monkeypatch, ran=700, mem=asks)
+    assert (job(d, b).state == State.RUNNING) == starts
+    go.touch()
+
+
+@pytest.mark.parametrize("held, limit, grows", [(8 * GiB, None, True), (int(11.5 * GiB), int(11.5 * GiB), False)])
+def test_a_job_grows_into_unused_ram_only_leaving_the_reserve(make_daemon, tmp_path, monkeypatch, held, limit, grows):
+    # A counts at the 2G it uses. B (8G, started on A's unused RAM, with earlier runs) nears its limit:
+    # a 2G step from 8G leaves 16 - 2 - 10 = 4G; from 11.5G it would leave 0.5G, under the 1.5G reserve.
+    used = [2 * GiB]
+    d, a, b, go = _borrowing(make_daemon, tmp_path, monkeypatch, ran=700, meminfo=lambda: (16 * GiB, used[0]))
+    assert job(d, b).borrowed_ram
+    j = job(d, b)
+    j.history_mem, j.ram_limit = 8 * GiB, limit
+    d.store.update_job(j)
+    used[0] = 2 * GiB + held
+    real = d._memory_in_use
+    d._memory_in_use = lambda job: (held, 0, (0, 0)) if job.id == b else real(job)
+    d._held[b] = held
+    d._recent_held[b] = deque([(d.clock(), held)])
+    raised = []
+    d.set_mem_limit = lambda job, new: raised.append(new) or True
+    d._grow(d.clock())
+    assert bool(raised) == grows
     go.touch()
 
 

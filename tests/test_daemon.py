@@ -831,8 +831,8 @@ def test_submit_tells_the_session_how_its_estimates_compared(daemon, tmp_path):
 
 
 def _borrowing(make_daemon, tmp_path, monkeypatch, *, ran, pressure=0.0, config=None, now=None, retry=True,
-               meminfo=None):  # fmt: skip
-    """Job A reserves 12G of 16G and has used 2G after `ran` seconds; job B then asks for 8G."""
+               meminfo=None, mem=8 * GiB):  # fmt: skip
+    """Job A reserves 12G of 16G and has used 2G after `ran` seconds; job B then asks for `mem`, 8G."""
     from dibs.machine import Config
 
     now = now or [time.time()]
@@ -844,7 +844,7 @@ def _borrowing(make_daemon, tmp_path, monkeypatch, *, ran, pressure=0.0, config=
     d.tick()
     now[0] += ran
     d.tick()
-    b = submit(d, tmp_path, [PY, "-c", "import time; time.sleep(3)"], mem=8 * GiB, retry=retry)
+    b = submit(d, tmp_path, [PY, "-c", "import time; time.sleep(3)"], mem=mem, retry=retry)
     d.tick()
     return d, a, b, go
 
