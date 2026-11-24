@@ -899,7 +899,8 @@ class Daemon:
         read every HOLDERS_EVERY seconds (#164)."""
         if now - self._holders[0] >= HOLDERS_EVERY:
             try:
-                holders = procs.outside_holders(minimum=max(GiB, self.capacity.mem // 30))
+                escaped = {cg.rsplit("/", 1)[-1] for cg in self._escaped_scopes}  # the jobs' own (#269)
+                holders = procs.outside_holders(minimum=max(GiB, self.capacity.mem // 30), skip=escaped)
             except OSError:
                 holders = []
             self._holders = (now, holders, procs.tmp_files())

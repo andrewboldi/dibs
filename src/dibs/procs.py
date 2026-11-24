@@ -347,11 +347,12 @@ def cpu_cap(root: str = CPU_ROOT) -> dict | None:
     return {"capped_mhz": min(cap for _, cap in capped), "max_mhz": max(top for top, _ in speeds)}
 
 
-def outside_holders(minimum: int) -> list[dict]:
+def outside_holders(minimum: int, skip: frozenset[str] | set[str] = frozenset()) -> list[dict]:
     """What holds RAM outside dibs, per app or terminal pane (#164): each scope or service under the
     user's systemd instance, but dibs's own jobs and service, by what its processes hold (anon + shmem:
     exact, shared pages counted once) and its swap, largest first. An app's scopes are added up; each
-    terminal pane is its own. Only those holding `minimum` or more in RAM and swap together, four at most."""
+    terminal pane is its own. Only those holding `minimum` or more in RAM and swap together, four at most.
+    Scopes named in `skip` are dibs's too: programs a job started that left its scope (#265, #269)."""
     from dibs.agents import PANE_SCOPES
 
     base = f"{CGROUP_ROOT}/user.slice/user-{os.getuid()}.slice/user@{os.getuid()}.service"
@@ -362,7 +363,7 @@ def outside_holders(minimum: int) -> list[dict]:
             continue
         if any(os.path.exists(f"{path}/{d}/memory.stat") for d in dirs):
             continue  # it holds others, each counted itself
-        if leaf == "dibs.service" or (leaf.startswith("dibs-") and "-job-" in leaf):
+        if leaf == "dibs.service" or (leaf.startswith("dibs-") and "-job-" in leaf) or leaf in skip:
             continue
         stat = keyed_numbers(_read(f"{path}/memory.stat"))
         swap = (_read(f"{path}/memory.swap.current") or "0").strip()
