@@ -63,13 +63,13 @@ def test_a_processs_clients_on_the_integrated_gpu_are_read_once_each(tmp_path, m
     assert procs.drm_clients([10, 11, 12], nodes) == {"7": {"render": 900, "copy": 50, "video": 0}}
 
 
-def _rendering(make_daemon, tmp_path, monkeypatch):
+def _rendering(make_daemon, tmp_path, monkeypatch, **daemon):
     """A job (pid 4242 in its scope) rendering on the integrated GPU; `look(seconds, render_ns)` moves the
     clock on, sets its render engine's busy time so far, and ticks."""
     now = [time.time()]
     proc = tmp_path / "proc"
     monkeypatch.setattr(procs, "PROC_ROOT", str(proc))
-    d = make_daemon(clock=lambda: now[0], igpu=(INTEL, ("/dev/dri/card1", "/dev/dri/renderD128")))
+    d = make_daemon(clock=lambda: now[0], igpu=(INTEL, ("/dev/dri/card1", "/dev/dri/renderD128")), **daemon)
     a, stat, go = _job_holding(d, tmp_path, monkeypatch, 4 * GiB)
     (stat.parent / "cgroup.procs").write_text("4242\n")
 

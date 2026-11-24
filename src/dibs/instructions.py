@@ -74,6 +74,12 @@ when those resources are free, so jobs never crash each other by running out of 
   it took until its processes free it or exit, so a long CPU-only stretch after the GPU work can be
   a job of its own, without --vram.
 - `--gpus N`: more than one GPU (each with --vram).
+- `--igpu`: the machine's integrated GPU, where there is one, to render on through OpenGL or Vulkan
+  (Blender's EEVEE, a simulator's renders, a headless browser's WebGL): not CUDA or PyTorch. dibs
+  points the job's OpenGL and Vulkan at it and gives it to one job at a time, since it also draws the
+  screen; its memory comes out of --mem. It's far smaller than the NVIDIA GPU, but free while that
+  one is busy. It works beside --vram, for a job that computes there and draws here. A job seen
+  keeping it busy without --igpu holds it all the same.
 - `--time DURATION`: your honest estimate, like 90s, 20m or 1h30m. It only decides the order:
   shorter jobs go first, and once a job's place in line comes due (at the default priority, after
   waiting its estimate) newer jobs can't pass it. Nothing is ever stopped for running longer than its estimate.

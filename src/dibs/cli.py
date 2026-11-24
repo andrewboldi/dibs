@@ -86,6 +86,10 @@ def build_parser() -> argparse.ArgumentParser:
         )
         s.add_argument("--gpus", type=int, help="how many GPUs (default: 1 when --vram is given)")
         s.add_argument(
+            "--igpu", action="store_true",
+            help="the integrated GPU, to render on through OpenGL or Vulkan (not CUDA); one job at a time",
+        )  # fmt: skip
+        s.add_argument(
             "-t", "--time", type=_duration, required=True,
             help="how long you expect it to take, like 20m or 1h30m (only orders the queue; never enforced)",
         )  # fmt: skip
@@ -197,7 +201,7 @@ def _submit_request(args, command: list[str], paths: Paths | None = None) -> dic
         "output": os.path.abspath(args.output) if args.output else None,
         "request": {
             "cpus": args.cpus, "mem": args.mem, "vram": args.vram, "gpus": args.gpus, "time": args.time,
-            "exclusive": args.exclusive,
+            "exclusive": args.exclusive, "igpu": args.igpu,
         },  # fmt: skip
     }
 

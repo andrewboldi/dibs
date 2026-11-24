@@ -69,6 +69,7 @@ RESERVE_PRESSURE = 10.0  # % memory pressure (some, avg10): with RAM under the r
 SPILL_SHARE = 0.5  # past its RAM limit, a job may hold this share of its request in swap (#257)
 TITLE_MAX = 80  # characters in a job's title (#259)
 ESCAPED_TELL = 256 * MiB  # what programs that left a job's scope hold before its session is told (#265)
+IGPU_HOLDS = 5.0  # % of the integrated GPU a job keeps busy over a look that counts as holding it (#276)
 THRASH_PRESSURE = 40.0  # % of the time all of a job's processes waited on memory (full avg10), at its own limit
 THRASH_AFTER = 10.0  # seconds of that before dibs stops the job: systemd-oomd acts on 50% for 20 s (#257)
 SPILLED_ENOUGH = 256 * MiB  # swap a job at its limit holds to be stopped first when swap runs short (#257)
@@ -161,11 +162,14 @@ def _limit(job: Job) -> int:
     return max(job.request.mem, job.ram_limit or 0)
 
 
-def _holding(job: Job, mem: int | None = None, vram: int | None = None) -> Request:
+def _holding(job: Job, mem: int | None = None, vram: int | None = None, igpu: bool = False) -> Request:
     """A running job's request as the planner should count it: VRAM it borrowed counts as held (#88),
     and so does `vram`, what its command's earlier runs held, while it's young (#183); its RAM counts
-    as `mem` when RAM is planned by use (#86)."""
+    as `mem` when RAM is planned by use (#86); and the integrated GPU, when it's seen keeping that busy
+    whether or not it asked (#276)."""
     request = job.request
+    if igpu and not request.igpu:
+        request = replace(request, igpu=True)
     if job.peak_vram and request.gpus and job.peak_vram > request.vram:
         request = replace(request, vram=job.peak_vram)
     if vram and request.gpus and vram > request.vram:
@@ -188,7 +192,8 @@ def _keeps_place(old: Job, session: str, argv: list[str], cwd: str, new: Request
     return (
         old.state == State.QUEUED and old.session == session and list(old.argv) == argv and old.cwd == cwd
         and new.cpus <= was.cpus and new.mem <= was.mem and new.gpus <= was.gpus and new.vram <= was.vram
-        and new.time <= was.time and (was.exclusive or not new.exclusive) and priority <= old.priority
+        and new.time <= was.time and (was.exclusive or not new.exclusive) and (was.igpu or not new.igpu)
+        and priority <= old.priority
     )  # fmt: skip
 
 
@@ -885,7 +890,7 @@ class Daemon:
             # RAM it may yet use (#155).
             # Programs a job started that left its scope count on top, its limit not holding them (#265).
             [Running(j.id, _holding(j, (planned[j.id] if borrowing else _limit(j)) + self._escaped_recent(j, now),
-                                    self._young_vram(j, now)),
+                                    self._young_vram(j, now), self._igpu_busy.get(j.id, 0.0) >= IGPU_HOLDS),
                      tuple(j.cpu_ids), tuple(j.gpu_ids), (j.started or now) + self._asleep(j), j.history_longest)
              for j in running],
             # A job that asks for less GPU memory than its command's earlier runs held is planned at what
@@ -1305,7 +1310,24 @@ class Daemon:
                 if busy[job.id] > (job.peak_igpu or 0.0):
                     job.peak_igpu = busy[job.id]
                     self.store.update_job(job)
+                if busy[job.id] >= IGPU_HOLDS and not job.request.igpu and not job.igpu_told:
+                    self._tell_igpu(job, busy[job.id], now)
         self._igpu_seen, self._igpu_busy = seen, busy
+
+    def _tell_igpu(self, job: Job, busy: float, now: float) -> None:
+        """Tell the session once that its job keeps the integrated GPU busy without asking (#276): it holds
+        that GPU in the plan all the same, and --igpu would point its drawing there and keep a second job
+        off it. At most once per ADVISE_EVERY for the same script."""
+        job.igpu_told = True
+        self.store.update_job(job)
+        key = f"advised:{job.session}:igpu:{script_of(job.argv) or ' '.join(job.argv)}"
+        if now - float(self.store.get_meta(key) or -math.inf) < ADVISE_EVERY:
+            return
+        self.store.set_meta(key, repr(now))
+        message = (f"Job {job.id} ({job.name}) keeps the integrated GPU {round(busy)}% busy without asking for it. "
+                   "Submit such jobs with --igpu: dibs then gives that GPU to one job at a time (it also draws the "
+                   "screen) and points the job's OpenGL and Vulkan at it.")  # fmt: skip
+        self.store.add_event("advice", {"session": job.session, "job": job.id, "message": message}, now)
 
     def _find_escaped(self, running: list[Job]) -> dict[str, int]:
         """Scopes beside the running jobs' own whose oldest process descends from a job's shim."""
@@ -2469,7 +2491,7 @@ class Daemon:
             "gpus": [
                 {"index": g.index, "uuid": g.uuid, "name": g.name, "vram": g.vram} for g in self.capacity.gpus
             ],
-            **({"igpu": {"pci": self.igpu[0]}} if self.igpu else {}),  # #274
+            **({"igpu": {"pci": self.igpu[0], "jobs": self.capacity.igpu}} if self.igpu else {}),  # #274, #276
         }
 
     def _view(self, job: Job, now: float, current: Plan) -> dict:
@@ -2535,7 +2557,8 @@ def run_daemon(env: Mapping[str, str] = os.environ) -> int:
     try:
         config = load_config(paths.config_file)
         backend = open_backend(env)
-        capacity = build_capacity(config, detect_cpus(), detect_mem(), backend.list_gpus())
+        igpu = procs.find_igpu()  # #274
+        capacity = build_capacity(config, detect_cpus(), detect_mem(), backend.list_gpus(), igpu=igpu is not None)
     except (ConfigError, ValueError, OSError) as e:
         log.error("can't start: %s", e)
         print(f"dibs: can't start: {e}", file=sys.stderr)
@@ -2544,7 +2567,7 @@ def run_daemon(env: Mapping[str, str] = os.environ) -> int:
     daemon = Daemon(paths, config, capacity, backend, use_systemd=use_systemd, programs=procs.big_programs,
                     set_mem_limit=launcher.set_memory_max if use_systemd else None,
                     panes=lambda: procs.pane_cpu(PANE_SCOPES), disk_free=procs.disk_free, written=procs.written_bytes,
-                    swap_free=procs.swap_free, igpu=procs.find_igpu())  # fmt: skip
+                    swap_free=procs.swap_free, igpu=igpu)  # fmt: skip
     daemon.recover()
     gpus = ", ".join(f"GPU {g.index} {format_size(g.vram)}" for g in capacity.gpus) or "no GPUs"
     log.info(

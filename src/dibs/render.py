@@ -63,6 +63,8 @@ def asks_for(request: dict) -> str:
     parts = [_plural(request["cpus"], "CPU"), f"{format_size(request['mem'])} RAM"]
     if request["gpus"]:
         parts.append(f"{format_size(request['vram'])} VRAM on {_plural(request['gpus'], 'GPU')}")
+    if request.get("igpu"):  # #276
+        parts.append("the integrated GPU")
     return ", ".join(parts) + f", ~{format_duration(request['time'])}"
 
 
@@ -215,7 +217,7 @@ def _when_cell(job: dict, now: float) -> str:
 def _vram_cell(job: dict) -> str:
     req = job["request"]
     if not req["vram"]:
-        return "-"
+        return "igpu" if req.get("igpu") else "-"  # #276
     if job["state"] == "running" and job.get("gpu_ids"):
         return f"{format_size(req['vram'])}@{','.join(str(g) for g in job['gpu_ids'])}"
     return format_size(req["vram"]) + (f"×{req['gpus']}" if req["gpus"] > 1 else "")
