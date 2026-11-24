@@ -442,7 +442,10 @@ class Daemon:
         passed = [j for j in own if j.priority < priority and (j.plain_tag if j.plain_tag is not None else j.tag) > start]
         momentum = self._momentum(now)
         counted = request.time * (MOMENTUM_SHARE if momentum and momentum["session"] == session else 1.0)
-        carried, left = self._owed(session, now), next_owed(counted, priority)
+        # A replacement that keeps its place keeps the debts of the job it replaces, so its fresh place is lined
+        # up by them too, as relining does: what its session owes, or is owed, waits for its next new job (#287).
+        carried = replaced.owed_carried if keeps else self._owed(session, now)
+        left = next_owed(counted, priority)
         tag, plain_tag = compute_tag(now, counted, backlog, priority, carried), compute_tag(now, counted, backlog)
         if keeps:
             # The earlier of its old place and a fresh one (#184), and its debts as they were: the job it

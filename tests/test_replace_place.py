@@ -214,3 +214,55 @@ def test_a_replacement_lowering_its_priority_keeps_the_place_its_priority_took_a
     b2 = resp["job"]["id"]
     assert _places(d) == {a1: before[a1], a2: before[a2], b2: before[b1]}
     assert (job(d, b2).owed_carried, job(d, b2).owed_left) == (job(d, b1).owed_carried, job(d, b1).owed_left)
+
+
+# #287: a replacement that keeps its place takes the earlier of its old place and a fresh one (#184), and the
+# fresh one was lined up with what its session was owed at that moment. The replacement keeps the debts of the
+# job it replaces, so it never used that credit up: a session with 3,150 s of credit replaced two waiting jobs,
+# both went 15-19 minutes ahead of the places they had, and the credit stayed for its next job.
+
+
+def _boosted(d, now, folder, n):
+    """Session s1 submits a 10-minute job at priority 6, a second later than the last."""
+    now[0] += 1
+    return submit(d, folder, [PY, "-c", "pass", str(n)], time_=600.0, mem=2 * GiB, session="s1", priority=6)
+
+
+def test_a_replacement_keeping_its_place_doesnt_draw_on_its_sessions_credit(make_daemon, tmp_path):
+    import json
+
+    d, now, (a,) = _session(make_daemon, tmp_path, folders=1)
+    first, second = _boosted(d, now, a, 1), _boosted(d, now, a, 2)
+    now[0] += 1
+    submit(d, a, [PY, "-c", "pass", "low"], time_=600.0, mem=2 * GiB, session="s1", priority=1)  # leaves credit
+    credit = d.store.get_meta("owed:s1")
+    assert json.loads(credit)["owed"] < 0
+    now[0] += 1
+    other = submit(d, a, [PY, "-c", "pass", "other"], time_=600.0, mem=2 * GiB, session="s2")
+    before = {first: job(d, first).tag, second: job(d, second).tag}
+    assert before[first] < job(d, other).tag < before[second]
+    now[0] += 6
+    second2 = _again(d, second)  # as it happened: the later job first, then the earlier one
+    first2 = _again(d, first)
+    assert (job(d, first2).tag, job(d, second2).tag) == (before[first], before[second])
+    assert d.show(other)["job"]["position"] < d.show(second2)["job"]["position"]
+    assert d.store.get_meta("owed:s1") == credit  # still there for the session's next job
+    now[0] += 1
+    nxt = _boosted(d, now, a, 3)
+    assert job(d, nxt).owed_carried == json.loads(credit)["owed"]
+
+
+def test_a_replacement_keeping_its_place_lines_up_by_its_own_debts_not_what_its_session_owes(make_daemon, tmp_path):
+    # The other way round: what a session owes (here a boost's payback, left for its next job when the boost
+    # started after passing another session's job) also counted against a replacement's fresh place.
+    import json
+
+    d, now, (a,) = _session(make_daemon, tmp_path, folders=1)
+    now[0] += 1
+    old = submit(d, a, [PY, "-c", "pass", "1"], time_=1200.0, mem=2 * GiB, session="s1")
+    owes = json.dumps({"owed": 900.0, "time": now[0]})
+    d.store.set_meta("owed:s1", owes)
+    now[0] += 9
+    new = _again(d, old)  # half the estimate: its fresh place, by its own debts, comes before the old one
+    assert job(d, new).tag == now[0] + 600.0 < job(d, old).tag
+    assert d.store.get_meta("owed:s1") == owes  # still its next job's to pay
