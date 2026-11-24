@@ -175,6 +175,8 @@ guard_desktop = true # leave alone GPU programs launched from the desktop (not t
 borrow_ram = true    # let jobs start in RAM other jobs reserved but aren't using
 huge_pages = false   # true lets jobs have transparent huge pages; off, a job never waits on the
                      # kernel to find or make one
+ram_reserve = "1.5G" # RAM the machine keeps free; jobs started on others' unused RAM are stopped
+                     # first when it runs short, before any program outside dibs
 keep_days = 14       # how long finished jobs' logs are kept
 agent_files = ["~/.cursor/rules/dibs.mdc"]   # more instructions files for dibs setup
 ```
