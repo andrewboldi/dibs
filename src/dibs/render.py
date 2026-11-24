@@ -163,7 +163,10 @@ def render_submit(job: dict, now: float) -> str:
             head += f"\n  Waiting: {job['waiting_for']}"
     else:
         return finished_line(job)
-    return f"{head}\n  dibs wait {job_id}      dibs logs {job_id} -f"
+    ask = "" if job.get("title") else (  # #259
+        '\n  Next time add --title "what it does, in plain words": the user watches dibs top to see what\'s running.'
+    )
+    return f"{head}\n  dibs wait {job_id}      dibs logs {job_id} -f{ask}"
 
 
 def _idle_now(job: dict, now: float) -> float:
@@ -254,7 +257,7 @@ def render_queue(snapshot: dict, *, color: bool) -> str:
                 str(job["id"]),
                 job["state"],
                 job["session_label"],
-                job["name"]
+                _what(job)
                 + (f" (p{job['priority']})" if job.get("priority", 5) != 5 else "")
                 + (" (alone)" if job["request"].get("exclusive") else ""),
                 str(req["cpus"]),
@@ -290,6 +293,7 @@ def render_show(job: dict, now: float) -> str:
     state = job["state"]
     title = f"queued ({ordinal(job['position'])} in line)" if state == "queued" and job.get("position") else state
     rows = [
+        *([("title", job["title"])] if job.get("title") else []),  # #259
         ("command", shlex.join(job["argv"])),
         ("folder", _home(job["cwd"]) + (", run from a copy of its code made at submit" if job.get("snapshot") else "")),
         ("session", job["session_label"]),
@@ -432,7 +436,7 @@ _LOAD_SGR = ("38;5;29", "38;5;136", "38;5;167")  # the load row with under half 
 _SPARK = "▁▂▃▄▅▆▇█"
 # The job rows' columns, each followed by a space that's always there (#118)
 _ID_W, _NAME_W, _WHEN_W, _PROGRESS_W = 4, 13, 16, 10  # "starts in 12h30m" is 16
-_NAME_MAX = 24  # names get up to this much room, as the width allows (#143)
+_NAME_MAX = 48  # titles, or names, get up to this much room, as the width allows (#143, #259)
 _PLAN_MIN = 30  # what names leave a row for its bar or timeline and its reason
 _REASON_MIN = 10  # a reason shows only when this much of it fits
 _METER_MAX = 60  # the widest a meter gets
@@ -565,6 +569,11 @@ def _spark(cores: list[float | None], total: int, width: int) -> list[tuple[str,
     return pieces
 
 
+def _what(job: dict) -> str:
+    """What a person sees a job as: its title, what it does in plain words, else its name (#259)."""
+    return job.get("title") or job["name"]
+
+
 def _short(text: str, n: int) -> str:
     return text if len(text) <= n else text[: n - 1] + "…"
 
@@ -609,7 +618,7 @@ def _grid(several: bool, name_w: int = _NAME_W) -> tuple[int, int, int]:
 def _name_width(jobs: list[dict], inner: int, several: bool) -> int:
     """The name column: as wide as the longest name shown, from _NAME_W up to _NAME_MAX, leaving each
     row _PLAN_MIN for its bar or timeline and its reason (#143)."""
-    longest = max((len(j["name"]) for j in jobs), default=0)
+    longest = max((len(_what(j)) for j in jobs), default=0)
     room = inner - _grid(several, 0)[2] - _PLAN_MIN
     return max(_NAME_W, min(longest, _NAME_MAX, room))
 
@@ -628,7 +637,7 @@ def _short_reason(job: dict) -> str:
 def _job_columns(job: dict, dot: str, several: bool, name_w: int = _NAME_W) -> _Line:
     req = job["request"]
     line = _Line((dot, _job_color(job["id"])),
-                 (f" {str(job['id']).ljust(_ID_W)} {_short(job['name'], name_w).ljust(name_w)} ", None))  # fmt: skip
+                 (f" {str(job['id']).ljust(_ID_W)} {_short(_what(job), name_w).ljust(name_w)} ", None))  # fmt: skip
     vram = 8 if several else 5
     return line.add(f"{req['cpus']:>3} {format_size(req['mem']):>5} {_top_vram(job, several):>{vram}}  ", None)
 
