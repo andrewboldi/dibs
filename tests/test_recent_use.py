@@ -8,6 +8,7 @@ from collections import deque
 from test_daemon import _borrowing, _job_holding, job, submit, PY
 
 from dibs.daemon import RECENT_PEAK
+from dibs.model import State
 from dibs.units import GiB
 
 
@@ -56,9 +57,46 @@ def test_a_grown_job_counts_at_its_use_never_past_its_limit(make_daemon, tmp_pat
     go.touch()
 
 
-def test_a_young_job_with_no_earlier_runs_counts_at_its_request(make_daemon, tmp_path, monkeypatch):
-    d, a, b, go = _borrowing(make_daemon, tmp_path, monkeypatch, ran=100)  # young: it may still be growing
-    assert d._planned_mem(job(d, a), d.clock()) == 12 * GiB
+def test_a_young_job_counts_at_half_its_request_or_what_it_holds_if_more(make_daemon, tmp_path, monkeypatch):
+    # #266: in its first ten minutes it may still be growing, but most young jobs never reach their
+    # request; the user picked half, measured to overflow the reserve 6.4% of the time against 3.7%.
+    d, a, b, go = _borrowing(make_daemon, tmp_path, monkeypatch, ran=100)  # A asked 12G and holds 2G
+    now = d.clock()
+    assert d._planned_mem(job(d, a), now) == 6 * GiB
+    d._recent_held[a] = deque([(now, 8 * GiB)])
+    assert d._planned_mem(job(d, a), now) == 8 * GiB
+    go.touch()
+
+
+def test_a_young_job_with_earlier_runs_counts_at_half_their_peak_or_what_it_holds(make_daemon, tmp_path, monkeypatch):
+    d, a, b, go = _borrowing(make_daemon, tmp_path, monkeypatch, ran=100)
+    j = job(d, a)
+    j.history_mem = 8 * GiB
+    d.store.update_job(j)
+    now = d.clock()
+    assert d._planned_mem(job(d, a), now) == 4 * GiB  # it holds 2G
+    d._recent_held[a] = deque([(now, 5 * GiB)])
+    assert d._planned_mem(job(d, a), now) == 5 * GiB
+    go.touch()
+
+
+def test_a_young_job_dibs_cant_see_counts_whole(make_daemon, tmp_path, monkeypatch):
+    d, a, b, go = _borrowing(make_daemon, tmp_path, monkeypatch, ran=100)
+    now = d.clock()
+    d._recent_held.pop(a)
+    assert d._planned_mem(job(d, a), now) == 12 * GiB
+    j = job(d, a)
+    j.history_mem = 8 * GiB
+    d.store.update_job(j)
+    assert d._planned_mem(job(d, a), now) == 8 * GiB
+    go.touch()
+
+
+def test_a_job_starts_beside_a_young_job_on_the_half_it_isnt_holding(make_daemon, tmp_path, monkeypatch):
+    # A asked 12G of 16G 100 s ago and holds 2G: it counts at 6G, so B (8G) starts on borrowed RAM,
+    # leaving the 1.5G reserve; it used to wait for A's first ten minutes to pass.
+    d, a, b, go = _borrowing(make_daemon, tmp_path, monkeypatch, ran=100)
+    assert job(d, b).state == State.RUNNING and job(d, b).borrowed_ram
     go.touch()
 
 

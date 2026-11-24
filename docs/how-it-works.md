@@ -70,8 +70,10 @@ only its own GPUs; in the plan it holds everything.
 **RAM by use.** Agents reserve more RAM than their jobs use, and each job keeps its own reservation
 as a hard cap. To let others use what sits idle, dibs plans with what a running job uses: the most it
 used over the last ten minutes, with no margin, never more than its limit (for ten minutes after dibs
-restarts, its peak so far). A job with no earlier runs counts at its whole reservation for its first
-ten minutes, one with earlier runs at least at their peak, and an exclusive job always counts whole.
+restarts, its peak so far). For its first ten minutes, while it may still be growing, a job counts at
+least at half its reservation, or half its earlier runs' peak if it has some (#266); it counts whole
+once it grew past its reservation or while dibs can't see what it holds, and an exclusive job always
+counts whole.
 Any job may start in the RAM this frees (#148), as long as it leaves the machine `ram_reserve` free
 by that count (1.5G by default): it is marked as borrowing and runs with a high OOM score, and a job
 grows into such RAM on the same terms. The machine is short of memory when less than

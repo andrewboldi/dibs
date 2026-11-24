@@ -902,8 +902,10 @@ def test_a_borrower_without_retry_killed_when_the_machine_ran_out_fails_saying_h
     go.touch()
 
 
-def test_a_young_job_without_history_counts_at_its_whole_reservation(make_daemon, tmp_path, monkeypatch):
-    d, a, b, go = _borrowing(make_daemon, tmp_path, monkeypatch, ran=300)  # it may still be growing
+def test_a_young_job_without_history_counts_at_half_its_reservation_at_least(make_daemon, tmp_path, monkeypatch):
+    # It may still be growing: holding 2G of its 12G, it counts at 6G (#266), not its 2G. A 9G job would
+    # leave less than the 1.5G reserve beside that, so it waits (an 8G one starts: test_recent_use).
+    d, a, b, go = _borrowing(make_daemon, tmp_path, monkeypatch, ran=300, mem=9 * GiB)
     assert job(d, b).state == State.QUEUED
     go.touch()
 
