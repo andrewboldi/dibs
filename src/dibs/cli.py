@@ -95,6 +95,9 @@ def build_parser() -> argparse.ArgumentParser:
         )  # fmt: skip
         s.add_argument("-n", "--name", help="a label for the job (default: the script or program name)")
         s.add_argument(
+            "--title", help='what the job does, in plain words, for the person watching dibs top, like "Train the model for 3 epochs"'
+        )  # fmt: skip
+        s.add_argument(
             "--exclusive", action="store_true",
             help="nothing else runs beside it (for timing runs); it waits until no other job runs",
         )  # fmt: skip
@@ -187,6 +190,7 @@ def _submit_request(args, command: list[str], paths: Paths | None = None) -> dic
         "session": session,
         "session_label": label,
         "name": args.name,
+        "title": args.title,
         "priority": args.priority,
         "replace": args.replace,
         "retry": args.retry and not args.no_retry,

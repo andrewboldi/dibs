@@ -13,9 +13,11 @@ started any other way are stopped within seconds. Also queue CPU- or RAM-heavy w
 for more than a minute or two, every step of it and not only the GPU step: when the machine runs
 short of memory, dibs stops the largest program running outside it.
 
-    dibs submit --cpus 4 --mem 16G --vram 6G --time 20m -- python train.py
+    dibs submit --title "Train the model for 3 epochs" --cpus 4 --mem 16G --vram 6G --time 20m -- python train.py
 
-Then `dibs wait ID` (in the background if your commands time out), `dibs logs ID`, `dibs queue`.
+Give every job a --title saying what it does in plain words: the user watches `dibs top` to see
+what's running, and a script name or label means nothing to them. Then `dibs wait ID` (in the
+background if your commands time out), `dibs logs ID`, `dibs queue`.
 Run `dibs agent-help` before your first job: it explains how to size a request."""
 
 # Added to the block by `dibs setup` where /tmp is a tmpfs: the fact, with no advice either way (#165).
@@ -44,8 +46,11 @@ when those resources are free, so jobs never crash each other by running out of 
 
 ## Submitting
 
-    dibs submit --cpus 4 --mem 16G --vram 6G --time 20m -- python train.py --epochs 3
+    dibs submit --title "Train the model for 3 epochs" --cpus 4 --mem 16G --vram 6G --time 20m -- python train.py --epochs 3
 
+- `--title TEXT`: what the job does, in plain words, for the person watching `dibs top`, like
+  "Train the chess model for 3 epochs" or "Run the simulator tests on the new grasp code": not a
+  script name, an id or an abbreviation. Give every job one, in at most 80 characters.
 - `--cpus N`: CPU cores. The job is pinned to exactly these, and OMP_NUM_THREADS and friends are
   set to N.
 - `--mem SIZE`: RAM, like 16G or 512M. Where the system allows it, a job that goes over spills into

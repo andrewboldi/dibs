@@ -66,6 +66,7 @@ UNASKED_GPU = 64 * MiB  # bytes a job that asked for no GPU may hold on one: a b
 SWAP_CUSHION = 2 * GiB  # bytes: with less swap free, RAM under the reserve is a shortage at once (#253)
 RESERVE_PRESSURE = 10.0  # % memory pressure (some, avg10): with RAM under the reserve, a shortage (#253)
 SPILL_SHARE = 0.5  # past its RAM limit, a job may hold this share of its request in swap (#257)
+TITLE_MAX = 80  # characters in a job's title (#259)
 THRASH_PRESSURE = 40.0  # % of the time all of a job's processes waited on memory (full avg10), at its own limit
 THRASH_AFTER = 10.0  # seconds of that before dibs stops the job: systemd-oomd acts on 50% for 20 s (#257)
 SPILLED_ENOUGH = 256 * MiB  # swap a job at its limit holds to be stopped first when swap runs short (#257)
@@ -368,6 +369,9 @@ class Daemon:
         priority = DEFAULT_PRIORITY if priority is None else priority
         if isinstance(priority, bool) or not isinstance(priority, int) or not 1 <= priority <= 10:
             return _rejected("priority must be a whole number from 1 to 10")
+        title = " ".join(str(req.get("title") or "").split()) or None  # #259
+        if title is not None and len(title) > TITLE_MAX:
+            return _rejected(f"--title takes at most {TITLE_MAX} characters: what the job does, in plain words")
 
         staged = None
         if req.get("snapshot") is not None:  # a copy of its code the CLI made (#172)
@@ -408,6 +412,7 @@ class Daemon:
         job = Job(
             id=0,
             name=req.get("name") or default_name(argv),
+            title=title or (replaced.title if replaced is not None else None),  # a replacement keeps it
             argv=list(argv),
             cwd=cwd,
             env=dict(env),
