@@ -972,22 +972,24 @@ class Daemon:
         """What a running job counts as holding when RAM is planned by use (#86): the most it used over
         the last RECENT_PEAK, with no margin and never past its limit, so the machine fills with what
         jobs really use, keeping only its reserve (#255). Until dibs has watched it that long (after a
-        restart), its peak so far. A job with no earlier runs counts at its whole reservation for its
-        first ten minutes, while it may still be growing, and one with earlier runs at least at their
-        peak then; an exclusive job always counts whole."""
+        restart), its peak so far. For its first ten minutes, while it may still be growing, a job counts
+        at least at half of what its earlier runs held, or of its request when there were none (#266):
+        most young jobs never reach that much. It counts whole once it grew past its request, or while
+        dibs can't see what it holds; an exclusive job always counts whole."""
         if job.request.exclusive:
             return _limit(job)
         ran = now - (job.started or now) - self._asleep(job)
-        if not job.history_mem and ran < YOUNG:
-            return _limit(job)  # its reservation, or the limit it already grew to
         samples = self._recent_held.get(job.id) or ()
+        if ran < YOUNG and not job.history_mem and (not samples or _limit(job) > job.request.mem):
+            return _limit(job)  # it already grew, or dibs can't see it: its whole limit
         recent = max((held for t, held in samples if t >= now - RECENT_PEAK), default=0)
         since = self._watching.get(job.id)
         watched = since is not None and (now - since >= RECENT_PEAK or since - (job.started or since) <= SEEN_FROM_START)
         if not watched:  # dibs (re)started while it ran: what it used before counts too
             recent = max(recent, job.peak_mem or 0)
-        if ran < YOUNG:  # still young: as much as its earlier runs used, at least
-            recent = max(recent, job.history_mem or 0)
+        if ran < YOUNG:  # still young: half of what earlier runs held, or of its request (#266)
+            expected = job.history_mem or job.request.mem
+            recent = max(recent, expected // 2 if samples else expected)
         return min(_limit(job), recent) if recent else _limit(job)
 
     def _outside_mem(self, now: float, running: list[Job]) -> int:
