@@ -160,17 +160,16 @@ def test_replacing_a_folders_waiting_jobs_one_by_one_leaves_the_session_the_plac
     assert sorted(_places(d).values()) == before  # none gained, none shared
 
 
-def test_a_replacement_queued_before_282_keeps_its_place_and_nothing_moves_across_the_restart(make_daemon, tmp_path):
-    # Dropping the place such a replacement kept would move its session's jobs at the restart, and could put
-    # it behind jobs submitted after the one it replaced, after dibs told its agent it kept its place.
+def _before_282(make_daemon, tmp_path):
+    """Session s1 as dibs before #282 left it after a replacement: the replacement without the time it
+    lines up at, and the places that lining it up at its own submit, while keeping 2201 for it too, gave
+    the session."""
     d, now, (a, b) = _session(make_daemon, tmp_path)
     a1, b1 = _wait(d, now, a, 1), _wait(d, now, b, 2)
     now[0] = 1500.0
     a3 = _wait(d, now, a, 3)
     now[0] = 1600.0
     b2 = _again(d, b1)
-    # As dibs before #282 saved them: the replacement without the time it lines up at, and the places that
-    # lining it up at its own submit, while keeping 2201 for it too, gave the session.
     old = {a1: 1601.0, b2: 2201.0, a3: 2201.0}
     for i, place in old.items():
         j = job(d, i)
@@ -178,5 +177,40 @@ def test_a_replacement_queued_before_282_keeps_its_place_and_nothing_moves_acros
         if i == b2:
             j.lined = None
         d.store.update_job(j)
+    return d, old, b2
+
+
+def _tags(d):
+    return {i: tag for i, (tag, _) in _places(d).items()}
+
+
+def test_a_replacement_queued_before_282_keeps_its_place_and_nothing_moves_across_the_restart(make_daemon, tmp_path):
+    # Dropping the place such a replacement kept would move its session's jobs at the restart, and could put
+    # it behind jobs submitted after the one it replaced, after dibs told its agent it kept its place.
+    d, old, _ = _before_282(make_daemon, tmp_path)
     d.recover()  # the restart that installs #282 lines every session up again
-    assert {i: tag for i, (tag, _) in _places(d).items()} == old
+    assert _tags(d) == old
+
+
+def test_replacing_a_replacement_made_before_282_again_moves_nothing(make_daemon, tmp_path):
+    # 20 such replacements were waiting when #282 was installed, and their agent had resized them once.
+    d, old, b2 = _before_282(make_daemon, tmp_path)
+    b3 = _again(d, b2)
+    assert _tags(d) == {**{i: t for i, t in old.items() if i != b2}, b3: old[b2]}
+
+
+def test_a_replacement_lowering_its_priority_keeps_the_place_its_priority_took_and_moves_nothing(make_daemon, tmp_path):
+    # #184 keeps the earlier of a replacement's old and fresh place: for one that asks for a lower priority,
+    # the place the old one took, whose payback it carries. Lined up at the lower priority, it lost that
+    # place in a session waiting in several folders, while still carrying the payback.
+    d, now, (a, b) = _session(make_daemon, tmp_path)
+    a1, a2 = _wait(d, now, a, 1), _wait(d, now, a, 2)
+    now[0] += 1
+    b1 = submit(d, b, [PY, "-c", "pass", "3"], time_=600.0, mem=2 * GiB, session="s1", priority=9)
+    before = _places(d)
+    j = job(d, b1)
+    resp = d.submit(req(j.cwd, j.argv, mem=1 * GiB, time_=600.0, session="s1", replace=b1, priority=5))
+    assert resp["ok"] and resp["kept_place"], resp
+    b2 = resp["job"]["id"]
+    assert _places(d) == {a1: before[a1], a2: before[a2], b2: before[b1]}
+    assert (job(d, b2).owed_carried, job(d, b2).owed_left) == (job(d, b1).owed_carried, job(d, b1).owed_left)

@@ -259,6 +259,15 @@ def test_submit_replace(dibs):
     dibs("cancel", str(first), check=0)
 
 
+def test_a_replacement_asking_for_a_lower_priority_is_told_it_keeps_the_priority_that_took_its_place(dibs):
+    # #282: it keeps the place the job it replaces took at its priority, and so that priority.
+    first = js(dibs("submit", *RES, "--vram", "all", "--json", "--", "sleep", "30", check=0))["id"]
+    waiting = js(dibs("submit", *RES, "--vram", "all", "--priority", "8", "--json", "--", "sleep", "1", check=0))["id"]
+    out = dibs("submit", *RES, "--vram", "all", "--priority", "5", "--replace", str(waiting), "--", "sleep", "1", check=0).stdout
+    assert f"It replaces job {waiting}, which is cancelled, and keeps its place in line, at priority 8, the one that took it." in " ".join(out.split())
+    dibs("cancel", str(first), check=0)
+
+
 def test_submit_retry_is_opt_in(dibs):
     # Issue #116: only the agent knows whether its job is safe to run again from the start.
     assert js(dibs("submit", *RES, "--json", "--", "true", check=0))["retry"] is False

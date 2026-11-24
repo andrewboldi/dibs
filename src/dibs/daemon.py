@@ -425,6 +425,10 @@ class Daemon:
         now = self.clock()
         session = req.get("session") or "unknown"
         keeps = replaced is not None and _keeps_place(replaced, session, list(argv), cwd, request, priority)
+        if keeps:
+            # The place it keeps is the one the job it replaces took at its priority, whose payback it
+            # carries; at a lower one, its session's lining up again would take that place from it (#282).
+            priority = replaced.priority
         if replaced is not None:
             # In the same step as the new job, so nothing can start in the gap (#93), and before the
             # backlog is read, so the replacement doesn't line up behind the job it replaces.
@@ -468,7 +472,9 @@ class Daemon:
             history_vram=self._history_vram(cwd, list(argv), request, session),
             history_longest=self._history_longest(cwd, list(argv), request, session),
             kept=kept if keeps else None,
-            lined=lined_at(replaced) if keeps else None,  # it lines up where the job it replaced did (#282)
+            # It lines up where the job it replaced did (#282); one made before #282 kept its place another
+            # way, and so does a replacement of it, so nothing moves.
+            lined=lined_at(replaced) if keeps and (replaced.kept is None or replaced.lined is not None) else None,
             state=State.QUEUED,
             output=output or "",
         )
