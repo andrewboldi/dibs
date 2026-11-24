@@ -61,7 +61,8 @@ YOUNG = 600.0  # seconds: a job with no earlier runs counts at its whole RAM res
 SESSION_RUNS_AGE = 7 * 86400.0  # seconds: how far back a session's runs in other folders count (#229)
 MARGIN_PRESSURE = 5.0  # % memory pressure (some, avg10) under which a job may grow into other jobs' margins (#228)
 UNASKED_GPU = 64 * MiB  # bytes a job that asked for no GPU may hold on one: a browser's GPU process (#246)
-MARGIN_KEEP = 0.10  # share of RAM still available after such a step
+SWAP_CUSHION = 2 * GiB  # bytes: with less swap free, RAM under the reserve is a shortage at once (#253)
+RESERVE_PRESSURE = 10.0  # % memory pressure (some, avg10): with RAM under the reserve, a shortage (#253)
 DISK_EVERY = 30.0  # seconds between looks at the free space of the disks the jobs use (#211)
 DISK_WINDOW = 1800.0  # seconds: how far back a disk's drop, and what the jobs wrote, are measured
 DISK_LOW = 5 * GiB  # bytes: under this much free, every dibs command says so
@@ -229,6 +230,7 @@ class Daemon:
         panes: Callable[[], dict[str, int]] = lambda: {},
         disk_free: Callable[[str], int | None] = lambda path: None,
         written: Callable[[str], int | None] = lambda cgroup: None,
+        swap_free: Callable[[], int | None] = lambda: None,
     ):
         self.paths = paths
         self.config = config
@@ -277,6 +279,7 @@ class Daemon:
         # given, so only the real daemon (run) reads the real disks.
         self.disk_free = disk_free
         self.written = written
+        self.swap_free = swap_free  # None unless given: only the real daemon reads the real swap (#253)
         self._disk: dict[int, deque[tuple[float, int]]] = {}  # disk (st_dev) -> (time, bytes free)
         self._writes: dict[int, deque[tuple[float, int]]] = {}  # job -> (time, bytes it had written)
         self._disk_at = -math.inf
@@ -1253,7 +1256,7 @@ class Daemon:
         now = self.clock()
         growing = sum(max(0, j.request.mem - (self._held.get(j.id) or 0)) for j in running
                       if not j.history_mem and now - (j.started or now) - self._asleep(j) < YOUNG)  # fmt: skip
-        return info[0] - info[1] - unused - growing, int(info[0] * MARGIN_KEEP)
+        return info[0] - info[1] - unused - growing, self.config.ram_reserve
 
     def notices(self, session: str, now: float, seen: Sequence[int] = (), at_submit: bool = False,
                 cwd: str | None = None) -> dict:  # fmt: skip
@@ -1452,7 +1455,7 @@ class Daemon:
         program outside dibs that holds a tenth of the RAM or more (#135), otherwise the most recently
         started job on borrowed RAM (#114). The kernel's OOM killer acts only after minutes of thrashing,
         and then kills whatever is largest: a job, or the program an agent runs in its own terminal."""
-        if self.pressure() < EVICT_PRESSURE or not self._short_of_ram():
+        if not self._shortage():
             if self._pressured_since is not None:
                 self.store.delete_meta(["short_since"])
             self._pressured_since = None
@@ -1465,12 +1468,23 @@ class Daemon:
             return
         self._pressured_since = now
         self.store.set_meta("short_since", repr(now))
-        # RAM dibs lent a job to grow into comes back first (#182), then a program outside dibs (#135),
-        # then RAM a job started on (#114).
+        # RAM dibs lent a job to grow into comes back first (#182), then RAM a job started on (#114), and
+        # only then is a program outside dibs stopped (#135): dibs squeezes jobs in, so they go first (#253).
         self._relief_note = "nothing to stop"
-        if not self._give_back_growth(now) and not self._stop_ram_hog(now):
-            self._give_back_borrowed(now)
+        if not self._give_back_growth(now) and not self._give_back_borrowed(now):
+            self._stop_ram_hog(now)
         self._log_shortage(now)
+
+    def _shortage(self) -> bool:
+        """Whether the machine is short of memory: less RAM available than the reserve, with swap nearly
+        full or memory pressure rising, since with room in swap the kernel can first move idle programs'
+        memory there (#253); or, as before, high pressure with little RAM available (#114, #129)."""
+        info = self._meminfo()
+        if info is not None and info[0] - info[1] < self.config.ram_reserve:
+            swap = self.swap_free()
+            if (swap is not None and swap < SWAP_CUSHION) or self.pressure() >= RESERVE_PRESSURE:
+                return True
+        return self.pressure() >= EVICT_PRESSURE and self._short_of_ram()
 
     def _log_shortage(self, now: float) -> None:
         """Once a minute while short of memory: how short, what the relief did, and the longest pass of
@@ -1549,15 +1563,15 @@ class Daemon:
         self._relief_note = f"stopped pid {pid}, holding {format_size(held)}"
         return True
 
-    def _give_back_borrowed(self, now: float) -> None:
+    def _give_back_borrowed(self, now: float) -> bool:
         """Stop the most recently started job on borrowed RAM, to run again within RAM nobody reserved
-        (#114)."""
+        (#114). Whether one was stopped."""
         borrowers = [
             j for j in self.store.jobs([State.RUNNING])
             if j.borrowed_ram and j.stop_requested is None and j.cancel_requested is None
         ]  # fmt: skip
         if not borrowers:
-            return
+            return False
         job = max(borrowers, key=lambda j: (j.started or 0, j.id))
         self._relief_note = f"stopped job {job.id}, which started on RAM other jobs reserved"
         job.evicted = True
@@ -1566,6 +1580,7 @@ class Daemon:
         self.store.update_job(job)
         log.info("job %d %s", job.id, job.stop_reason)
         self._push_stop(job, now)
+        return True
 
     def _short_of_ram(self) -> bool:
         """Whether little of the machine's RAM is available. Pressure alone doesn't say so: one job
@@ -2263,7 +2278,8 @@ def run_daemon(env: Mapping[str, str] = os.environ) -> int:
     use_systemd = launcher.systemd_available(env)
     daemon = Daemon(paths, config, capacity, backend, use_systemd=use_systemd, programs=procs.big_programs,
                     set_mem_limit=launcher.set_memory_max if use_systemd else None,
-                    panes=lambda: procs.pane_cpu(PANE_SCOPES), disk_free=procs.disk_free, written=procs.written_bytes)  # fmt: skip
+                    panes=lambda: procs.pane_cpu(PANE_SCOPES), disk_free=procs.disk_free, written=procs.written_bytes,
+                    swap_free=procs.swap_free)  # fmt: skip
     daemon.recover()
     gpus = ", ".join(f"GPU {g.index} {format_size(g.vram)}" for g in capacity.gpus) or "no GPUs"
     log.info(

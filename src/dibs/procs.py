@@ -180,6 +180,16 @@ def pane_cpu(prefixes: tuple[str, ...]) -> dict[str, int]:
     return found
 
 
+def swap_free() -> int | None:
+    """Bytes of swap free (SwapFree), or None if unreadable. Jobs can't swap; programs outside dibs can,
+    so free swap is the cushion a small RAM reserve rests on (#253)."""
+    for line in (_read(os.environ.get("DIBS_MEMINFO") or "/proc/meminfo") or "").splitlines():
+        key, _, rest = line.partition(":")
+        if key == "SwapFree" and rest.split() and rest.split()[0].isdigit():
+            return int(rest.split()[0]) * 1024
+    return None
+
+
 def meminfo() -> tuple[int, int] | None:
     """The machine's RAM in bytes: (total, in use), in use being MemTotal - MemAvailable (file cache
     the kernel can drop counts as available). DIBS_MEMINFO points tests at a stand-in file."""

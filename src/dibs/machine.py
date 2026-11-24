@@ -26,6 +26,7 @@ class Config:
     guard_desktop: bool = True  # leave alone GPU programs launched from the desktop (#92)
     borrow_ram: bool = True  # plan RAM by what running jobs use, not only what they reserved (#86)
     huge_pages: bool = False  # let jobs have transparent huge pages (#225)
+    ram_reserve: int = 3 * GiB // 2  # RAM the machine keeps free; jobs fill the rest, by what they use (#253)
     agent_files: tuple[str, ...] = ()  # more instructions files for dibs setup (agent CLIs it doesn't know)
 
 
@@ -87,6 +88,13 @@ def load_config(path: Path) -> Config:
             if not isinstance(value, bool):
                 raise ConfigError("config setting 'guard_desktop' must be true or false")
             fields[key] = value
+        elif key == "ram_reserve":
+            try:
+                fields[key] = parse_size(value) if isinstance(value, str) else None
+            except UnitError:
+                fields[key] = None
+            if fields[key] is None:
+                raise ConfigError("config setting 'ram_reserve' must be a size, like \"1.5G\"")
         elif key in ("borrow_ram", "huge_pages"):
             if not isinstance(value, bool):
                 raise ConfigError(f"config setting '{key}' must be true or false")
