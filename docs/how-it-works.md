@@ -59,7 +59,7 @@ that always picks 10 gains nothing after its first job. What a session owes laps
 
 **RAM other programs use.** Browsers, editors and the agents themselves use RAM too, and dibs
 doesn't hand that out. It measures the RAM in use outside its jobs (in use, minus what each job
-holds) and plans with its highest value over the last two minutes, so a job doesn't start into RAM
+holds) and plans with its highest value over the last 30 seconds, so a job doesn't start into RAM
 a busy program let go of for a moment. A job that doesn't fit beside it waits with a reason like
 `needs 12G RAM (10G free, 6G in use outside dibs)`.
 
@@ -67,19 +67,23 @@ a busy program let go of for a moment. A job that doesn't fit beside it waits wi
 other job is running, and no job starts beside it. It is still pinned to its own `--cpus` and sees
 only its own GPUs; in the plan it holds everything.
 
-**RAM by use.** Agents reserve a median 2-4 times the RAM their jobs use, and each job keeps its own
-reservation as a hard cap. To let others use what sits idle, dibs plans with what a running job
-uses: the larger of its peak so far and earlier runs' peak, plus 25% or 1G, never more than it
-reserved. Any job may start in the RAM this frees (#148); if dibs has to stop it, a job submitted with
-`--retry` runs again by itself and any other fails with a note to resubmit. A job with no earlier runs counts at its whole reservation for its first ten minutes,
-and an exclusive job always does. A job that starts only thanks to this is marked as borrowing and
-runs with a high OOM score. If memory pressure (PSI some avg10) stays above 40% for 10 seconds
-while less than a fifth of the RAM is available, dibs stops a program itself rather than
-wait for the kernel's OOM killer, which acts only after minutes of thrashing; if the kernel gets
-there first, it kills a borrower rather than anything else. The program dibs stops is the largest
-one outside dibs, if one holds a tenth of the RAM or more (see the guard below), and otherwise
-the newest borrower; one per stretch of shortage. Either way dibs runs a borrower again
-within RAM nobody reserved, outside its retry limit, since starting it there was dibs's choice.
+**RAM by use.** Agents reserve more RAM than their jobs use, and each job keeps its own reservation
+as a hard cap. To let others use what sits idle, dibs plans with what a running job uses: the most it
+used over the last ten minutes, with no margin, never more than its limit (for ten minutes after dibs
+restarts, its peak so far). A job with no earlier runs counts at its whole reservation for its first
+ten minutes, one with earlier runs at least at their peak, and an exclusive job always counts whole.
+Any job may start in the RAM this frees (#148), as long as it leaves the machine `ram_reserve` free
+by that count (1.5G by default): it is marked as borrowing and runs with a high OOM score, and a job
+grows into such RAM on the same terms. The machine is short of memory when less than
+that is available and swap is nearly full (under 2G free) or memory pressure (PSI some avg10) reaches
+10%, or when pressure stays above 40% with less than a fifth of the RAM available; with room in swap
+and no pressure, the kernel first moves idle programs' memory there. After 10 seconds short, dibs
+stops one thing itself rather than wait for the kernel's OOM killer, which acts only after minutes of
+thrashing: a job that grew into RAM other jobs reserved, else the newest borrower, else the largest
+program outside dibs if one holds a tenth of the RAM or more (see the guard below); one per stretch
+of shortage. If the kernel gets there first, it kills a borrower rather than anything else. A
+borrower submitted with `--retry` runs again within RAM nobody reserved, outside its retry limit,
+since starting it there was dibs's choice; any other fails with a note to resubmit.
 Pressure with RAM to spare stops nothing: it comes from one job stalling inside itself, at its own
 limit or while the kernel compacts memory for huge pages, or from the minute after a real shortage,
 while pages pushed out to swap come back in (pressure stayed at 99.5% for a minute with half the RAM
