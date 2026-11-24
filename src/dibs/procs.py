@@ -4,10 +4,11 @@ Every reader returns None when the process is gone or can't be read, rather than
 """
 
 import os
+import re
 import signal
 import stat
 import time
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 
 _CLK_TCK = os.sysconf("SC_CLK_TCK") if hasattr(os, "sysconf") else 100
 
@@ -254,6 +255,56 @@ def memory_in_use(cgroup_path: str) -> tuple[int, int, tuple[int, int]] | None:
     mapped, other_files = stat.get("file_mapped", 0), max(0, stat.get("file", 0) - shmem)
     most = min(shmem, mapped)
     return stat["anon"] + shmem, shmem, (min(most, max(0, mapped - other_files)), most)
+
+
+DRM_ROOT = "/sys/class/drm"  # tests point these at stand-in trees
+PROC_ROOT = "/proc"
+
+
+def find_igpu() -> tuple[str, tuple[str, ...]] | None:
+    """The integrated (Intel) GPU (#274): its PCI address and its device nodes, found by device rather
+    than by number, which can change at boot; None without one. dibs's GPU backends see only NVIDIA and
+    AMD GPUs, so this one is never among the GPUs dibs already manages."""
+    try:
+        names = sorted(os.listdir(DRM_ROOT))
+    except OSError:
+        return None
+    pci, nodes = None, []
+    for name in names:
+        if not re.fullmatch(r"(card|renderD)\d+", name):
+            continue
+        device = f"{DRM_ROOT}/{name}/device"
+        if (_read(f"{device}/vendor") or "").strip() != "0x8086":
+            continue
+        address = os.path.basename(os.path.realpath(device))
+        pci = pci or address
+        if address == pci:
+            nodes.append(f"/dev/dri/{name}")
+    return (pci, tuple(nodes)) if pci else None
+
+
+def drm_clients(pids: Iterable[int], nodes: tuple[str, ...]) -> dict[str, dict[str, int]]:
+    """Processes' open files on a GPU's `nodes`, by DRM client (drm-client-id: one per open, shared by
+    forked processes, so each is counted once), with the time each engine has run its work, in ns."""
+    found: dict[str, dict[str, int]] = {}
+    for pid in pids:
+        try:
+            fds = os.listdir(f"{PROC_ROOT}/{pid}/fd")
+        except OSError:
+            continue
+        for fd in fds:
+            try:
+                target = os.readlink(f"{PROC_ROOT}/{pid}/fd/{fd}")
+            except OSError:
+                continue
+            if target not in nodes:
+                continue
+            info = _read(f"{PROC_ROOT}/{pid}/fdinfo/{fd}") or ""
+            client = re.search(r"^drm-client-id:\s+(\d+)", info, re.M)
+            engines = {e: int(ns) for e, ns in re.findall(r"^drm-engine-([\w-]+):\s+(\d+) ns", info, re.M)}
+            if client and engines:
+                found[client.group(1)] = engines
+    return found
 
 
 def cgroup_pids(cgroup_path: str) -> list[int]:
