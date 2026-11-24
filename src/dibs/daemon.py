@@ -12,6 +12,7 @@ import logging
 import logging.handlers
 import math
 import os
+import re
 import shutil
 import signal
 import statistics
@@ -67,6 +68,7 @@ SWAP_CUSHION = 2 * GiB  # bytes: with less swap free, RAM under the reserve is a
 RESERVE_PRESSURE = 10.0  # % memory pressure (some, avg10): with RAM under the reserve, a shortage (#253)
 SPILL_SHARE = 0.5  # past its RAM limit, a job may hold this share of its request in swap (#257)
 TITLE_MAX = 80  # characters in a job's title (#259)
+ESCAPED_TELL = 256 * MiB  # what programs that left a job's scope hold before its session is told (#265)
 THRASH_PRESSURE = 40.0  # % of the time all of a job's processes waited on memory (full avg10), at its own limit
 THRASH_AFTER = 10.0  # seconds of that before dibs stops the job: systemd-oomd acts on 50% for 20 s (#257)
 SPILLED_ENOUGH = 256 * MiB  # swap a job at its limit holds to be stopped first when swap runs short (#257)
@@ -273,6 +275,12 @@ class Daemon:
         self._pressing: dict[int, tuple[float, float]] = {}  # job id -> its own stall (some, full), when it
         # reached its own limit again since the last look: what it waits on is its own sizing (#257)
         self._thrash_since: dict[int, float] = {}  # job id -> since when its full stall has been THRASH_PRESSURE+
+        # Scopes beside the jobs' own whose processes descend from a job's shim: a snap app a job started
+        # is moved into a scope of its own (#265). cgroup path -> job id, looked for every HOLDERS_EVERY.
+        self._escaped_scopes: dict[str, int] = {}
+        self._escaped_looked = -math.inf
+        self._escaped: dict[int, int] = {}  # job id -> what those scopes hold (RAM and swap), this tick
+        self._recent_escaped: dict[int, deque[tuple[float, int]]] = {}  # job id -> (time, held), RECENT_PEAK of them
         self._grow_failed: dict[int, float] = {}  # job id -> when raising its RAM limit last failed
         self.cpu_busy = cpu_busy
         # (pid, RAM held) of the machine's programs holding at least `minimum` bytes, for the guard
@@ -870,7 +878,8 @@ class Daemon:
             # A job that borrows VRAM (#88) counts at what it has used, so nothing starts into it.
             # A job that grew past its RAM reservation counts at its raised limit, so nothing starts into
             # RAM it may yet use (#155).
-            [Running(j.id, _holding(j, planned[j.id] if borrowing else _limit(j) if j.ram_limit else None,
+            # Programs a job started that left its scope count on top, its limit not holding them (#265).
+            [Running(j.id, _holding(j, (planned[j.id] if borrowing else _limit(j)) + self._escaped_recent(j, now),
                                     self._young_vram(j, now)),
                      tuple(j.cpu_ids), tuple(j.gpu_ids), (j.started or now) + self._asleep(j), j.history_longest)
              for j in running],
@@ -1007,6 +1016,7 @@ class Daemon:
                 for job in running:
                     held = self._memory_in_use(job)
                     jobs += held[0] if held is not None else job.request.mem
+                    jobs += self._escaped.get(job.id, 0)  # programs it started that left its scope (#265)
                 self._jobs_held.append((now, jobs))
                 while self._jobs_held[0][0] < now - JOBS_RAM_WINDOW:
                     self._jobs_held.popleft()
@@ -1028,7 +1038,7 @@ class Daemon:
         # RAM nobody has reserved: a job that needs more starts on RAM other jobs reserved but aren't
         # using, as a borrower (#86), which a job retried after the machine ran out may not do. Any
         # job may borrow (#148): --retry decides whether one dibs has to stop runs again.
-        unreserved = self.capacity.mem - self._outside_mem(now, running) - sum(_limit(j) for j in running)
+        unreserved = self.capacity.mem - self._outside_mem(now, running) - sum(_limit(j) + self._escaped_recent(j, now) for j in running)
         spare, keep = self._spare(running)  # for headroom at launch (#249)
         for start in current.starts:
             job = by_id[start.job_id]
@@ -1191,6 +1201,7 @@ class Daemon:
             del self._thrash_since[gone]
         for gone in set(self._limit_hits) - {j.id for j in running}:
             del self._limit_hits[gone]
+        self._watch_escaped(running, now)
         for job in running:
             held = self._memory_in_use(job)
             cg = self._scope_of(job)
@@ -1230,6 +1241,74 @@ class Daemon:
                 job.peak_swap, changed = swap, True
             if changed:
                 self.store.update_job(job)
+
+    def _watch_escaped(self, running: list[Job], now: float) -> None:
+        """What programs a job started hold after leaving its scope (#265): snapd moves a snap app, such
+        as Chromium or its chromedriver, into a scope of its own, where the job's --mem doesn't hold it.
+        They count as the job's RAM, not as RAM in use outside dibs, and its session is told once."""
+        ids = {j.id for j in running}
+        for gone in set(self._recent_escaped) - ids:
+            del self._recent_escaped[gone]
+        if now - self._escaped_looked >= HOLDERS_EVERY:
+            self._escaped_looked = now
+            self._escaped_scopes = self._find_escaped(running)
+        held: dict[int, int] = {}
+        names: dict[int, set[str]] = {}
+        for cg, job_id in self._escaped_scopes.items():
+            if job_id not in ids or not procs.cgroup_pids(cg):
+                continue
+            ram = procs.memory_in_use(cg)
+            if ram is not None:
+                held[job_id] = held.get(job_id, 0) + ram[0] + (procs.swap_in_use(cg) or 0)
+                names.setdefault(job_id, set()).add(re.sub(r"-[0-9a-f]+(-[0-9a-f]+)*$", "", cg.rsplit("/", 1)[-1].removesuffix(".scope")))
+        self._escaped = held
+        for job in running:
+            samples = self._recent_escaped.setdefault(job.id, deque())
+            samples.append((now, held.get(job.id, 0)))
+            while samples[0][0] < now - RECENT_PEAK:
+                samples.popleft()
+            if held.get(job.id, 0) > (job.peak_escaped or 0):
+                job.peak_escaped = held[job.id]
+                self.store.update_job(job)
+            if held.get(job.id, 0) >= ESCAPED_TELL and not job.escaped_told:
+                self._tell_escaped(job, held[job.id], sorted(names[job.id]), now)
+
+    def _find_escaped(self, running: list[Job]) -> dict[str, int]:
+        """Scopes beside the running jobs' own whose oldest process descends from a job's shim."""
+        shims = {j.shim_pid: j.id for j in running if j.shim_pid}
+        units = {j.unit: j.id for j in running if j.unit}
+        found = {}
+        for parent in {os.path.dirname(cg) for j in running if (cg := self._scope_of(j))}:
+            try:
+                entries = [e.name for e in os.scandir(f"{procs.CGROUP_ROOT}{parent}") if e.is_dir()]
+            except OSError:
+                continue
+            for name in entries:
+                if not name.endswith(".scope") or name.removesuffix(".scope") in units:
+                    continue
+                pids = procs.cgroup_pids(f"{parent}/{name}")
+                if pids and (job_id := self._job_of(min(pids), shims, units)) is not None:
+                    found[f"{parent}/{name}"] = job_id
+        return found
+
+    def _escaped_recent(self, job: Job, now: float) -> int:
+        """The most a job's programs held after leaving its scope over the last RECENT_PEAK (#265)."""
+        return max((held for t, held in self._recent_escaped.get(job.id) or () if t >= now - RECENT_PEAK), default=0)
+
+    def _tell_escaped(self, job: Job, held: int, names: list[str], now: float) -> None:
+        """Tell the session once that its job's --mem doesn't hold programs that left its scope (#265),
+        at most once per ADVISE_EVERY for the same script."""
+        job.escaped_told = True
+        self.store.update_job(job)
+        key = f"advised:{job.session}:escaped:{script_of(job.argv) or ' '.join(job.argv)}"
+        if now - float(self.store.get_meta(key) or -math.inf) < ADVISE_EVERY:
+            return
+        self.store.set_meta(key, repr(now))
+        message = (f"Job {job.id} ({job.name}) started programs that left its scope ({', '.join(names)}), as snap apps "
+                   f"do: they hold {format_size(held)} that its --mem doesn't limit, and dibs counts them as the "
+                   "job's. A browser that isn't a snap, like Playwright's bundled Chromium or Google Chrome, runs "
+                   "inside the job's limit.")  # fmt: skip
+        self.store.add_event("advice", {"session": job.session, "job": job.id, "message": message}, now)
 
     def _stop_thrashing(self, now: float) -> None:
         """Stop a job that has waited on memory THRASH_PRESSURE or more of the time for THRASH_AFTER at
@@ -1286,10 +1365,12 @@ class Daemon:
             return
         running = self.store.jobs([State.RUNNING])
         outside = self._outside_mem(now, running)
-        room = self.capacity.mem - outside - sum(_limit(j) for j in running)
+        room = self.capacity.mem - outside - sum(_limit(j) + self._escaped_recent(j, now) for j in running)
         # Failing that, RAM other jobs reserved but aren't using, by the plan by use that lets a waiting
         # job start in it (#149, #182): a job at its limit has work to lose, so it goes ahead of them.
-        lend = self.capacity.mem - self.config.ram_reserve - outside - sum(self._planned_mem(j, now) for j in running)
+        lend = self.capacity.mem - self.config.ram_reserve - outside - sum(
+            self._planned_mem(j, now) + self._escaped_recent(j, now) for j in running
+        )
         lend = lend if self._borrowing() else 0
         # Failing both, the margins dibs keeps over other jobs' peaks, when the machine really has room:
         # a kill at the limit loses the work for certain, and the margins may never be used (#228).
@@ -2291,6 +2372,7 @@ class Daemon:
         job.stop_reason = job.stop_requested = job.retry_vram = None
         job.borrowed_ram = job.evicted = job.grew_borrowed = job.swap_stopped = False
         job.peak_mem = job.peak_shmem = job.peak_shmem_mapped = job.peak_vram = job.ram_limit = job.peak_swap = None
+        job.peak_escaped = None
         job.sleep_at_start, job.asleep = None, 0.0
         with contextlib.suppress(FileNotFoundError):
             (self.paths.job_dir(job.id) / "exit.json").unlink()

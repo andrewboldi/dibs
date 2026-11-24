@@ -60,7 +60,10 @@ that always picks 10 gains nothing after its first job. What a session owes laps
 **RAM other programs use.** Browsers, editors and the agents themselves use RAM too, and dibs
 doesn't hand that out. It measures the RAM in use outside its jobs (in use, minus what each job
 holds) and plans with its highest value over the last 30 seconds, so a job doesn't start into RAM
-a busy program let go of for a moment. A job that doesn't fit beside it waits with a reason like
+a busy program let go of for a moment. A program a job started counts as the job's even after it
+leaves the job's scope, as snapd moves a snap app (Chromium, chromedriver) into a scope of its own:
+dibs follows its processes back to the job's shim. The job's `--mem` doesn't hold such a program,
+and its session is told once (#265). A job that doesn't fit beside it waits with a reason like
 `needs 12G RAM (10G free, 6G in use outside dibs)`.
 
 **Timing runs.** `--exclusive` gives a job the machine to itself, for benchmarks: it waits until no

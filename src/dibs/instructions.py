@@ -114,6 +114,8 @@ when those resources are free, so jobs never crash each other by running out of 
   writes anywhere else in /tmp or /dev/shm stay in RAM until deleted. For scratch bigger than the
   RAM you can reserve, set TMPDIR to a folder on a disk with room for it.
 - CPUs: the threads or worker processes it actually uses.
+- A browser installed as a snap (Ubuntu's Chromium, and its chromedriver) leaves the job's scope, so
+  its --mem doesn't limit it: use one that isn't a snap, like Playwright's bundled Chromium.
 - `dibs show ID` lists a job's peak VRAM and RAM, and `dibs submit` shows what earlier runs of the
   same command in the same folder used. Size the next run from those: the RAM peak, with no margin
   (going a little over only spills into swap), the VRAM peak plus a little headroom (going over VRAM
