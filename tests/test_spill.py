@@ -133,6 +133,18 @@ def test_a_job_waiting_on_memory_the_machine_took_isnt_stopped_for_it(make_daemo
     go.touch()
 
 
+def test_a_job_pressing_its_limit_with_file_cache_isnt_thrashing(make_daemon, tmp_path, monkeypatch):
+    # Its count of reaching its limit rises as the kernel drops its file cache, but its own memory is
+    # 2G of 4G: a stall then is the machine taking its pages. It isn't stopped, and the stall still
+    # counts as the machine's pressure.
+    d, a, look, go = _thrashing(make_daemon, tmp_path, monkeypatch, retry=True)
+    d.pressure = lambda: 60.0
+    for _ in range(4):
+        look(THRASH_AFTER, ram=2 * GiB, pressing=True)
+    assert job(d, a).stop_requested is None and d._machine_pressure() == 60.0
+    go.touch()
+
+
 def test_a_job_below_the_headroom_it_was_launched_with_isnt_at_its_limit(make_daemon, tmp_path, monkeypatch):
     # Launched with a step of headroom while the machine had RAM free, its limit is 5G: holding 4G with
     # 1G in swap, it didn't spill past its limit, so it isn't the one to stop when swap runs short.

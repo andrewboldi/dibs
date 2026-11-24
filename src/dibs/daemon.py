@@ -1207,9 +1207,11 @@ class Daemon:
             last = self._limit_hits.get(job.id)
             if hits is not None:
                 self._limit_hits[job.id] = hits
-            # Waiting on memory while it reaches its own limit again and again, its memory spilling into
-            # swap and back: its sizing, not the machine running short, which takes pages from every job.
-            if hits is not None and last is not None and hits > last:
+            # Waiting on memory while its own memory fills its limit and it reaches the limit again and
+            # again, spilling into swap and back: its sizing, not the machine running short, which takes
+            # pages from every job. A job whose count rises only as its file cache is dropped, its own
+            # memory well under its limit, isn't spilling (#261).
+            if hits is not None and last is not None and hits > last and job.id in self._at_limit:
                 stall = procs.memory_stall(cg)
                 if stall is not None:
                     self._pressing[job.id] = stall

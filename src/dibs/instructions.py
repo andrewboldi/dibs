@@ -49,7 +49,7 @@ when those resources are free, so jobs never crash each other by running out of 
     dibs submit --title "Train the model for 3 epochs" --cpus 4 --mem 16G --vram 6G --time 20m -- python train.py --epochs 3
 
 - `--title TEXT`: what the job does, in plain words, for the person watching `dibs top`, like
-  "Train the chess model for 3 epochs" or "Run the simulator tests on the new grasp code": not a
+  "Train the image classifier for 3 epochs" or "Run the parser tests on the new grammar": not a
   script name, an id or an abbreviation. Give every job one, in at most 80 characters.
 - `--cpus N`: CPU cores. The job is pinned to exactly these, and OMP_NUM_THREADS and friends are
   set to N.
