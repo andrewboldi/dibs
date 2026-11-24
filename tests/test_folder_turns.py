@@ -157,7 +157,7 @@ def test_a_multi_folder_sessions_places_dont_drift_as_its_jobs_start_or_are_canc
 
 def test_a_replacements_kept_place_stays_the_sessions_in_a_multi_folder_session(make_daemon, tmp_path):
     # #184: a replacement asking for no more keeps the earlier of its old place and a fresh one. Lining a
-    # multi-folder session up again takes the fresh line, but not past a place a replacement kept.
+    # multi-folder session up again takes the fresh line, with the replacement where the job it replaced was.
     from conftest import capacity
     from test_daemon import PY, job, submit
 
@@ -174,5 +174,6 @@ def test_a_replacements_kept_place_stays_the_sessions_in_a_multi_folder_session(
     assert job(d, again).kept is not None
     d.cancel([gone])
     own = [job(d, again), job(d, stays)]
-    # Lined up afresh, the two would hold 1900 and 2500: the 1600 the replacement kept stays the session's.
-    assert sorted(j.tag for j in own) == [1600.0, 1900.0]
+    # 1600 and 2200, as before the replacement: lined up at its own submit, at the back, while keeping 1600
+    # too, it had moved the job that stays ahead to 1900 (#282).
+    assert sorted(j.tag for j in own) == [1600.0, 2200.0]

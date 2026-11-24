@@ -241,6 +241,17 @@ def _keeps_running(job_id: int, signum: int) -> int:
     return 128 + signum
 
 
+def _replaced(args, response: dict) -> str:
+    """What became of the job a submit replaced; one that keeps its place keeps the priority that took it,
+    whatever priority the replacement asked for (#282)."""
+    kept = ""
+    if response.get("kept_place"):
+        kept = ", and keeps its place in line"
+        if args.priority is not None and response["job"].get("priority", args.priority) > args.priority:
+            kept += f", at priority {response['job']['priority']}, the one that took it"
+    return f"It replaces job {response['replaced']}, which is cancelled{kept}."
+
+
 def cmd_submit(args, paths: Paths, command: list[str]) -> int:
     response = _submit(paths, args, command)
     earlier, match = response.get("earlier", []), response.get("earlier_match", "command")
@@ -249,8 +260,7 @@ def cmd_submit(args, paths: Paths, command: list[str]) -> int:
     else:
         print(render.render_submit(response["job"], response["now"]))
         if response.get("replaced") is not None:
-            kept = ", and keeps its place in line" if response.get("kept_place") else ""
-            print(f"It replaces job {response['replaced']}, which is cancelled{kept}.")
+            print(_replaced(args, response))
     sys.stdout.flush()  # the job's lines first, in a merged stream too (#169)
     if not args.json:
         # The advice goes to stderr, which agents' filters of submit's output keep more often (#169).
@@ -279,8 +289,7 @@ def cmd_run(args, paths: Paths, command: list[str]) -> int:
     job = response["job"]
     print(render.render_submit(job, response["now"]), file=sys.stderr)
     if response.get("replaced") is not None:
-        kept = ", and keeps its place in line" if response.get("kept_place") else ""
-        print(f"It replaces job {response['replaced']}, which is cancelled{kept}.", file=sys.stderr)
+        print(_replaced(args, response), file=sys.stderr)
     if response.get("earlier"):
         print(render.render_earlier(response["earlier"], response.get("earlier_match", "command")), file=sys.stderr)
     if job["state"] == "queued" and (line := render.render_estimates(response.get("estimates"))):
