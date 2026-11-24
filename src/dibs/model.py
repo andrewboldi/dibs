@@ -110,6 +110,8 @@ class Job:
     gpu_unasked_told: bool = False  # it asked for no GPU, held a little on one, and its session was told (#246)
     hard_limit: int | None = None  # its scope's RAM limit at launch, a step above its request while RAM was free (#249)
     grew_told: bool = False  # it held over twice its RAM request, and its session was told (#251)
+    peak_swap: int | None = None  # the most it held in swap, spilled past its RAM limit or moved there (#257)
+    swap_stopped: bool = False  # dibs stopped it for thrashing at its limit, or for the swap it held (#257)
     borrowed_ram: bool = False  # this run started on RAM other jobs reserved but weren't using
     no_borrow: bool = False  # must start within RAM nobody reserved (after the machine ran out once)
     evicted: bool = False  # stopped by dibs to give borrowed RAM back under memory pressure (#114)

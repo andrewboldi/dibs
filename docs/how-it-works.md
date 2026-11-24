@@ -48,7 +48,7 @@ that always picks 10 gains nothing after its first job. What a session owes laps
 | | How | Where |
 |---|---|---|
 | CPU cores | pinned to its cores, with first claim on them (its scope's `CPUWeight` is 1000, other programs' 100); `OMP_NUM_THREADS` and the like set to match | Linux (first claim: systemd user session) |
-| RAM | its own systemd scope with `MemoryMax` and no swap; going over kills the job, not its neighbours, and when the kernel kills only one of its processes, dibs stops the rest within a second or two (with `--retry`, dibs runs it again with more). A job nearing its limit may grow past its reservation, a quarter of it at a time, into RAM no job reserved; the planner counts it at its raised limit, so that RAM is never handed out twice (#155) | systemd user session |
+| RAM | its own systemd scope with `MemoryMax`, and `MemorySwapMax` at half its request (none for `--exclusive`): going over spills into swap up to that, and past it kills the job, not its neighbours; when the kernel kills only one of its processes, dibs stops the rest within a second or two (with `--retry`, dibs runs it again with more). A job at its own limit whose processes all wait on memory 40% of the time for 10 seconds is stopped the same way, sized from what it held in RAM and swap, before systemd-oomd would stop the biggest thing in the session; the plan counts a job's swap with its RAM, so pages moved to swap aren't handed out again (#257). A job nearing its limit may grow past its reservation, a quarter of it at a time, into RAM no job reserved; the planner counts it at its raised limit, so that RAM is never handed out twice (#155) | systemd user session |
 | VRAM | watched every second; a job may borrow VRAM nobody reserved, and one that reaches another job's is stopped, with the reason (with `--retry`, run again with more) | NVIDIA (NVML or nvidia-smi), AMD (amd-smi) |
 | Which GPUs | `CUDA_VISIBLE_DEVICES` (NVIDIA) or `ROCR_VISIBLE_DEVICES` (AMD) shows a job only its GPUs, and none to a job without `--vram` | |
 | GPU use outside dibs | the guard stops it within about a second, after writing into its output how to queue it | daemon running |
@@ -77,9 +77,11 @@ by that count (1.5G by default): it is marked as borrowing and runs with a high 
 grows into such RAM on the same terms. The machine is short of memory when less than
 that is available and swap is nearly full (under 2G free) or memory pressure (PSI some avg10) reaches
 10%, or when pressure stays above 40% with less than a fifth of the RAM available; with room in swap
-and no pressure, the kernel first moves idle programs' memory there. After 10 seconds short, dibs
-stops one thing itself rather than wait for the kernel's OOM killer, which acts only after minutes of
-thrashing: a job that grew into RAM other jobs reserved, else the newest borrower, else the largest
+and no pressure, the kernel first moves idle programs' memory there. Pressure from a job waiting on
+memory at its own limit is that job's: it doesn't count. After 10 seconds short, dibs stops one thing
+itself rather than wait for the kernel's OOM killer, which acts only after minutes of thrashing: with
+swap nearly full, the job that spilled the most into it past its limit; else a job that grew into RAM
+other jobs reserved, else the newest borrower, else the largest
 program outside dibs if one holds a tenth of the RAM or more (see the guard below); one per stretch
 of shortage. If the kernel gets there first, it kills a borrower rather than anything else. A
 borrower submitted with `--retry` runs again within RAM nobody reserved, outside its retry limit,

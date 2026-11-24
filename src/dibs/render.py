@@ -353,7 +353,8 @@ def render_show(job: dict, now: float) -> str:
         peaks.append(f"VRAM {format_size(job['peak_vram'])} of {format_size(job['request']['vram'])}")
     if job.get("peak_mem") is not None:
         grown = f", grown to a {format_size(job['ram_limit'])} limit" if (job.get("ram_limit") or 0) > job["request"]["mem"] else ""
-        peaks.append(f"RAM {format_size(job['peak_mem'])} of {format_size(job['request']['mem'])}{grown} (not counting file cache)")
+        spilled = f", {format_size(job['peak_swap'])} more spilled into swap" if job.get("peak_swap") else ""  # #257
+        peaks.append(f"RAM {format_size(job['peak_mem'])} of {format_size(job['request']['mem'])}{grown} (not counting file cache){spilled}")
     cpu = _cpu_use(job, now)
     if cpu:
         peaks.append(cpu)

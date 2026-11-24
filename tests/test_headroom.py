@@ -97,7 +97,7 @@ def test_the_help_says_a_job_has_a_step_of_room_past_its_mem_while_ram_is_free()
 
     text = " ".join(AGENT_HELP.split())
     assert "While the machine has RAM free, a job's limit sits a step (a quarter of --mem, at least 1G) above it" in text
-    assert "so a quick jump past --mem isn't killed before dibs can count it" in text
+    assert "so a quick jump past --mem stays in RAM" in text  # past the step, it spills into swap (#257)
 
 
 def test_a_young_jobs_unallocated_request_counts_against_headroom_in_later_passes(make_daemon, tmp_path, monkeypatch):

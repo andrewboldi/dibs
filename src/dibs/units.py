@@ -99,10 +99,10 @@ def format_duration(seconds: float) -> str:
 
 
 def suggest_mem(peak: int) -> int:
-    """The RAM to suggest for a job whose runs peaked at `peak`: the peak plus a quarter, as agents are told
-    to ask (#212, #230), rounded up in steps that print as they are: 256M below 1G, half a G to 8G, then
-    whole G."""
-    want = peak * 1.25
+    """The RAM to suggest for a job whose runs peaked at `peak`: the peak with no margin, as agents are
+    told to ask (#212, #230), since a job that goes past its --mem spills into swap (#257), rounded up
+    in steps that print as they are: 256M below 1G, half a G to 8G, then whole G."""
+    want = peak
     step = 256 * MiB if want < GiB else GiB // 2 if want < 8 * GiB else GiB
     return max(step, math.ceil(want / step) * step)
 

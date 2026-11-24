@@ -48,10 +48,12 @@ when those resources are free, so jobs never crash each other by running out of 
 
 - `--cpus N`: CPU cores. The job is pinned to exactly these, and OMP_NUM_THREADS and friends are
   set to N.
-- `--mem SIZE`: RAM, like 16G or 512M. Where the system allows it, a job that goes over is killed,
-  all of it, even when only one of its processes went over. While the machine has RAM free, a job's
-  limit sits a step (a quarter of --mem, at least 1G) above it, so a quick jump past --mem isn't
-  killed before dibs can count it.
+- `--mem SIZE`: RAM, like 16G or 512M. Where the system allows it, a job that goes over spills into
+  swap, up to half its --mem more, and keeps running, slower whenever it touches what went there.
+  Past that it is killed, all of it, even when only one of its processes went over, and a job that
+  waits on swap most of the time is stopped, with the --mem to ask for (with --retry, dibs runs it
+  again with that). While the machine has RAM free, a job's limit sits a step (a quarter of --mem,
+  at least 1G) above it, so a quick jump past --mem stays in RAM.
   While a running job uses less than it reserved, dibs may start other jobs in the difference; if
   the machine then runs short, a job started that way is the one stopped: with --retry dibs runs it
   again, otherwise it fails with a note to resubmit it. A job that nears its --mem may grow past it
@@ -80,7 +82,8 @@ when those resources are free, so jobs never crash each other by running out of 
 - `--name LABEL` to label it, `-o FILE` to write its output somewhere you choose.
 - `--exclusive` for a timing run (a benchmark): nothing else runs beside the job, so other jobs can't
   disturb the measurement. It waits until no other job is running, so use it only when you need
-  the timing. --cpus, --mem and --vram still say what the job itself gets. Programs outside dibs can
+  the timing. --cpus, --mem and --vram still say what the job itself gets, and it never spills into
+  swap, which would disturb the timing: past its --mem it is killed. Programs outside dibs can
   still run: `dibs show ID` says how busy they kept the machine beside it, so you can rerun a timing
   that was disturbed.
 - `--snapshot` to keep editing while a job waits: it runs a copy of the git repository's code as
@@ -107,15 +110,16 @@ when those resources are free, so jobs never crash each other by running out of 
   RAM you can reserve, set TMPDIR to a folder on a disk with room for it.
 - CPUs: the threads or worker processes it actually uses.
 - `dibs show ID` lists a job's peak VRAM and RAM, and `dibs submit` shows what earlier runs of the
-  same command in the same folder used. Size the next run from those: the RAM peak plus about a
-  quarter, the VRAM peak plus a little headroom (going over VRAM stops the job), and the CPUs it
-  kept busy. When those runs never used the GPU they reserved, it says so: leave --vram out, so the
+  same command in the same folder used. Size the next run from those: the RAM peak, with no margin
+  (going a little over only spills into swap), the VRAM peak plus a little headroom (going over VRAM
+  stops the job), and the CPUs it kept busy. When those runs never used the GPU they reserved, it says so: leave --vram out, so the
   GPU's memory stays free for jobs that use it. For a batch whose script hasn't run yet, run one
   job first and size the rest from its peak.
-- Don't pad a request. RAM a job reserves but doesn't use holds back every job behind it, your own
-  included. A job that nears its --mem is given more when the machine has RAM to spare, but one
-  whose memory jumps past that room faster than dibs can act is killed: add `--retry` to a tightly
-  sized job that is safe to run again, and dibs runs it again with more. Size a script whose memory
+- Ask for the least RAM the job needs, and don't pad it. RAM a job reserves but doesn't use holds
+  back every job behind it, your own included. A job that nears its --mem is given more when the
+  machine has RAM to spare, and what it can't get spills into swap; one that ends up waiting on swap
+  most of the time is stopped: add `--retry` to a tightly sized job that is safe to run again, and
+  dibs runs it again with more. Size a script whose memory
   depends on its input from the run with its largest input. To shrink a job that is still waiting
   without losing its place, submit the same command with a smaller --mem and `--replace ID`.
 - Add `--retry` when the job is safe to run again from the start, over whatever a stopped try left:

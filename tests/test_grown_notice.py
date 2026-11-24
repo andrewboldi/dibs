@@ -30,7 +30,7 @@ def test_a_job_holding_over_twice_its_request_is_told_once_with_the_mem_to_ask(m
     d._tell_grown(d.clock())
     (told,) = _advice(d, cwd=str(tmp_path))
     assert f"Job {j} (sweep) asked for 2.4G of RAM and holds 7.8G" in told
-    assert "--mem 10G would size its next run" in told  # its peak plus a quarter
+    assert "--mem 8G would size its next run" in told  # its peak, with no margin (#257)
     d._tell_grown(d.clock())
     assert _advice(d, cwd=str(tmp_path)) == []  # once
     go.touch()

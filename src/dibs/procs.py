@@ -256,6 +256,35 @@ def memory_in_use(cgroup_path: str) -> tuple[int, int, tuple[int, int]] | None:
     return stat["anon"] + shmem, shmem, (min(most, max(0, mapped - other_files)), most)
 
 
+def swap_in_use(cgroup_path: str) -> int | None:
+    """What a cgroup's processes hold in swap (memory.swap.current), or None where it can't be read (#257)."""
+    text = (_read(f"{CGROUP_ROOT}{cgroup_path}/memory.swap.current") or "").strip()
+    return int(text) if text.isdigit() else None
+
+
+def memory_stall(cgroup_path: str) -> tuple[float, float] | None:
+    """The share of the last 10 s in which some, and all, of a cgroup's running processes waited for
+    memory, in percent (its PSI "some" and "full" avg10), or None where it can't be read (#257)."""
+    found = {}
+    for line in (_read(f"{CGROUP_ROOT}{cgroup_path}/memory.pressure") or "").splitlines():
+        kind, _, rest = line.partition(" ")
+        for field in rest.split():
+            key, _, value = field.partition("=")
+            if key == "avg10":
+                try:
+                    found[kind] = float(value)
+                except ValueError:
+                    pass
+    return (found["some"], found["full"]) if "some" in found and "full" in found else None
+
+
+def limit_hits(cgroup_path: str) -> int | None:
+    """How many times a cgroup's memory reached its own limit (memory.events "max"), or None where it
+    can't be read. It rises while the cgroup presses its own limit, and not when the machine runs short
+    and takes its pages (#257)."""
+    return keyed_numbers(_read(f"{CGROUP_ROOT}{cgroup_path}/memory.events")).get("max")
+
+
 def oom_kills(events: str | None) -> tuple[int, bool]:
     """From a cgroup's memory.events: how many of its processes the kernel killed for lack of RAM, and
     whether the cgroup reached its own limit. A kill without that was the machine running out."""

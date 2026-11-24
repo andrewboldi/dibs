@@ -45,11 +45,12 @@ def systemd_available(env: Mapping[str, str] = os.environ) -> bool:
 JOB_CPU_WEIGHT = 1000  # systemd's default is 100: on contended cores a job's threads come first (#152)
 
 
-def scope_properties(mem: int) -> list[str]:
+def scope_properties(mem: int, swap: int = 0) -> list[str]:
     """What a job's scope gets. The probe asks for exactly these, so an older systemd that doesn't
     know one of them means running without systemd, not every job failing to launch. A job is pinned
-    to its cores, but pinning doesn't keep other programs off them; the weight gives it first claim."""
-    return ["-p", f"MemoryMax={mem}", "-p", "MemorySwapMax=0", "-p", "OOMPolicy=continue",
+    to its cores, but pinning doesn't keep other programs off them; the weight gives it first claim.
+    Past its RAM limit a job's memory spills into swap, up to `swap`, before the kernel kills it (#257)."""
+    return ["-p", f"MemoryMax={mem}", "-p", f"MemorySwapMax={swap}", "-p", "OOMPolicy=continue",
             "-p", f"CPUWeight={JOB_CPU_WEIGHT}"]  # fmt: skip
 
 
@@ -162,7 +163,7 @@ def _write_private(path: Path, text: str) -> None:
 
 
 def launch(job: Job, paths: Paths, *, use_systemd: bool, vendor: str = "nvidia",
-           huge_pages: bool = False, mem_limit: int | None = None) -> tuple[int, int | None, str | None]:  # fmt: skip
+           huge_pages: bool = False, mem_limit: int | None = None, swap_limit: int = 0) -> tuple[int, int | None, str | None]:  # fmt: skip
     """Start the job's shim, detached. Returns (shim pid, its start ticks, systemd unit or None)."""
     job_dir = paths.job_dir(job.id)
     job_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -191,7 +192,7 @@ def launch(job: Job, paths: Paths, *, use_systemd: bool, vendor: str = "nvidia",
     if unit:
         command = [
             "systemd-run", "--user", "--scope", "--quiet", "--collect", f"--unit={unit}",
-            *scope_properties(mem_limit or job.request.mem), "--", *command,
+            *scope_properties(mem_limit or job.request.mem, swap_limit), "--", *command,
         ]  # fmt: skip
     with open(job_dir / "shim.log", "ab") as log:
         child = subprocess.Popen(

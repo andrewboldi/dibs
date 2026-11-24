@@ -65,6 +65,10 @@ MARGIN_PRESSURE = 5.0  # % memory pressure (some, avg10) under which a job may g
 UNASKED_GPU = 64 * MiB  # bytes a job that asked for no GPU may hold on one: a browser's GPU process (#246)
 SWAP_CUSHION = 2 * GiB  # bytes: with less swap free, RAM under the reserve is a shortage at once (#253)
 RESERVE_PRESSURE = 10.0  # % memory pressure (some, avg10): with RAM under the reserve, a shortage (#253)
+SPILL_SHARE = 0.5  # past its RAM limit, a job may hold this share of its request in swap (#257)
+THRASH_PRESSURE = 40.0  # % of the time all of a job's processes waited on memory (full avg10), at its own limit
+THRASH_AFTER = 10.0  # seconds of that before dibs stops the job: systemd-oomd acts on 50% for 20 s (#257)
+SPILLED_ENOUGH = 256 * MiB  # swap a job at its limit holds to be stopped first when swap runs short (#257)
 DISK_EVERY = 30.0  # seconds between looks at the free space of the disks the jobs use (#211)
 DISK_WINDOW = 1800.0  # seconds: how far back a disk's drop, and what the jobs wrote, are measured
 DISK_LOW = 5 * GiB  # bytes: under this much free, every dibs command says so
@@ -133,6 +137,14 @@ def _ram_kill_reason(job: Job, result: dict) -> str:
         return (f"killed: went over its RAM limit of {format_size(job.ram_limit)} ({format_size(job.request.mem)} "
                 "reserved, the rest grown into RAM nobody reserved)" + _shared_part(job))  # fmt: skip
     return f"killed: went over its {format_size(job.request.mem)} RAM reservation" + _shared_part(job)
+
+
+def _at_own_limit(job: Job, held: int) -> bool:
+    """Whether a job holds about as much RAM as its scope allows (its raised limit, or the headroom it
+    was launched with), within half a growth step, or an eighth of a small job's limit (#257)."""
+    limit = max(_limit(job), job.hard_limit or 0)
+    step = max(GiB, int(job.request.mem * GROW_SHARE))
+    return held >= limit - min(step // 2, limit // 8)
 
 
 def _room_for(step: int, spare: int, keep: int) -> bool:
@@ -254,6 +266,12 @@ class Daemon:
         self._held: dict[int, int] = {}  # job id -> what it held (anon + shmem) at this tick's sample
         self._recent_held: dict[int, deque[tuple[float, int]]] = {}  # job id -> (time, held), RECENT_PEAK of them
         self._watching: dict[int, float] = {}  # job id -> when this daemon first read its memory
+        self._swap: dict[int, int] = {}  # job id -> what it held in swap at this tick's sample (#257)
+        self._at_limit: set[int] = set()  # jobs holding about as much RAM as their scope allows, this tick
+        self._limit_hits: dict[int, int] = {}  # job id -> times its memory reached its own limit, at the last look
+        self._pressing: dict[int, tuple[float, float]] = {}  # job id -> its own stall (some, full), when it
+        # reached its own limit again since the last look: what it waits on is its own sizing (#257)
+        self._thrash_since: dict[int, float] = {}  # job id -> since when its full stall has been THRASH_PRESSURE+
         self._grow_failed: dict[int, float] = {}  # job id -> when raising its RAM limit last failed
         self.cpu_busy = cpu_busy
         # (pid, RAM held) of the machine's programs holding at least `minimum` bytes, for the guard
@@ -937,7 +955,13 @@ class Daemon:
     def _borrowing(self) -> bool:
         """Whether jobs may start on RAM other jobs reserved but aren't using (#86): unless switched off,
         and not while the machine is short of memory."""
-        return self.config.borrow_ram and self.pressure() < PRESSURE_LIMIT
+        return self.config.borrow_ram and self._machine_pressure() < PRESSURE_LIMIT
+
+    def _machine_pressure(self) -> float:
+        """The machine's memory pressure (PSI some avg10), less what a job pressing its own limit explains
+        (#257): its processes waiting on its own swap aren't the machine running short, and mustn't stop
+        other jobs starting, growing or running."""
+        return max(0.0, self.pressure() - max((some for some, _ in self._pressing.values()), default=0.0))
 
     def _planned_mem(self, job: Job, now: float) -> int:
         """What a running job counts as holding when RAM is planned by use (#86): the most it used over
@@ -1024,6 +1048,7 @@ class Daemon:
                 job.shim_pid, job.shim_ticks, job.unit = launcher.launch(
                     job, self.paths, use_systemd=self.use_systemd, vendor=getattr(self.backend, "vendor", "nvidia"),
                     huge_pages=self.config.huge_pages, mem_limit=job.hard_limit,
+                    swap_limit=0 if job.request.exclusive else int(job.request.mem * SPILL_SHARE),  # #257
                 )
             except Exception as e:  # anything that stops the launch fails this job, not the daemon
                 job.state, job.ended, job.exit_code = State.FAILED, now, 127
@@ -1065,6 +1090,7 @@ class Daemon:
             else:
                 self._push_stop(job, now)
         self._watch_memory()
+        self._stop_thrashing(now)
         self._stop_ram_killed(now)
         self._relieve_shortage(now)
         self._watch_beside(now)
@@ -1133,36 +1159,88 @@ class Daemon:
     def _memory_in_use(self, job: Job) -> tuple[int, int, tuple[int, int]] | None:
         """What a running job holds (anon + shmem), the shmem part of it and how much of that part its
         processes had mapped (procs.memory_in_use), read from its own scope; None if dibs can't see it."""
+        cg = self._scope_of(job)
+        return procs.memory_in_use(cg) if cg else None
+
+    def _scope_of(self, job: Job) -> str | None:
+        """The cgroup of a running job's own scope, or None if dibs can't see it."""
         if not (job.unit and job.shim_pid):
             return None
         cg = procs.cgroup(job.shim_pid)
-        if not cg or not cg.endswith(f"/{job.unit}.scope"):
-            return None
-        return procs.memory_in_use(cg)
+        return cg if cg and cg.endswith(f"/{job.unit}.scope") else None
 
     def _watch_memory(self) -> None:
         """Keep each running job's peak of memory in use (anon + shmem), read from its own scope.
         memory.peak also counts file cache, so a job that wrote big files looked as if it had filled
-        its reservation."""
-        self._held = {}  # only this tick's samples: a retried job never grows on its last try's reading
+        its reservation. Also what it holds in swap, which the plan counts with it, so pages the kernel
+        moved there don't look like free RAM, and how much a job at its own limit waits on memory (#257)."""
+        self._held, self._swap, self._at_limit, self._pressing = {}, {}, set(), {}  # this tick's samples only
         now = self.clock()
         running = self.store.jobs([State.RUNNING])
         for gone in set(self._recent_held) - {j.id for j in running}:
             del self._recent_held[gone]
             self._watching.pop(gone, None)
+        for gone in set(self._thrash_since) - {j.id for j in running}:
+            del self._thrash_since[gone]
+        for gone in set(self._limit_hits) - {j.id for j in running}:
+            del self._limit_hits[gone]
         for job in running:
             held = self._memory_in_use(job)
+            cg = self._scope_of(job)
+            swap = (procs.swap_in_use(cg) or 0) if cg else 0
+            stall = None
             if held is not None:
-                self._held[job.id] = held[0]
+                self._held[job.id], self._swap[job.id] = held[0], swap
                 self._watching.setdefault(job.id, now)
                 samples = self._recent_held.setdefault(job.id, deque())
-                samples.append((now, held[0]))
+                samples.append((now, held[0] + swap))
                 while samples[0][0] < now - RECENT_PEAK:
                     samples.popleft()
+                if _at_own_limit(job, held[0]):
+                    self._at_limit.add(job.id)
+            hits = procs.limit_hits(cg) if cg else None
+            last = self._limit_hits.get(job.id)
+            if hits is not None:
+                self._limit_hits[job.id] = hits
+            # Waiting on memory while it reaches its own limit again and again, its memory spilling into
+            # swap and back: its sizing, not the machine running short, which takes pages from every job.
+            if hits is not None and last is not None and hits > last:
+                stall = procs.memory_stall(cg)
+                if stall is not None:
+                    self._pressing[job.id] = stall
+            if stall is not None and stall[1] >= THRASH_PRESSURE:
+                self._thrash_since.setdefault(job.id, now)
+            else:
+                self._thrash_since.pop(job.id, None)
+            changed = False
             if held is not None and (job.peak_mem is None or held[0] > job.peak_mem):
                 job.peak_mem, job.peak_shmem, mapped = held
                 job.peak_shmem_mapped = list(mapped)
+                changed = True
+            if swap > (job.peak_swap or 0):
+                job.peak_swap, changed = swap, True
+            if changed:
                 self.store.update_job(job)
+
+    def _stop_thrashing(self, now: float) -> None:
+        """Stop a job that has waited on memory THRASH_PRESSURE or more of the time for THRASH_AFTER at
+        its own limit, its memory spilling into swap faster than it can work (#257). It runs again, or
+        is resubmitted, with what it held in RAM and swap: the quick failure at the limit it had before
+        it could spill, and sooner than systemd-oomd, which would stop the biggest thing in the session."""
+        for job in self.store.jobs([State.RUNNING]):
+            since = self._thrash_since.get(job.id)
+            if since is None or now - since < THRASH_AFTER:
+                continue
+            if job.stop_requested is not None or job.cancel_requested is not None:
+                continue
+            job.swap_stopped = True
+            swap = self._swap.get(job.id, 0)
+            job.stop_reason = (f"stopped: it waited on memory {self._pressing.get(job.id, (0.0, THRASH_PRESSURE))[1]:.0f}% of the time "
+                               f"at its RAM limit" + (f", with {format_size(swap)} spilled into swap" if swap else ""))  # fmt: skip
+            job.stop_requested = now
+            self.store.update_job(job)
+            log.info("job %d %s", job.id, job.stop_reason)
+            self._push_stop(job, now)
 
     def _ram_kills(self, job: Job) -> tuple[int, bool]:
         """How many of a running job's processes the kernel killed for lack of RAM, read from its own
@@ -1276,7 +1354,7 @@ class Daemon:
         used), when borrowing is on and memory pressure is low; 0 otherwise. Used for growing into other
         jobs' margins (#228) and for headroom at launch (#249)."""
         info = self._meminfo()
-        if not info or not self.config.borrow_ram or self.pressure() >= MARGIN_PRESSURE:
+        if not info or not self.config.borrow_ram or self._machine_pressure() >= MARGIN_PRESSURE:
             return 0, 0
         unused = sum(j.hard_limit - _limit(j) for j in running if j.hard_limit and j.hard_limit > _limit(j))
         # A young job with no earlier runs may still be growing into its request, which free memory
@@ -1496,10 +1574,11 @@ class Daemon:
             return
         self._pressured_since = now
         self.store.set_meta("short_since", repr(now))
-        # RAM dibs lent a job to grow into comes back first (#182), then RAM a job started on (#114), and
-        # only then is a program outside dibs stopped (#135): dibs squeezes jobs in, so they go first (#253).
+        # Short of swap, the job that spilled the most into it goes first (#257); then RAM dibs lent a job
+        # to grow into (#182), then RAM a job started on (#114), and only then is a program outside dibs
+        # stopped (#135): dibs squeezes jobs in, so they go first (#253).
         self._relief_note = "nothing to stop"
-        if not self._give_back_growth(now) and not self._give_back_borrowed(now):
+        if not self._give_back_swap(now) and not self._give_back_growth(now) and not self._give_back_borrowed(now):
             self._stop_ram_hog(now)
         self._log_shortage(now)
 
@@ -1510,7 +1589,11 @@ class Daemon:
         info = self._meminfo()
         if info is not None and info[0] - info[1] < self.config.ram_reserve:
             swap = self.swap_free()
-            if (swap is not None and swap < SWAP_CUSHION) or self.pressure() >= RESERVE_PRESSURE:
+            if swap is not None and swap < SWAP_CUSHION:
+                return True
+            # Pressure from a job waiting on memory at its own limit is that job's (#257): stopping
+            # another job wouldn't help it, and it is stopped itself if it thrashes.
+            if self._machine_pressure() >= RESERVE_PRESSURE:
                 return True
         return self.pressure() >= EVICT_PRESSURE and self._short_of_ram()
 
@@ -1589,6 +1672,30 @@ class Daemon:
         log.info("guard stopped pid %d, holding %s of RAM while the machine was short of memory: %s",
                  pid, format_size(held), event["command"])  # fmt: skip
         self._relief_note = f"stopped pid {pid}, holding {format_size(held)}"
+        return True
+
+    def _give_back_swap(self, now: float) -> bool:
+        """With swap nearly full, stop the job that spilled the most into it past its own limit (#257):
+        the newest borrower may hold none. Whether one was stopped."""
+        swap = self.swap_free()
+        if swap is None or swap >= SWAP_CUSHION:
+            return False
+        spilled = [
+            j for j in self.store.jobs([State.RUNNING])
+            if j.id in self._at_limit and self._swap.get(j.id, 0) >= SPILLED_ENOUGH
+            and j.stop_requested is None and j.cancel_requested is None
+        ]  # fmt: skip
+        if not spilled:
+            return False
+        job = max(spilled, key=lambda j: (self._swap[j.id], j.id))
+        held = format_size(self._swap[job.id])
+        self._relief_note = f"stopped job {job.id}, which spilled {held} into swap"
+        job.swap_stopped = True
+        job.stop_reason = f"stopped: the machine ran short of swap, and it held the most of it ({held}) past its RAM limit"
+        job.stop_requested = now
+        self.store.update_job(job)
+        log.info("job %d %s", job.id, job.stop_reason)
+        self._push_stop(job, now)
         return True
 
     def _give_back_borrowed(self, now: float) -> bool:
@@ -2100,7 +2207,7 @@ class Daemon:
             job.reason = _ram_kill_reason(job, result)
         else:
             job.reason = result.get("reason")
-        if at_limit and job.state == State.FAILED and (mem := self._more_ram(job)):
+        if (at_limit or job.swap_stopped) and job.state == State.FAILED and (mem := self._more_ram(job)):
             job.reason += f"; resubmit with --mem {format_size(mem)}"  # as a VRAM stop says its size
         grown = bool(job.ram_limit and job.ram_limit > job.request.mem)
         if job.state == State.FAILED and grown and not at_limit and result.get("oom_killed") and (mem := self._more_ram(job)):
@@ -2128,6 +2235,8 @@ class Daemon:
             return job.request, "without borrowing", reason
         if len(job.attempts) >= MAX_RETRIES:
             return None
+        if job.swap_stopped and (mem := self._more_ram(job)):  # sized from what it held in RAM and swap (#257)
+            return replace(job.request, mem=mem), f"with --mem {format_size(mem)}", job.stop_reason
         if job.stop_reason and job.retry_vram and job.retry_vram > job.request.vram:
             return replace(job.request, vram=job.retry_vram), f"with --vram {self._vram_text(job.retry_vram)}", job.stop_reason
         if result.get("oom_killed") and result.get("hit_limit") is False:
@@ -2142,9 +2251,9 @@ class Daemon:
         return None
 
     def _more_ram(self, job: Job) -> int | None:
-        """The RAM to run a job killed at its RAM limit with: 25% more than it reached, rounded up to a
-        whole gigabyte (#84); None when the machine hasn't that much."""
-        mem = math.ceil(max(job.peak_mem or 0, job.request.mem) * 1.25 / GiB) * GiB
+        """The RAM to run a job killed at its RAM limit with: 25% more than it reached in RAM and swap
+        (#257), rounded up to a whole gigabyte (#84); None when the machine hasn't that much."""
+        mem = math.ceil(max((job.peak_mem or 0) + (job.peak_swap or 0), job.request.mem) * 1.25 / GiB) * GiB
         return mem if mem <= self.capacity.mem else None
 
     def _vram_text(self, vram: int) -> str:
@@ -2171,8 +2280,8 @@ class Daemon:
         job.cpu_ids, job.gpu_ids = [], []
         job.shim_pid = job.shim_ticks = job.unit = None
         job.stop_reason = job.stop_requested = job.retry_vram = None
-        job.borrowed_ram = job.evicted = job.grew_borrowed = False
-        job.peak_mem = job.peak_shmem = job.peak_shmem_mapped = job.peak_vram = job.ram_limit = None
+        job.borrowed_ram = job.evicted = job.grew_borrowed = job.swap_stopped = False
+        job.peak_mem = job.peak_shmem = job.peak_shmem_mapped = job.peak_vram = job.ram_limit = job.peak_swap = None
         job.sleep_at_start, job.asleep = None, 0.0
         with contextlib.suppress(FileNotFoundError):
             (self.paths.job_dir(job.id) / "exit.json").unlink()
