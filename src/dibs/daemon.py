@@ -248,6 +248,7 @@ class Daemon:
         disk_free: Callable[[str], int | None] = lambda path: None,
         written: Callable[[str], int | None] = lambda cgroup: None,
         swap_free: Callable[[], int | None] = lambda: None,
+        igpu: tuple[str, tuple[str, ...]] | None = None,
     ):
         self.paths = paths
         self.config = config
@@ -311,6 +312,10 @@ class Daemon:
         self.disk_free = disk_free
         self.written = written
         self.swap_free = swap_free  # None unless given: only the real daemon reads the real swap (#253)
+        self.igpu = igpu  # the integrated GPU (PCI address, device nodes), if any: only the real daemon's (#274)
+        self._igpu_seen: dict[str, tuple[float, dict[str, int]]] = {}  # DRM client -> (when, engine ns) at the last look
+        self._igpu_busy: dict[int, float] = {}  # job id -> % of the integrated GPU it kept busy since the last look
+        self._igpu_looked = -math.inf
         self._disk: dict[int, deque[tuple[float, int]]] = {}  # disk (st_dev) -> (time, bytes free)
         self._writes: dict[int, deque[tuple[float, int]]] = {}  # job -> (time, bytes it had written)
         self._disk_at = -math.inf
@@ -1203,6 +1208,7 @@ class Daemon:
         for gone in set(self._limit_hits) - {j.id for j in running}:
             del self._limit_hits[gone]
         self._watch_escaped(running, now)
+        self._watch_igpu(running, now)
         for job in running:
             held = self._memory_in_use(job)
             cg = self._scope_of(job)
@@ -1273,6 +1279,33 @@ class Daemon:
                 self.store.update_job(job)
             if held.get(job.id, 0) >= ESCAPED_TELL and not job.escaped_told:
                 self._tell_escaped(job, held[job.id], sorted(names[job.id]), now)
+
+    def _watch_igpu(self, running: list[Job], now: float) -> None:
+        """How busy each job keeps the integrated GPU (#274), every HOLDERS_EVERY: its busiest engine's
+        share of the time since the last look, from its processes' DRM clients (programs it started that
+        left its scope count too, #265)."""
+        if self.igpu is None or now - self._igpu_looked < HOLDERS_EVERY:
+            return
+        self._igpu_looked = now
+        busy: dict[int, float] = {}
+        seen: dict[str, tuple[float, dict[str, int]]] = {}
+        for job in running:
+            scopes = [cg for cg in [self._scope_of(job)] if cg] + [cg for cg, j in self._escaped_scopes.items() if j == job.id]
+            pids = [pid for cg in scopes for pid in procs.cgroup_pids(cg)]
+            ran: dict[str, int] = {}
+            for client, engines in procs.drm_clients(pids, self.igpu[1]).items():
+                seen[client] = (now, engines)
+                if client in self._igpu_seen:
+                    then, before = self._igpu_seen[client]
+                    for engine, ns in engines.items():
+                        ran[engine] = ran.get(engine, 0) + max(0, ns - before.get(engine, 0))
+                    took = now - then
+            if ran and took > 0:
+                busy[job.id] = min(100.0, max(ran.values()) / (took * 1e9) * 100)
+                if busy[job.id] > (job.peak_igpu or 0.0):
+                    job.peak_igpu = busy[job.id]
+                    self.store.update_job(job)
+        self._igpu_seen, self._igpu_busy = seen, busy
 
     def _find_escaped(self, running: list[Job]) -> dict[str, int]:
         """Scopes beside the running jobs' own whose oldest process descends from a job's shim."""
@@ -2436,10 +2469,13 @@ class Daemon:
             "gpus": [
                 {"index": g.index, "uuid": g.uuid, "name": g.name, "vram": g.vram} for g in self.capacity.gpus
             ],
+            **({"igpu": {"pci": self.igpu[0]}} if self.igpu else {}),  # #274
         }
 
     def _view(self, job: Job, now: float, current: Plan) -> dict:
         view = job_to_dict(job)
+        if job.id in self._igpu_busy:  # #274
+            view["igpu_busy"] = self._igpu_busy[job.id]
         if job.state == State.QUEUED:
             p = current.predictions.get(job.id)
             view.update(
@@ -2508,7 +2544,7 @@ def run_daemon(env: Mapping[str, str] = os.environ) -> int:
     daemon = Daemon(paths, config, capacity, backend, use_systemd=use_systemd, programs=procs.big_programs,
                     set_mem_limit=launcher.set_memory_max if use_systemd else None,
                     panes=lambda: procs.pane_cpu(PANE_SCOPES), disk_free=procs.disk_free, written=procs.written_bytes,
-                    swap_free=procs.swap_free)  # fmt: skip
+                    swap_free=procs.swap_free, igpu=procs.find_igpu())  # fmt: skip
     daemon.recover()
     gpus = ", ".join(f"GPU {g.index} {format_size(g.vram)}" for g in capacity.gpus) or "no GPUs"
     log.info(

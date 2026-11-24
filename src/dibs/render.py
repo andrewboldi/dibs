@@ -361,6 +361,8 @@ def render_show(job: dict, now: float) -> str:
         if job.get("peak_escaped"):  # #265
             spilled += f", plus {format_size(job['peak_escaped'])} in programs it started that left its scope (its --mem doesn't hold them)"
         peaks.append(f"RAM {format_size(job['peak_mem'])} of {format_size(job['request']['mem'])}{grown} (not counting file cache){spilled}")
+    if (job.get("peak_igpu") or 0) >= 1:  # the integrated GPU (#274)
+        peaks.append(f"Intel GPU up to {round(job['peak_igpu'])}% busy")
     cpu = _cpu_use(job, now)
     if cpu:
         peaks.append(cpu)
@@ -679,6 +681,9 @@ def _machine(snapshot: dict, width: int) -> list[_Line]:
         shares = [(j["request"]["vram"], _job_color(j["id"])) for j in running if g["index"] in j.get("gpu_ids", [])]
         rows.append((f"gpu {g['index']}" if len(cap["gpus"]) > 1 else "gpu", g["vram"], shares, format_size,
                      (away.get("vram") or {}).get(str(g["index"]), 0), "used outside"))  # fmt: skip
+    if cap.get("igpu"):  # the integrated GPU, by how busy each job keeps it (#274)
+        shares = [(j["igpu_busy"], _job_color(j["id"])) for j in running if j.get("igpu_busy")]
+        rows.append(("igpu", 100, shares, lambda n: f"{round(n)}%", 0, "busy outside"))
     # The figures' room depends on the totals alone, so the meters keep one width as top redraws.
     room = max(len(f"{fmt(t)}/{fmt(t)}") + (len(f"   {fmt(t)} {verb}") if outside is not None else 0)
                for _, t, _, fmt, _, verb in rows) + 4  # fmt: skip
