@@ -109,6 +109,7 @@ class Job:
     kept: list[float] | None = None  # [tag, plain tag] a replacement kept from the job it replaced (#184, #226)
     gpu_unasked_told: bool = False  # it asked for no GPU, held a little on one, and its session was told (#246)
     hard_limit: int | None = None  # its scope's RAM limit at launch, a step above its request while RAM was free (#249)
+    grew_told: bool = False  # it held over twice its RAM request, and its session was told (#251)
     borrowed_ram: bool = False  # this run started on RAM other jobs reserved but weren't using
     no_borrow: bool = False  # must start within RAM nobody reserved (after the machine ran out once)
     evicted: bool = False  # stopped by dibs to give borrowed RAM back under memory pressure (#114)
