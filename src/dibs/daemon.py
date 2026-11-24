@@ -117,6 +117,7 @@ SLOW_PASS = 5.0  # seconds: a pass of the daemon's loop this long is logged (#19
 HOLDERS_EVERY = 10.0  # seconds: what holds RAM outside dibs is read this often (#164)
 ADVISE_RUNS = 5  # runs of a script it takes to say how it uses what it asks for (#169)
 LONGEST_RUNS = 3  # earlier runs like a job it takes to expect an overrun as long as the longest (#227)
+SHOWS_RAM_AFTER = 60.0  # seconds: a run that failed or was cancelled sooner doesn't show what its command needs (#280)
 GROWN_TELL = 2.0  # a job holding more than this many times its RAM request has its session told (#251)
 WAIT_RECHECK = 5.0  # a long-polling wait re-checks its jobs at least this often
 LOG_MAX = 5 * 1024 * 1024
@@ -161,6 +162,17 @@ def _room_for(step: int, spare: int, keep: int) -> bool:
 def _limit(job: Job) -> int:
     """The RAM a running job may hold: its reservation, or the limit it grew to past it (#155)."""
     return max(job.request.mem, job.ram_limit or 0)
+
+
+def _shows_ram(job: Job) -> bool:
+    """Whether an earlier run's peak RAM shows what its command needs (#280): it finished normally, ran
+    SHOWS_RAM_AFTER or longer, or was killed at its RAM limit. A run that failed at startup or was
+    cancelled within seconds peaked at about what its interpreter takes to start."""
+    if not job.peak_mem:
+        return False
+    ran = (job.ended or 0.0) - (job.started or 0.0)
+    killed = job.state == State.FAILED and (job.reason or "").startswith("killed: went over its")
+    return job.state == State.DONE or ran >= SHOWS_RAM_AFTER or killed
 
 
 def _holding(job: Job, mem: int | None = None, vram: int | None = None, igpu: bool = False) -> Request:
@@ -939,8 +951,9 @@ class Daemon:
         return job.history_vram if job.history_vram and ran < YOUNG else None
 
     def _history_mem(self, cwd: str, argv: list[str], session: str) -> int | None:
-        """The peak RAM of earlier runs of the same command here (or the same script), if any."""
-        runs, _ = self._earlier(cwd, argv, session, lambda j: j.peak_mem)
+        """The peak RAM of earlier runs of the same command here (or the same script) that show what it
+        needs (#280), if any."""
+        runs, _ = self._earlier(cwd, argv, session, _shows_ram)
         return max((j.peak_mem for j in runs), default=None)
 
     def _history_longest(self, cwd: str, argv: list[str], request: Request, session: str) -> float | None:
@@ -955,8 +968,9 @@ class Daemon:
 
     def _sizing(self, job: Job) -> dict | None:
         """When the job's last ADVISE_RUNS or more runs say its RAM request could be a quarter smaller or more:
-        {"runs", "peak", "suggest"}, where suggest is their peak plus a quarter (#212)."""
-        runs, _ = self._earlier(job.cwd, job.argv, job.session, lambda j: j.peak_mem)
+        {"runs", "peak", "suggest"}, where suggest is their peak plus a quarter (#212). Only runs that show
+        what the command needs count (#280)."""
+        runs, _ = self._earlier(job.cwd, job.argv, job.session, _shows_ram)
         if len(runs) < ADVISE_RUNS:
             return None
         peak = max(j.peak_mem for j in runs)
