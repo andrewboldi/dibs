@@ -256,6 +256,11 @@ def memory_in_use(cgroup_path: str) -> tuple[int, int, tuple[int, int]] | None:
     return stat["anon"] + shmem, shmem, (min(most, max(0, mapped - other_files)), most)
 
 
+def cgroup_pids(cgroup_path: str) -> list[int]:
+    """The processes in a cgroup (its cgroup.procs), none where it can't be read."""
+    return [int(p) for p in (_read(f"{CGROUP_ROOT}{cgroup_path}/cgroup.procs") or "").split() if p.isdigit()]
+
+
 def swap_in_use(cgroup_path: str) -> int | None:
     """What a cgroup's processes hold in swap (memory.swap.current), or None where it can't be read (#257)."""
     text = (_read(f"{CGROUP_ROOT}{cgroup_path}/memory.swap.current") or "").strip()

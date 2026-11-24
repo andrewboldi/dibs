@@ -113,6 +113,8 @@ class Job:
     peak_swap: int | None = None  # the most it held in swap, spilled past its RAM limit or moved there (#257)
     swap_stopped: bool = False  # dibs stopped it for thrashing at its limit, or for the swap it held (#257)
     title: str | None = None  # what it does, in plain words, for the person watching dibs top (#259)
+    peak_escaped: int | None = None  # the most programs it started held after leaving its scope, as snap apps do (#265)
+    escaped_told: bool = False  # its session was told its --mem doesn't hold those programs (#265)
     borrowed_ram: bool = False  # this run started on RAM other jobs reserved but weren't using
     no_borrow: bool = False  # must start within RAM nobody reserved (after the machine ran out once)
     evicted: bool = False  # stopped by dibs to give borrowed RAM back under memory pressure (#114)

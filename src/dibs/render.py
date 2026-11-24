@@ -358,6 +358,8 @@ def render_show(job: dict, now: float) -> str:
     if job.get("peak_mem") is not None:
         grown = f", grown to a {format_size(job['ram_limit'])} limit" if (job.get("ram_limit") or 0) > job["request"]["mem"] else ""
         spilled = f", {format_size(job['peak_swap'])} more spilled into swap" if job.get("peak_swap") else ""  # #257
+        if job.get("peak_escaped"):  # #265
+            spilled += f", plus {format_size(job['peak_escaped'])} in programs it started that left its scope (its --mem doesn't hold them)"
         peaks.append(f"RAM {format_size(job['peak_mem'])} of {format_size(job['request']['mem'])}{grown} (not counting file cache){spilled}")
     cpu = _cpu_use(job, now)
     if cpu:
