@@ -105,6 +105,7 @@ SLOW_PASS = 5.0  # seconds: a pass of the daemon's loop this long is logged (#19
 HOLDERS_EVERY = 10.0  # seconds: what holds RAM outside dibs is read this often (#164)
 ADVISE_RUNS = 5  # runs of a script it takes to say how it uses what it asks for (#169)
 LONGEST_RUNS = 3  # earlier runs like a job it takes to expect an overrun as long as the longest (#227)
+GROWN_TELL = 2.0  # a job holding more than this many times its RAM request has its session told (#251)
 WAIT_RECHECK = 5.0  # a long-polling wait re-checks its jobs at least this often
 LOG_MAX = 5 * 1024 * 1024
 
@@ -1049,6 +1050,7 @@ class Daemon:
         self._watch_gpus(now)
         self.schedule()
         self._grow(now)  # after starting what can start: growth takes only RAM left unreserved
+        self._tell_grown(now)
         for watch in (self._watch_outside_cpu, self._watch_load, self._watch_panes, self._watch_disk):  # only shown, after scheduling
             try:
                 watch(now)
@@ -1214,6 +1216,28 @@ class Daemon:
                     else "other jobs reserved but weren't using" if borrowing else "nobody reserved")  # fmt: skip
             log.info("job %d grew past its %s RAM reservation into RAM %s: its limit is now %s", job.id,
                      format_size(job.request.mem), into, format_size(job.ram_limit))  # fmt: skip
+
+    def _tell_grown(self, now: float) -> None:
+        """Tell a job's session, once, when the job holds more than twice the RAM it asked for (#251).
+        Growing (#155, #182, #228, #249) spared it the kill, whose reason said what --mem to ask, and its
+        next run may find no room to grow. As request advice: once, at a command from the job's own
+        folder (#221), at most once an hour per script."""
+        for job in self.store.jobs([State.RUNNING]):
+            held = self._held.get(job.id)
+            if held is None or job.grew_told or held <= GROWN_TELL * job.request.mem:
+                continue
+            job.grew_told = True
+            self.store.update_job(job)
+            script = script_of(job.argv)
+            key = f"advised:{job.session}:grew:{script or ' '.join(job.argv)}"
+            if now - float(self.store.get_meta(key) or -math.inf) < ADVISE_EVERY:
+                continue
+            self.store.set_meta(key, repr(now))
+            ask = suggest_mem(max(held, job.peak_mem or 0))
+            message = (f"Job {job.id} ({job.name}) asked for {format_size(job.request.mem)} of RAM and holds "
+                       f"{format_size(held)}, grown into RAM the machine had free: --mem {format_size(ask)} would "
+                       "size its next run.")  # fmt: skip
+            self.store.add_event("advice", {"session": job.session, "job": job.id, "message": message}, now)
 
     def _spare(self, running: list[Job]) -> tuple[int, int]:
         """RAM the machine really has free beyond what dibs planned, and what must stay free: available
