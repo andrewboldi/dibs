@@ -27,6 +27,7 @@ class Capacity:
     cpus: tuple[int, ...]  # CPU ids dibs may hand out
     mem: int  # bytes
     gpus: tuple[Gpu, ...]
+    igpu: int = 0  # jobs that may use the integrated GPU at once (#276); 0 without one
 
     @property
     def max_vram(self) -> int:
@@ -41,6 +42,7 @@ class Request:
     vram: int  # bytes on each GPU it uses
     time: float  # estimated run time, seconds
     exclusive: bool = False  # nothing else runs beside it, e.g. for timing (#104)
+    igpu: bool = False  # the integrated GPU, to render on through OpenGL and Vulkan (#276)
 
 
 class State(StrEnum):
@@ -116,6 +118,7 @@ class Job:
     peak_escaped: int | None = None  # the most programs it started held after leaving its scope, as snap apps do (#265)
     escaped_told: bool = False  # its session was told its --mem doesn't hold those programs (#265)
     peak_igpu: float | None = None  # the most of the integrated GPU it kept busy over 10 s, in percent (#274)
+    igpu_told: bool = False  # it kept the integrated GPU busy without asking, and its session was told (#276)
     borrowed_ram: bool = False  # this run started on RAM other jobs reserved but weren't using
     no_borrow: bool = False  # must start within RAM nobody reserved (after the machine ran out once)
     evicted: bool = False  # stopped by dibs to give borrowed RAM back under memory pressure (#114)
@@ -205,6 +208,8 @@ def fits_machine(req: Request, cap: Capacity) -> str | None:
         return f"asks for {req.cpus} CPUs, but dibs manages {len(cap.cpus)}"
     if req.mem > cap.mem:
         return f"asks for {format_size(req.mem)} RAM, but dibs manages {format_size_against(cap.mem, req.mem)}"
+    if req.igpu and not cap.igpu:
+        return "this machine has no integrated GPU dibs hands out"
     if req.gpus == 0:
         return None
     if not cap.gpus:
@@ -265,7 +270,8 @@ def resolve_request(raw: Mapping[str, Any], cap: Capacity) -> Request:
     elif gpus is None:
         gpus = 1
 
-    req = Request(cpus=cpus, mem=mem, gpus=gpus, vram=vram, time=float(time), exclusive=raw.get("exclusive") is True)
+    req = Request(cpus=cpus, mem=mem, gpus=gpus, vram=vram, time=float(time), exclusive=raw.get("exclusive") is True,
+                  igpu=raw.get("igpu") is True)  # fmt: skip
     problem = fits_machine(req, cap)
     if problem:
         raise RequestError(problem)

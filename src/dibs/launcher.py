@@ -7,6 +7,7 @@ the job run in their own scope with MemoryMax set to the job's RAM reservation.
 
 import getpass
 import json
+import glob
 import os
 import shutil
 import subprocess
@@ -119,6 +120,33 @@ def sweep_job_tmps(paths: Paths, keep: Collection[int]) -> None:
             shutil.rmtree(entry, ignore_errors=True)
 
 
+EGL_VENDOR_DIRS = ("/usr/share/glvnd/egl_vendor.d", "/etc/glvnd/egl_vendor.d")  # tests point these elsewhere
+VULKAN_ICD_DIRS = ("/usr/share/vulkan/icd.d", "/etc/vulkan/icd.d")
+OFFLOAD_VARS = ("__NV_PRIME_RENDER_OFFLOAD", "__VK_LAYER_NV_optimus", "DRI_PRIME")  # what sends drawing to the NVIDIA GPU
+
+
+def _first(folders: tuple[str, ...], pattern: str) -> str | None:
+    for folder in folders:
+        found = sorted(glob.glob(os.path.join(folder, pattern)))
+        if found:
+            return found[0]
+    return None
+
+
+def igpu_env(env: dict[str, str]) -> None:
+    """Point a job's OpenGL and Vulkan at the integrated GPU (#276). Without these, a program drawing
+    without a screen through EGL gets the NVIDIA GPU here, where a job that asked for none is stopped
+    past 64M (#246); Vulkan offers every GPU; and an inherited offload setting sends GLX there too."""
+    for var in OFFLOAD_VARS:
+        env.pop(var, None)
+    if egl := _first(EGL_VENDOR_DIRS, "*mesa*.json"):
+        env["__EGL_VENDOR_LIBRARY_FILENAMES"] = egl
+    if icd := _first(VULKAN_ICD_DIRS, "intel_icd*.json"):
+        env["VK_DRIVER_FILES"] = env["VK_ICD_FILENAMES"] = icd
+    env["__GLX_VENDOR_LIBRARY_NAME"] = "mesa"
+    env["DIBS_IGPU"] = "1"
+
+
 def job_env(job: Job, instance: str, vendor: str = "nvidia", tmp: Path | None = None) -> dict[str, str]:
     """The submitter's environment, plus what the job was granted. `vendor` is the machine's GPU
     vendor: NVIDIA jobs get CUDA_VISIBLE_DEVICES, AMD jobs ROCR_VISIBLE_DEVICES (ROCm's recommended
@@ -143,6 +171,8 @@ def job_env(job: Job, instance: str, vendor: str = "nvidia", tmp: Path | None = 
     env["DIBS_MEM"] = str(job.request.mem)
     env["DIBS_VRAM"] = str(job.request.vram)
     env["DIBS_GPUS"] = ",".join(str(g) for g in job.gpu_ids)
+    if job.request.igpu:
+        igpu_env(env)
     if tmp is not None and "TMPDIR" not in env:
         # Its own temp folder, deleted when it ends, so scratch files a killed job leaves behind don't
         # hold RAM where /tmp is a tmpfs (#89). Tools that cache under the temp directory keep their

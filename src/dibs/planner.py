@@ -88,12 +88,13 @@ def expected_end(job: Running, now: float) -> float:
 class _Profile:
     """Free resources over time, as a step function: segment k covers [times[k], times[k+1])."""
 
-    def __init__(self, now: float, cpus: int, mem: int, vram: list[int], jobs: list[int] | None = None):
+    def __init__(self, now: float, cpus: int, mem: int, vram: list[int], jobs: list[int] | None = None, igpu: int = 0):
         self.times = [now]
         self.cpus = [cpus]
         self.mem = [mem]
         self.vram = [list(vram)]
         self.jobs = [list(jobs) if jobs is not None else [0] * len(vram)]  # jobs on each GPU (#146)
+        self.igpu = [igpu]  # free seats on the integrated GPU (#276)
 
     def _boundary(self, t: float) -> int:
         """Make t the start of a segment (t >= times[0]) and return that segment's index."""
@@ -105,20 +106,22 @@ class _Profile:
         self.mem.insert(k + 1, self.mem[k])
         self.vram.insert(k + 1, list(self.vram[k]))
         self.jobs.insert(k + 1, list(self.jobs[k]))
+        self.igpu.insert(k + 1, self.igpu[k])
         return k + 1
 
     def block(self, start: float, end: float) -> None:
         """Nothing else fits over [start, end): an exclusive job has the machine (#104)."""
         self.add(start, end, -_ALL, 0, {pos: -_ALL for pos in range(len(self.vram[0]))})
 
-    def add(self, start: float, end: float, cpus: int, mem: int, vram: dict[int, int], jobs: int = 0) -> None:
+    def add(self, start: float, end: float, cpus: int, mem: int, vram: dict[int, int], jobs: int = 0, igpu: int = 0) -> None:
         """Add (or, with negative amounts, take) resources over [start, end); jobs: how many jobs that
-        puts on (or takes off) each GPU in vram."""
+        puts on (or takes off) each GPU in vram; igpu: seats on the integrated GPU."""
         first = self._boundary(start)
         last = len(self.times) if end == math.inf else self._boundary(end)
         for k in range(first, last):
             self.cpus[k] += cpus
             self.mem[k] += mem
+            self.igpu[k] += igpu
             for pos, amount in vram.items():
                 self.vram[k][pos] += amount
                 self.jobs[k][pos] += jobs
@@ -135,7 +138,7 @@ class _Profile:
             j, short = k, False
             while j < n and self.times[j] < end:
                 cpus_needed = whole[0] if whole else req.cpus
-                if self.cpus[j] < cpus_needed or self.mem[j] < req.mem or (
+                if self.cpus[j] < cpus_needed or self.mem[j] < req.mem or (req.igpu and self.igpu[j] < 1) or (
                     whole and any(free < total for free, total in zip(self.vram[j], whole[1]))
                 ):
                     short = True
@@ -185,7 +188,8 @@ def plan(
             if g in gpu_pos:
                 free_vram[gpu_pos[g]] -= r.request.vram
                 on_gpu[gpu_pos[g]] += 1
-    profile = _Profile(now, len(cpu_set) - len(busy_cpus), free_mem, free_vram, on_gpu)
+    seats = capacity.igpu - sum(1 for r in running if r.request.igpu)  # #276
+    profile = _Profile(now, len(cpu_set) - len(busy_cpus), free_mem, free_vram, on_gpu, seats)
 
     running_ends = {}
     blocker = None  # a running job that has the machine to itself
@@ -193,7 +197,8 @@ def plan(
         end = expected_end(r, now)
         running_ends[r.job_id] = end
         released = {gpu_pos[g]: r.request.vram for g in r.gpu_ids if g in gpu_pos}
-        profile.add(end, math.inf, sum(1 for c in r.cpu_ids if c in cpu_set), r.request.mem, released, jobs=-1)
+        profile.add(end, math.inf, sum(1 for c in r.cpu_ids if c in cpu_set), r.request.mem, released, jobs=-1,
+                    igpu=1 if r.request.igpu else 0)  # fmt: skip
         if r.request.exclusive:
             profile.block(now, end)
             blocker = r.job_id
@@ -210,7 +215,8 @@ def plan(
         if q.request.exclusive:
             profile.block(start, end)
         else:
-            profile.add(start, end, -q.request.cpus, -q.request.mem, {p: -q.request.vram for p in positions}, jobs=1)
+            profile.add(start, end, -q.request.cpus, -q.request.mem, {p: -q.request.vram for p in positions}, jobs=1,
+                        igpu=-1 if q.request.igpu else 0)  # fmt: skip
         gpu_ids = tuple(capacity.gpus[p].index for p in positions)
         placed[q.job_id] = (start, end, gpu_ids)
         if start == now:
@@ -220,6 +226,11 @@ def plan(
 
     # What is free right now, once the jobs starting now have taken their share.
     now_cpus, now_mem, now_vram = profile.cpus[0], profile.mem[0], profile.vram[0]
+    # Who holds the integrated GPU now, to name in a waiting job's reason (#276).
+    igpu_holders = [r.job_id for r in running if r.request.igpu] + [
+        s.job_id for s in starts if next(q for q in queued if q.job_id == s.job_id).request.igpu
+    ]
+    seated = {"free_igpu": profile.igpu[0], "igpu_holders": igpu_holders}
     # Starts that rest on a running job's assumed end past its estimate (#181).
     overrunning = {running_ends[r.job_id]: r for r in running if r.started + r.request.time <= now}
     rests = {job_id: overrunning[start] for job_id, (start, _, _) in placed.items() if start > now and start in overrunning}
@@ -232,7 +243,7 @@ def plan(
             )
             continue
         if q.job_id not in placed:  # waits for programs outside dibs to free RAM
-            reason, lacks, behind = _reason(q, order, placed, now, now_cpus, now_mem, now_vram, outside_mem, rests, outside_top)
+            reason, lacks, behind = _reason(q, order, placed, now, now_cpus, now_mem, now_vram, outside_mem, rests, outside_top, **seated)
             predictions[q.job_id] = Prediction(q.job_id, position, None, None, (), reason, lacks, behind)
             continue
         start, end, gpu_ids = placed[q.job_id]
@@ -242,7 +253,7 @@ def plan(
         elif start > now and blocker is not None:
             reason = f"waits for #{blocker}, which has the machine to itself"
         elif start > now:
-            reason, lacks, behind = _reason(q, order, placed, now, now_cpus, now_mem, now_vram, outside_mem, rests, outside_top)
+            reason, lacks, behind = _reason(q, order, placed, now, now_cpus, now_mem, now_vram, outside_mem, rests, outside_top, **seated)
         r = rests.get(q.job_id)
         after = (r.job_id, now - r.started - r.request.time, r.request.time) if r else None
         predictions[q.job_id] = Prediction(q.job_id, position, start, end, gpu_ids, reason, lacks, behind, after)
@@ -251,7 +262,8 @@ def plan(
 
 
 def _reason(
-    q, order, placed, now, free_cpus, free_mem, free_vram, outside_mem=0, rests=None, outside_top=None
+    q, order, placed, now, free_cpus, free_mem, free_vram, outside_mem=0, rests=None, outside_top=None, free_igpu=0,
+    igpu_holders=(),
 ) -> tuple[str, tuple[str, ...], int | None]:
     """Why a queued job isn't starting now, and the same in a word or two for dibs top: what it lacks,
     and the job ahead in line it would delay."""
@@ -280,6 +292,10 @@ def _reason(
                 short.append(f"{vram} VRAM ({where})")
                 if q.asked_vram is not None and q.asked_vram < req.vram:  # #183
                     short[-1] += f": its earlier runs held that much, though it asks for {format_size(q.asked_vram)}"
+    if req.igpu and free_igpu < 1:  # #276
+        holder = f" (#{igpu_holders[0]} has it)" if len(igpu_holders) == 1 else ""
+        short.append(f"the integrated GPU{holder}")
+        lacks.append("iGPU")
     if short:
         return "needs " + ", ".join(short), tuple(lacks), None
     for ahead in order:

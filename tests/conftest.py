@@ -68,6 +68,7 @@ def dibs_env(tmp_path):
         DIBS_GPU_BACKEND="smi",
         DIBS_FAKE_GPU_FILE=str(gpu_file),
         DIBS_MEMINFO=f"{FAKES}/meminfo",  # nothing in use outside dibs, whatever this machine is doing
+        DIBS_DRM_ROOT=str(tmp_path / "no-drm"),  # no integrated GPU, whatever this machine has (#276)
         PATH=f"{FAKES}:{os.environ['PATH']}",
     )
     env.pop("CLAUDE_CODE_SESSION_ID", None)

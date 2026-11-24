@@ -20,6 +20,7 @@ class Config:
     mem: int | None = None  # bytes of RAM to hand out
     gpus: tuple[int, ...] | None = None  # GPU indices to manage
     vram: int | None = None  # at most this many bytes of VRAM per GPU
+    igpu_jobs: int = 1  # jobs that may use the integrated GPU at once; 0 hands it out to none (#276)
     keep_days: int = 14
     guard: str = "all"
     guard_allow: tuple[str, ...] = ()
@@ -70,6 +71,10 @@ def load_config(path: Path) -> Config:
             ):
                 raise ConfigError("config setting 'gpus' must be a list of GPU indices, like [0, 1]")
             fields[key] = tuple(value)
+        elif key == "igpu_jobs":
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ConfigError("config setting 'igpu_jobs' must be a whole number of jobs (0 hands the integrated GPU out to none)")
+            fields[key] = value
         elif key == "keep_days":
             if isinstance(value, bool) or not isinstance(value, int) or value < 0:
                 raise ConfigError("config setting 'keep_days' must be a whole number of days")
@@ -141,8 +146,9 @@ def nominal_vram(vram: int) -> int:
     return whole if whole - vram <= whole // 200 else vram
 
 
-def build_capacity(config: Config, cpus: tuple[int, ...], mem: int, gpus: Sequence[Gpu]) -> Capacity:
-    """What dibs hands out: everything detected, narrowed by the config."""
+def build_capacity(config: Config, cpus: tuple[int, ...], mem: int, gpus: Sequence[Gpu], igpu: bool = False) -> Capacity:
+    """What dibs hands out: everything detected, narrowed by the config; igpu: the machine has an
+    integrated GPU, which config.igpu_jobs jobs may use at once (#276)."""
     gpus = [Gpu(g.index, g.uuid, g.name, nominal_vram(g.vram)) for g in gpus]
     if config.cpus is not None:
         if config.cpus > len(cpus):
@@ -170,4 +176,4 @@ def build_capacity(config: Config, cpus: tuple[int, ...], mem: int, gpus: Sequen
                 f"but the largest GPU has {format_size(largest)}"
             )
         managed = [Gpu(g.index, g.uuid, g.name, min(g.vram, config.vram)) for g in managed]
-    return Capacity(cpus=tuple(cpus), mem=mem, gpus=tuple(managed))
+    return Capacity(cpus=tuple(cpus), mem=mem, gpus=tuple(managed), igpu=config.igpu_jobs if igpu else 0)

@@ -265,15 +265,16 @@ def find_igpu() -> tuple[str, tuple[str, ...]] | None:
     """The integrated (Intel) GPU (#274): its PCI address and its device nodes, found by device rather
     than by number, which can change at boot; None without one. dibs's GPU backends see only NVIDIA and
     AMD GPUs, so this one is never among the GPUs dibs already manages."""
+    root = os.environ.get("DIBS_DRM_ROOT") or DRM_ROOT  # DIBS_DRM_ROOT points tests at a stand-in tree
     try:
-        names = sorted(os.listdir(DRM_ROOT))
+        names = sorted(os.listdir(root))
     except OSError:
         return None
     pci, nodes = None, []
     for name in names:
         if not re.fullmatch(r"(card|renderD)\d+", name):
             continue
-        device = f"{DRM_ROOT}/{name}/device"
+        device = f"{root}/{name}/device"
         if (_read(f"{device}/vendor") or "").strip() != "0x8086":
             continue
         address = os.path.basename(os.path.realpath(device))
