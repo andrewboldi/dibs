@@ -37,6 +37,7 @@ class FakeBackend:
         self.blind = False  # True: the driver doesn't report processes
         self.util: dict[int, float] | None = {}  # each GPU's use in percent (#180)
         self.proc_util: dict[int, float] | None = None  # each process's, where the driver says (#180)
+        self.temps: dict[int, float] | None = None  # each GPU's temperature (#278)
 
     def list_gpus(self):
         return list(self.gpus)
@@ -52,6 +53,9 @@ class FakeBackend:
 
     def process_utilization(self):
         return None if self.blind else self.proc_util
+
+    def temperatures(self):
+        return None if self.blind else self.temps
 
 
 @pytest.fixture
@@ -98,7 +102,7 @@ def make_daemon(tmp_path):
 
     def _make(config=Config(), cap=None, backend=None, clock=time.time, meminfo=lambda: None, slept=procs.slept,
               pressure=lambda: 0.0, cpu_busy=lambda: None, programs=lambda minimum: [], set_mem_limit=None, panes=lambda: {},
-              igpu=None):
+              igpu=None, cpu_heat=lambda: None, throttled=lambda: None):
         paths = get_paths({"DIBS_HOME": str(tmp_path / "home"), "HOME": str(tmp_path)})
         d = Daemon(
             paths, config, cap or capacity(), backend or FakeBackend(), use_systemd=False, clock=clock, meminfo=meminfo,
@@ -109,6 +113,7 @@ def make_daemon(tmp_path):
             set_mem_limit=set_mem_limit,  # never the real systemctl: jobs here have no scopes (#155)
             panes=panes,  # never this machine's real terminals (#158)
             igpu=igpu,  # never this machine's real integrated GPU (#274)
+            cpu_heat=cpu_heat, throttled=throttled,  # never this machine's real sensors (#278)
         )
         made.append(d)
         return d

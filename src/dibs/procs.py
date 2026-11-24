@@ -257,6 +257,30 @@ def memory_in_use(cgroup_path: str) -> tuple[int, int, tuple[int, int]] | None:
     return stat["anon"] + shmem, shmem, (min(most, max(0, mapped - other_files)), most)
 
 
+HWMON_ROOT = "/sys/class/hwmon"
+
+
+def cpu_temp(root: str = HWMON_ROOT) -> tuple[float, float | None] | None:
+    """The CPU package's temperature and the one where it slows itself (its critical one), in °C, from
+    the coretemp sensor "Package id 0" (#278); None where there's none."""
+    try:
+        sensors = sorted(os.listdir(root))
+    except OSError:
+        return None
+    for sensor in sensors:
+        base = f"{root}/{sensor}"
+        if (_read(f"{base}/name") or "").strip() != "coretemp":
+            continue
+        for label in sorted(f for f in os.listdir(base) if f.endswith("_label")):
+            if (_read(f"{base}/{label}") or "").strip().startswith("Package"):
+                prefix = label.removesuffix("_label")
+                temp = (_read(f"{base}/{prefix}_input") or "").strip()
+                crit = (_read(f"{base}/{prefix}_crit") or "").strip()
+                if temp.lstrip("-").isdigit():
+                    return int(temp) / 1000, int(crit) / 1000 if crit.isdigit() else None
+    return None
+
+
 DRM_ROOT = "/sys/class/drm"  # tests point these at stand-in trees
 PROC_ROOT = "/proc"
 
@@ -397,6 +421,17 @@ def cpu_cap(root: str = CPU_ROOT) -> dict | None:
     if not speeds or len(capped) * 2 < len(speeds):
         return None
     return {"capped_mhz": min(cap for _, cap in capped), "max_mhz": max(top for top, _ in speeds)}
+
+
+def heat_throttled_ms(root: str = CPU_ROOT) -> int | None:
+    """How long the CPU package has slowed itself for heat since boot, in ms (the kernel's
+    package_throttle_total_time_ms, the same in each CPU of a package); None where unread (#278)."""
+    try:
+        names = [n for n in os.listdir(root) if n.startswith("cpu") and n[3:].isdigit()]
+    except OSError:
+        return None
+    times = [int(t) for n in names if (t := (_read(f"{root}/{n}/thermal_throttle/package_throttle_total_time_ms") or "").strip()).isdigit()]
+    return max(times) if times else None
 
 
 def outside_holders(minimum: int, skip: frozenset[str] | set[str] = frozenset()) -> list[dict]:

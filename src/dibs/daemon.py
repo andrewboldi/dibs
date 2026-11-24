@@ -91,6 +91,7 @@ HOG_SHARE = 0.1  # share of the RAM: a program outside dibs holding this much is
 OUTSIDE_CPU_EVERY = 4.0  # seconds between samples of the CPU busy outside dibs jobs (#120)
 OUTSIDE_CPU_WINDOW = 15.0  # seconds the figure dibs top shows is averaged over
 LOAD_EVERY = 4.0  # seconds between samples of the machine's busy cores, for dibs top's load row (#122)
+HEAT_WINDOW = 600.0  # seconds: dibs top says how much of this long the CPU slowed itself for heat (#278)
 LOAD_WINDOW = 600.0  # seconds of them kept
 MOMENTUM_SHARE = 0.25  # under momentum, a session's jobs count as this share of their estimates (#94)
 MOMENTUM_MAX = 12 * 3600.0  # seconds a grant may last
@@ -254,6 +255,8 @@ class Daemon:
         written: Callable[[str], int | None] = lambda cgroup: None,
         swap_free: Callable[[], int | None] = lambda: None,
         igpu: tuple[str, tuple[str, ...]] | None = None,
+        cpu_heat: Callable[[], tuple[float, float | None] | None] = lambda: None,
+        throttled: Callable[[], int | None] = lambda: None,
     ):
         self.paths = paths
         self.config = config
@@ -321,6 +324,9 @@ class Daemon:
         self._igpu_seen: dict[str, tuple[float, dict[str, int]]] = {}  # DRM client -> (when, engine ns) at the last look
         self._igpu_busy: dict[int, float] = {}  # job id -> % of the integrated GPU it kept busy since the last look
         self._igpu_looked = -math.inf
+        self.cpu_heat, self.throttled = cpu_heat, throttled  # only the real daemon's read this machine (#278)
+        self._heat: dict = {}  # the latest temperatures, for dibs top
+        self._throttled: deque[tuple[float, int]] = deque()  # (when, ms slowed for heat since boot), HEAT_WINDOW of them
         self._disk: dict[int, deque[tuple[float, int]]] = {}  # disk (st_dev) -> (time, bytes free)
         self._writes: dict[int, deque[tuple[float, int]]] = {}  # job -> (time, bytes it had written)
         self._disk_at = -math.inf
@@ -723,6 +729,7 @@ class Daemon:
             "outside": {"cpus": self._outside_cpu, "mem": self._shown_outside_mem, "vram": dict(self._outside_vram)},
             "load": {"every": LOAD_EVERY, "cores": self._load_history()},
             "cpu_cap": procs.cpu_cap(),  # only read, for dibs top (#179)
+            "heat": {k: v for k, v in self._heat.items() if k != "at"},  # #278
             # What holds the RAM in use outside dibs, and files in a RAM-backed /tmp (#164).
             "disk": self._disk_line,
             "outside_holders": self._ram_holders(now)[0],
@@ -1126,7 +1133,7 @@ class Daemon:
         self.schedule()
         self._grow(now)  # after starting what can start: growth takes only RAM left unreserved
         self._tell_grown(now)
-        for watch in (self._watch_outside_cpu, self._watch_load, self._watch_panes, self._watch_disk):  # only shown, after scheduling
+        for watch in (self._watch_outside_cpu, self._watch_load, self._watch_heat, self._watch_panes, self._watch_disk):  # only shown, after scheduling
             try:
                 watch(now)
             except Exception:
@@ -1944,6 +1951,27 @@ class Daemon:
         while len(self._load) > LOAD_WINDOW / LOAD_EVERY + 1:
             self._load.popleft()
 
+    def _watch_heat(self, now: float) -> None:
+        """The CPU's and GPUs' temperatures, and how much of the last HEAT_WINDOW the CPU slowed itself for
+        heat, every LOAD_EVERY seconds, for dibs top (#278): only shown, never acted on."""
+        if self._heat and now - self._heat["at"] < LOAD_EVERY:
+            return
+        cpu, gpus, ms = self.cpu_heat(), self.backend.temperatures(), self.throttled()
+        if ms is not None:
+            self._throttled.append((now, ms))
+            while self._throttled[0][0] < now - HEAT_WINDOW:
+                self._throttled.popleft()
+        heat: dict = {"at": now}
+        if cpu is not None:
+            heat["cpu"], heat["cpu_limit"] = cpu
+        if gpus:
+            heat["gpus"] = {str(i): t for i, t in gpus.items()}
+        if len(self._throttled) >= 2:
+            (t0, ms0), (t1, ms1) = self._throttled[0], self._throttled[-1]
+            if t1 > t0:
+                heat["slowed"], heat["over"] = min(1.0, max(0, ms1 - ms0) / ((t1 - t0) * 1000)), t1 - t0
+        self._heat = heat
+
     def _job_written(self, job: Job) -> int | None:
         """Bytes a running job's processes have had written to disk (procs.written_bytes); None if unseen."""
         if not (job.unit and job.shim_pid):
@@ -2567,7 +2595,7 @@ def run_daemon(env: Mapping[str, str] = os.environ) -> int:
     daemon = Daemon(paths, config, capacity, backend, use_systemd=use_systemd, programs=procs.big_programs,
                     set_mem_limit=launcher.set_memory_max if use_systemd else None,
                     panes=lambda: procs.pane_cpu(PANE_SCOPES), disk_free=procs.disk_free, written=procs.written_bytes,
-                    swap_free=procs.swap_free, igpu=igpu)  # fmt: skip
+                    swap_free=procs.swap_free, igpu=igpu, cpu_heat=procs.cpu_temp, throttled=procs.heat_throttled_ms)  # fmt: skip
     daemon.recover()
     gpus = ", ".join(f"GPU {g.index} {format_size(g.vram)}" for g in capacity.gpus) or "no GPUs"
     log.info(

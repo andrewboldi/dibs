@@ -55,6 +55,10 @@ class GpuBackend(Protocol):
         none); None where the driver doesn't say, as nvidia-smi and amd-smi don't (#180)."""
         ...
 
+    def temperatures(self) -> dict[int, float] | None:
+        """Each GPU's temperature in °C, by index; None where unknown (#278)."""
+        ...
+
 
 class NoGpuBackend:
     name = "none"
@@ -73,6 +77,9 @@ class NoGpuBackend:
         return {}
 
     def process_utilization(self) -> dict[int, float] | None:
+        return None
+
+    def temperatures(self) -> dict[int, float] | None:
         return None
 
 
@@ -161,6 +168,15 @@ class NvmlBackend:
             if self._lib.nvmlDeviceGetUtilizationRates(handle, ctypes.byref(rates)) != _NVML_SUCCESS:
                 return None
             found[index] = float(rates.gpu)
+        return found
+
+    def temperatures(self) -> dict[int, float] | None:
+        found = {}
+        for index, handle in enumerate(self._devices()):
+            temp = ctypes.c_uint()
+            if self._lib.nvmlDeviceGetTemperature(handle, 0, ctypes.byref(temp)) != _NVML_SUCCESS:  # 0: the GPU die
+                return None
+            found[index] = float(temp.value)
         return found
 
     def process_utilization(self) -> dict[int, float] | None:
@@ -270,6 +286,15 @@ class SmiBackend:
 
     def process_utilization(self) -> dict[int, float] | None:
         return None  # nvidia-smi's per-process numbers (pmon) take a second of sampling each time
+
+    def temperatures(self) -> dict[int, float] | None:
+        rows = self._query("--query-gpu=index,temperature.gpu")
+        if rows is None:
+            return None
+        try:
+            return {int(index): float(temp) for index, temp in rows}
+        except ValueError:
+            return None  # [N/A]
 
 
 # --- AMD: the amd-smi command line -------------------------------------------------------------
@@ -497,6 +522,9 @@ class AmdSmiBackend:
 
     def process_utilization(self) -> dict[int, float] | None:
         return None
+
+    def temperatures(self) -> dict[int, float] | None:
+        return None  # not read from amd-smi yet (#278)
 
 
 def open_backend(env: Mapping[str, str] = os.environ) -> GpuBackend:
