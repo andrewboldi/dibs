@@ -436,7 +436,7 @@ _LOAD_SGR = ("38;5;29", "38;5;136", "38;5;167")  # the load row with under half 
 _SPARK = "▁▂▃▄▅▆▇█"
 # The job rows' columns, each followed by a space that's always there (#118)
 _ID_W, _NAME_W, _WHEN_W, _PROGRESS_W = 4, 13, 16, 10  # "starts in 12h30m" is 16
-_NAME_MAX = 48  # titles, or names, get up to this much room, as the width allows (#143, #259)
+_NAME_MAX = 80  # titles (at most 80 characters), or names, get up to this much room, as the width allows (#143, #259, #263)
 _PLAN_MIN = 30  # what names leave a row for its bar or timeline and its reason
 _REASON_MIN = 10  # a reason shows only when this much of it fits
 _METER_MAX = 60  # the widest a meter gets

@@ -456,7 +456,10 @@ def test_a_name_too_long_for_the_room_is_cut_and_rows_still_fit(snapshot):
     for width in (60, 80, 100, 120, 160):
         lines = lines_of({**snapshot, "jobs": snapshot["jobs"][:2] + jobs}, width=width)
         assert all(len(line) <= width for line in lines), width
-        assert "x" * (20 if width >= 120 else 12) + "…" in inside(lines, "xxxxx"), width
+        if width >= 160:  # room for all of it: a title of up to 80 characters gets the room (#263)
+            assert "x" * 60 + " " in inside(lines, "xxxxx"), width
+        else:
+            assert "x" * (20 if width >= 120 else 12) + "…" in inside(lines, "xxxxx"), width
 
 
 def test_top_reads_keys_as_htop_does():

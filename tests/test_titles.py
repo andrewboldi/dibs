@@ -45,6 +45,13 @@ def test_dibs_top_shows_a_jobs_title_and_a_name_only_without_one(snapshot):
     assert "tokenize" in text  # no title: its name
 
 
+def test_dibs_top_shows_a_whole_title_when_the_terminal_has_room(snapshot):
+    title = "Compare the two tokenizers on the held-out set, then write up the table"  # 71 characters
+    snapshot["jobs"][0]["title"] = title
+    assert title in "\n".join(lines_of(snapshot, width=200))
+    assert title not in "\n".join(lines_of(snapshot, width=120))  # cut to fit, leaving room for the plan
+
+
 def test_dibs_queue_shows_the_title():
     jobs = [view(7, "exp-b7", State.QUEUED, 2, 10 * GiB, 0, 3600, position=1, predicted_start=None,
                  waiting_for="needs 10G RAM", title="Compare two tokenizers on the held-out set"),
