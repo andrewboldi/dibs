@@ -58,6 +58,16 @@ What dibs doesn't do, or does only partly. Each item says what happens and what 
   leave out the time the machine slept, but places in line are set by the wall clock: after a long
   sleep every queued job has waited its estimate, so newer jobs can't pass any of them. A job dibs
   was stopping when the machine went to sleep is killed as soon as it wakes.
+- **GPU jobs are carried across a sleep only on NVIDIA, with driver 570 or later, NVML and logind.**
+  There, dibs pauses their CUDA state before the sleep, moving their GPU memory into their RAM
+  (each job's RAM limit is lifted for the pause), and restores it after the wake (#293). A restore
+  that still fails after 5 minutes is reported to the job's session: its work most likely won't
+  continue. The driver can't pause a job that uses CUDA managed memory or shares GPU memory between
+  its processes, and a failed pause may leave the job broken. Elsewhere, GPU work running when the
+  machine sleeps may not come back. When a job that was using the GPU then holds its memory idle
+  for a minute after the wake, its session is told (#292): with NVML, by the job's own use of the
+  GPU; with nvidia-smi alone, only when no other job holds memory on that GPU. dibs doesn't read
+  AMD GPUs' use yet, so on AMD nothing is said.
 - **RAM is planned by use, so the machine can run short.** dibs lets jobs start in RAM other jobs
   reserved but aren't using. If those jobs (or programs outside dibs) then grow, the machine runs
   short: dibs stops the newest job that started this way once memory pressure stays high while

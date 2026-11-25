@@ -27,7 +27,7 @@ nobody starved, and anything that takes the GPU behind the queue's back is stopp
 Code, Codex, opencode, pi and Gemini CLI how to use it.
 
 <p align="center">
-  <img src="assets/demo.gif" alt="dibs top above, agents' commands below, each agent with its own panel. A training job takes the GPU; a fine-tune that needs the whole GPU waits behind it, its slot drawn on a timeline; a sweep of six evals starts four at once while two wait for RAM, so the view scrolls to show them; then a script started without dibs is stopped within a second, with a note in its output saying how to queue it." width="820">
+  <img src="assets/demo.gif" alt="dibs top above, agents' commands below: each agent's jobs in a panel of their own, under the titles the agent gave them. A training job takes the GPU; a fine-tune that needs the whole GPU waits behind it, its slot drawn on a timeline; a sweep of six evals starts five at once while the sixth waits for CPUs, so the view scrolls to show it; then a script started without dibs is stopped within a second, with a note in its output saying how to queue it." width="820">
 </p>
 
 ## What it adds to Slurm
@@ -43,12 +43,15 @@ Code, Codex, opencode, pi and Gemini CLI how to use it.
 - **Priority with a price.** `--priority 10` gets a job ahead now; the agent's next job pays the
   time back, so always picking 10 gains nothing after the first job.
 - **The rest of the machine counts.** RAM that browsers, editors and the agents themselves use isn't
-  handed out: dibs measures it every second and plans with its peak over two minutes.
+  handed out: dibs measures it every second and plans with its peak over the last 30 seconds.
 - **Sizing from history.** `dibs submit` shows what earlier runs of the same command used: CPUs,
   RAM, VRAM, and run time against the estimate.
 - **NVIDIA and AMD.** Each job sees only its own GPUs. One that goes over its VRAM reservation may
   borrow memory nobody reserved, and is stopped only when it reaches another job's; with `--retry`
   dibs runs it again with more VRAM.
+- **GPU jobs carry on after a laptop's sleep.** Before the machine sleeps, dibs moves each GPU
+  job's memory into its RAM with CUDA's checkpoint API, and puts it back after the wake (NVIDIA
+  driver 570 or later).
 
 dibs stores each job's environment, which can hold API keys, in `~/.local/state/dibs`, readable only
 by you. Nothing leaves the machine.
@@ -69,12 +72,12 @@ Rather not pipe a script into bash? [Install by hand](docs/install-manually.md).
 ## How it works
 
 One scheduler per user runs in the background and keeps the queue in SQLite; the `dibs` command
-talks to it over a Unix socket. An agent submits with `dibs submit --cpus 4 --mem 16G --vram 6G
---time 20m -- python train.py`, and the job runs detached in its own systemd scope: pinned to its
-cores, its RAM capped, its VRAM watched, and only its own GPUs visible. Each waiting job gets the
-earliest place on a timeline where it fits for its whole estimated run, so small jobs fill gaps
-without delaying anyone, and `dibs queue` says why each one waits. [More on how it
-works](docs/how-it-works.md), with every command and setting.
+talks to it over a Unix socket. An agent submits with `dibs submit --title "Train the model"
+--cpus 4 --mem 16G --vram 6G --time 20m -- python train.py`, and the job runs detached in its own
+systemd scope: pinned to its cores, its RAM capped, its VRAM watched, and only its own GPUs
+visible. Each waiting job gets the earliest place on a timeline where it fits for its whole
+estimated run, so small jobs fill gaps without delaying anyone, and `dibs queue` says why each one
+waits. [More on how it works](docs/how-it-works.md), with every command and setting.
 
 Using another agent CLI? List its instructions file in `agent_files` in `~/.config/dibs/config.toml`,
 or add it for everyone in one line ([CONTRIBUTING.md](CONTRIBUTING.md)).
