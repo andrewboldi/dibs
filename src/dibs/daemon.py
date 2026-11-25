@@ -112,6 +112,7 @@ PLACE_WAIT = 1800.0  # seconds: a job's notice its own folder hasn't picked up t
 # is told then, while other jobs wait for GPU memory, and at most once every IDLE_TELL_EVERY (#186).
 IDLE_UTIL, IDLE_EVERY, IDLE_TELL_EVERY, IDLE_SHARE = 5.0, 30.0, 3600.0, 0.1
 IDLE_AFTER = GPU_IDLE_AFTER
+WAKE_LOST_AFTER = 60.0  # seconds idle after a wake before a job computing when the machine slept is taken as lost (#292)
 ADVISE_EVERY = 3600.0  # seconds: each kind of advice, at most this often per session and script (#169)
 SHORTAGE_LOG_EVERY = 60.0  # seconds: while short of memory, what the relief did, logged this often (#191)
 SLOW_PASS = 5.0  # seconds: a pass of the daemon's loop this long is logged (#191)
@@ -220,6 +221,15 @@ def _idle_message(job: Job, now: float, waiting: int) -> str:
             "GPU memory until its processes free it or exit.")  # fmt: skip
 
 
+def _sleep_lost_message(job: Job, since_wake: float) -> str:
+    """What a session is told when its job's GPU work most likely didn't survive a suspend (#292)."""
+    return (f"Job {job.id}'s GPU work most likely didn't survive the suspend: it was using the GPU when the machine "
+            f"went to sleep, and it hasn't since the wake {format_duration(since_wake)} ago, while holding "
+            f"{format_size(job.gpu_idle_held or 0)} of GPU memory. GPU work running when this machine suspends "
+            "doesn't come back. Check its output: if it has stopped, cancel it and resubmit it, from a checkpoint if "
+            "it has one. dibs doesn't stop it.")  # fmt: skip
+
+
 def _shared_part(job: Job) -> str:
     """For a job killed at its RAM limit: how much of its peak was shared memory, when that was at
     least a quarter of its reservation, and of which kind, since what helps differs. Files a job writes
@@ -284,6 +294,9 @@ class Daemon:
         self.pressure = pressure
         self._pressured_since: float | None = None  # when memory pressure rose above EVICT_PRESSURE
         self._idle_at = -math.inf  # when idle GPU holds were last checked (#180)
+        self._idle_slept: float | None = None  # the machine's time asleep at that check
+        self._woke: tuple[float, float] | None = None  # the last check before a sleep and the first after it (#292)
+        self._gpu_busy_at: dict[int, float] = {}  # job id -> the last check that saw it use its GPU
         self._relief_note = ""  # what the memory relief did last, for the log (#191)
         self._holders: tuple[float, list[dict], int | None] = (-math.inf, [], None)  # (when, holders, /tmp files)
         self._shortage_logged = -math.inf
@@ -2149,7 +2162,12 @@ class Daemon:
         until its processes free it or exit, and one did so, idle, for hours. Nothing is stopped."""
         if now - self._idle_at < IDLE_EVERY:
             return
-        self._idle_at = now
+        slept = self.slept()
+        if self._idle_slept is not None and slept - self._idle_slept >= IDLE_EVERY:
+            self._woke = (self._idle_at, now)  # the machine slept since the last look (#292)
+        self._idle_at, self._idle_slept = now, slept
+        for gone in set(self._gpu_busy_at) - set(running):
+            del self._gpu_busy_at[gone]
         util = self.backend.utilization() if held else {}
         per_process = self.backend.process_utilization() if held else None
         size = {g.index: g.vram for g in self.capacity.gpus}
@@ -2161,6 +2179,8 @@ class Daemon:
                 self._gpu_idle(job.id, g, held, util, per_process) for g in big
             )
             if not idle:
+                if big and util is not None:
+                    self._gpu_busy_at[job.id] = now
                 if job.gpu_idle_since is not None:
                     self._end_idle(job, now)
                     self.store.update_job(job)
@@ -2168,7 +2188,12 @@ class Daemon:
             if job.gpu_idle_since is None:
                 job.gpu_idle_since, job.gpu_idle_held = now, 0
             job.gpu_idle_held = max(job.gpu_idle_held or 0, sum(big.values()))
-            if now - job.gpu_idle_since >= IDLE_AFTER and (job.gpu_idle_told is None or now - job.gpu_idle_told >= IDLE_TELL_EVERY):
+            if self._lost_at_sleep(job, now):  # told at once, whether or not others wait (#292)
+                job.gpu_idle_told = now
+                self.store.add_event("idle_gpu", {"session": job.session, "job": job.id,
+                                                  "message": _sleep_lost_message(job, now - self._woke[1])}, now)  # fmt: skip
+                log.info("told the session of job %d: its GPU work most likely didn't survive the suspend", job.id)
+            elif now - job.gpu_idle_since >= IDLE_AFTER and (job.gpu_idle_told is None or now - job.gpu_idle_told >= IDLE_TELL_EVERY):
                 if waiting is None:
                     current, _, _ = self._plan(now)
                     waiting = sum(1 for p in current.predictions.values() if {"VRAM", "GPUs"} & set(p.lacks))
@@ -2179,6 +2204,18 @@ class Daemon:
                     log.info("told the session of job %d: it holds %s of GPU memory with the GPU idle", job.id,
                              format_size(job.gpu_idle_held))  # fmt: skip
             self.store.update_job(job)
+
+    def _lost_at_sleep(self, job: Job, now: float) -> bool:
+        """Whether a job holding GPU memory most likely lost its GPU work to a suspend (#292): it used the GPU
+        at the last look before the machine slept and not since, has held its memory with the GPU idle from
+        the first look after the wake for WAKE_LOST_AFTER, and its session hasn't been told since the wake.
+        On this machine GPU work running at a suspend doesn't come back: the driver's save of GPU memory fails."""
+        if self._woke is None or job.gpu_idle_since is None:
+            return False
+        before, after = self._woke
+        return (before <= self._gpu_busy_at.get(job.id, -math.inf) < after and job.gpu_idle_since >= after
+                and now - job.gpu_idle_since >= WAKE_LOST_AFTER
+                and (job.gpu_idle_told is None or job.gpu_idle_told < after))  # fmt: skip
 
     def _gpu_idle(self, job_id: int, gpu: int, held: dict, util: dict[int, float], per_process: dict[int, float] | None) -> bool:
         """Whether a job's processes on a GPU are using it: by each process's use where the driver says,

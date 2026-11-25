@@ -190,3 +190,56 @@ def test_a_job_the_machine_restarted_under_ends_its_idle_hold_with_its_run(make_
     else:  # the try's record holds them, and the new run starts with none
         assert j.state == State.QUEUED and [a.get("gpu_idle") for a in j.attempts] == [15 * 60]
         assert (j.gpu_idle, j.gpu_idle_since, j.gpu_idle_held, j.gpu_idle_told) == (0.0, None, None, None)
+
+
+# #292: a job computing on the GPU when the machine suspends doesn't come back on this machine (the NVIDIA
+# driver's save of GPU memory fails): its process spins with its GPU memory held and the GPU idle. On
+# 2026-11-24 two jobs did so for 52 minutes after a wake, 8 jobs waiting for GPU memory; the idle notice
+# came 10 minutes in, only because others waited, and said the GPU was idle, not that the work was gone.
+
+
+def _sleeper(make_daemon, tmp_path, util_before):
+    """A job holding 6.3G of the GPU at `util_before` percent, looked at; then the machine sleeps two hours.
+    Nothing else waits. Returns the daemon, its clock, how long the machine slept, the backend, the job."""
+    now, slept = [1_000_000.0], [0.0]
+    backend = FakeBackend()
+    d = make_daemon(backend=backend, clock=lambda: now[0], slept=lambda: slept[0])
+    go, holding = _holding(tmp_path)
+    holder = submit(d, tmp_path, holding, vram=7 * GiB, session="s1")
+    run_until(d, lambda: job(d, holder).shim_pid)
+    backend.procs = [GpuProcess(job(d, holder).shim_pid, 0, int(6.3 * GiB))]
+    backend.util = {0: util_before}
+    now[0] += 30
+    d._watch_gpus(now[0])  # the last look before the sleep
+    now[0] += 7200
+    slept[0] += 7200
+    return d, now, go, backend, holder
+
+
+def test_a_job_computing_when_the_machine_slept_and_idle_since_the_wake_is_told_at_once(make_daemon, tmp_path):
+    d, now, go, backend, holder = _sleeper(make_daemon, tmp_path, util_before=100.0)
+    backend.util = {0: 0.0}  # its work didn't survive
+    d._watch_gpus(now[0])  # the first look after the wake
+    assert _idle_notices(d, "s1", now[0]) == []  # not on one look: the GPU may still be waking
+    now[0] += 30
+    d._watch_gpus(now[0])
+    now[0] += 30
+    d._watch_gpus(now[0])
+    (told,) = _idle_notices(d, "s1", now[0])  # a minute after the wake, with nothing else waiting
+    assert f"Job {holder}'s GPU work most likely didn't survive the suspend" in told["message"]
+    assert "6.3G of GPU memory" in told["message"] and "cancel it and resubmit it" in told["message"]
+    now[0] += 30 * 60
+    d._watch_gpus(now[0])
+    assert len([e for e in d.store.events(0) if e["kind"] == "idle_gpu"]) == 1  # once
+    _end(d, go, holder)
+
+
+@pytest.mark.parametrize("util_before, util_after", [(0.0, 0.0), (100.0, 100.0)])  # idle before; busy after
+def test_a_job_idle_before_the_sleep_or_busy_after_the_wake_isnt_told_it_was_lost(make_daemon, tmp_path, util_before, util_after):
+    d, now, go, backend, holder = _sleeper(make_daemon, tmp_path, util_before=util_before)
+    backend.util = {0: util_after}
+    for _ in range(5):
+        d._watch_gpus(now[0])
+        now[0] += 30
+    assert _idle_notices(d, "s1", now[0]) == []
+    _end(d, go, holder)
