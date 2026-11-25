@@ -151,3 +151,42 @@ def test_top_and_the_agent_help_show_an_idle_gpu_hold():
                          "gpus": [{"index": 0, "uuid": "GPU-0", "name": "Fake GPU", "vram": 8 * GiB}]}}  # fmt: skip
     assert "GPU idle 1h40m" in render_top(snap, width=160, height=40, color=False)
     assert "until its processes free it or exit" in " ".join(AGENT_HELP.split())
+
+
+@pytest.mark.parametrize("retry", [False, True])
+def test_a_job_the_machine_restarted_under_ends_its_idle_hold_with_its_run(make_daemon, tmp_path, monkeypatch, retry):
+    # #290: a training job looked idle for a minute after a wake, then the machine shut down. Run again after
+    # the reboot, it kept that open idle stretch, and its first check counted the 37-minute shutdown as idle:
+    # "GPU idle 36m" for a run that kept the GPU 99% busy. Lost without a retry, its idle time grew for good.
+    import subprocess
+
+    from dibs import procs
+    from dibs.model import State
+    from dibs.render import _idle_total
+
+    now = [1_000_000.0]
+    monkeypatch.setattr(procs, "boot_id", lambda: "boot-a")
+    first = make_daemon(clock=lambda: now[0], slept=lambda: 0.0)
+    submit(first, tmp_path, ["sleep", "30"], vram="all")
+    job_id = submit(first, tmp_path, ["true"], vram="all")  # queued behind the blocker
+    now[0] += 20 * 60
+    first.tick()  # the last time dibs saw the machine up
+    noted = now[0]
+    dead = subprocess.Popen(["true"])
+    dead.wait()
+    j = job(first, job_id)  # as if it had run 20 minutes, the last 15 holding GPU memory with the GPU idle
+    j.state, j.started, j.sleep_at_start, j.shim_pid, j.shim_ticks = State.RUNNING, noted - 20 * 60, 0.0, dead.pid, None
+    j.gpu_idle_since, j.gpu_idle_held, j.retry = noted - 15 * 60, 6 * GiB, retry
+    first.store.update_job(j)
+    first.close()
+    monkeypatch.setattr(procs, "boot_id", lambda: "boot-b")  # the machine restarted
+    now[0] += 37 * 60
+    second = make_daemon(clock=lambda: now[0], slept=lambda: 0.0)
+    second.recover()
+    j = job(second, job_id)
+    if not retry:  # its record holds the 15 minutes, and stops there
+        assert (j.state, j.gpu_idle, j.gpu_idle_since) == (State.FAILED, 15 * 60, None)
+        assert _idle_total(second.show(job_id)["job"], now[0] + 3600) == 15 * 60
+    else:  # the try's record holds them, and the new run starts with none
+        assert j.state == State.QUEUED and [a.get("gpu_idle") for a in j.attempts] == [15 * 60]
+        assert (j.gpu_idle, j.gpu_idle_since, j.gpu_idle_held, j.gpu_idle_told) == (0.0, None, None, None)

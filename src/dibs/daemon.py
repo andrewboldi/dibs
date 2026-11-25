@@ -2463,6 +2463,7 @@ class Daemon:
         """Queue a job that failed for a resource reason again (#84): same id, same place in line, with
         the failed run on record and a note in its output. It never looks finished, so `dibs wait` and
         `dibs run` keep waiting: the agent needn't work out what happened and resubmit."""
+        self._end_idle(job, job.ended if job.ended is not None else self.clock())  # it ends with its run (#290)
         job.attempts.append(
             {
                 "started": job.started,
@@ -2473,8 +2474,12 @@ class Daemon:
                 "peak_mem": job.peak_mem,
                 "peak_vram": job.peak_vram,
                 "asleep": job.asleep,
+                "gpu_idle": job.gpu_idle,
             }
         )
+        # The next run's idle record starts empty: it kept the last run's, and closed an idle stretch that
+        # run had open at its own first look, counting the gap between the runs as idle (#290).
+        job.gpu_idle, job.gpu_idle_since, job.gpu_idle_held, job.gpu_idle_told = 0.0, None, None, None
         job.request, job.state, job.reason = request, State.QUEUED, None
         job.started = job.ended = job.exit_code = job.cpu_seconds = None
         job.cpu_ids, job.gpu_ids = [], []
@@ -2506,6 +2511,7 @@ class Daemon:
         launcher.remove_job_tmp(self.paths, job.id)
         job.asleep = self._asleep(job) if asleep is None else asleep
         job.state, job.ended, job.reason = State.FAILED, now, reason
+        self._end_idle(job, now)  # an idle hold ends with its run, not when dibs next looks (#290)
         self.store.update_job(job)
         self._notify(job)
 
