@@ -16,6 +16,7 @@ import re
 import shutil
 import signal
 import statistics
+import subprocess
 import sys
 import time
 from collections import deque
@@ -51,6 +52,7 @@ from dibs.model import (
 from dibs.paths import Paths, ensure_dirs, get_paths
 from dibs.planner import Plan, Queued, Running, plan
 from dibs.store import Store
+from dibs.suspend import Suspend
 from dibs.units import GiB, MiB, format_duration, format_size, format_size_against, parse_size, suggest_mem, suggest_size
 
 KILL_AFTER = 10.0  # seconds between asking a job to stop (SIGTERM) and forcing it (SIGKILL)
@@ -230,6 +232,17 @@ def _sleep_lost_message(job: Job, since_wake: float) -> str:
             "it has one. dibs doesn't stop it.")  # fmt: skip
 
 
+def _cudapause(op: str, seconds: float, pids: list[int]) -> dict[int, str | None]:
+    """cudapause's pause or resume, in a process of its own (#293): the daemon never loads the CUDA driver, and a
+    call that hangs can't hold it up."""
+    try:
+        done = subprocess.run([sys.executable, "-m", "dibs.cudapause", op, str(seconds), *map(str, pids)],
+                              capture_output=True, text=True, timeout=seconds + 15)  # fmt: skip
+        return {int(pid): error for pid, error in json.loads(done.stdout).items()}
+    except (OSError, subprocess.TimeoutExpired, ValueError) as e:
+        return {pid: f"cudapause: {e}" for pid in pids}
+
+
 def _shared_part(job: Job) -> str:
     """For a job killed at its RAM limit: how much of its peak was shared memory, when that was at
     least a quarter of its reservation, and of which kind, since what helps differs. Files a job writes
@@ -280,8 +293,10 @@ class Daemon:
         igpu: tuple[str, tuple[str, ...]] | None = None,
         cpu_heat: Callable[[], tuple[float, float | None] | None] = lambda: None,
         throttled: Callable[[], int | None] = lambda: None,
+        suspend: "Suspend | None" = None,
     ):
         self.paths = paths
+        self.suspend = suspend  # pauses GPU jobs across a sleep; only the real daemon has one (#293)
         self.config = config
         self.capacity = capacity
         self._meminfo = meminfo
@@ -1087,7 +1102,10 @@ class Daemon:
         return max(0, max(outside for _, outside, _ in self._outside) - (total - self.capacity.mem))
 
     def schedule(self) -> None:
-        """Start every queued job the plan says can start now."""
+        """Start every queued job the plan says can start now: none while jobs are paused for a sleep, whose
+        GPU memory sits in their RAM until the wake (#293)."""
+        if self.suspend is not None and self.suspend.paused_jobs():
+            return
         now = self.clock()
         current, running, queued = self._plan(now)
         by_id = {j.id: j for j in queued}
@@ -1417,9 +1435,10 @@ class Daemon:
         its own limit, its memory spilling into swap faster than it can work (#257). It runs again, or
         is resubmitted, with what it held in RAM and swap: the quick failure at the limit it had before
         it could spill, and sooner than systemd-oomd, which would stop the biggest thing in the session."""
+        paused = self.suspend.paused_jobs() if self.suspend is not None else set()
         for job in self.store.jobs([State.RUNNING]):
             since = self._thrash_since.get(job.id)
-            if since is None or now - since < THRASH_AFTER:
+            if since is None or now - since < THRASH_AFTER or job.id in paused:  # its GPU memory is in its RAM (#293)
                 continue
             if job.stop_requested is not None or job.cancel_requested is not None:
                 continue
@@ -1872,10 +1891,11 @@ class Daemon:
         swap = self.swap_free()
         if swap is None or swap >= SWAP_CUSHION:
             return False
+        paused = self.suspend.paused_jobs() if self.suspend is not None else set()
         spilled = [
             j for j in self.store.jobs([State.RUNNING])
             if j.id in self._at_limit and self._swap.get(j.id, 0) >= SPILLED_ENOUGH
-            and j.stop_requested is None and j.cancel_requested is None
+            and j.stop_requested is None and j.cancel_requested is None and j.id not in paused
         ]  # fmt: skip
         if not spilled:
             return False
@@ -2255,10 +2275,13 @@ class Daemon:
         if seen is not None:
             graphics = [p for p in self.backend.graphics_processes() or [] if p.gpu_index in managed]
         if not seen and not graphics:
+            if self.suspend is not None and seen is not None:
+                self.suspend.tick({})  # no job holds GPU memory: no sleep waits on dibs (#293)
             self.outside = []
             self._outside_vram = {}
             self._watch_idle(now, {j.id: j for j in self.store.jobs([State.RUNNING])}, {})
             return
+        visible = seen is not None
         seen = [p for p in seen or [] if p.gpu_index in managed]
         running = {j.id: j for j in self.store.jobs([State.RUNNING])}
         shims = {j.shim_pid: j.id for j in running.values() if j.shim_pid}
@@ -2268,6 +2291,8 @@ class Daemon:
             job_id = self._job_of(p.pid, shims, units)
             if job_id is not None:
                 job_of_pid[p.pid] = job_id
+        if self.suspend is not None and visible:  # the CUDA processes of jobs, to pause across a sleep (#293)
+            self.suspend.tick(dict(job_of_pid))
         verdicts = guard.classify(
             seen,
             job_of_pid=job_of_pid,
@@ -2661,11 +2686,17 @@ def run_daemon(env: Mapping[str, str] = os.environ) -> int:
         print(f"dibs: can't start: {e}", file=sys.stderr)
         return 1
     use_systemd = launcher.systemd_available(env)
+    suspend = None  # GPU jobs paused across a sleep (#293), where logind and the NVIDIA driver can do it
+    if capacity.gpus and use_systemd and shutil.which("gdbus") and shutil.which("systemd-inhibit"):
+        suspend = Suspend(paths.state_dir / "paused.json", _cudapause)
     daemon = Daemon(paths, config, capacity, backend, use_systemd=use_systemd, programs=procs.big_programs,
                     set_mem_limit=launcher.set_memory_max if use_systemd else None,
                     panes=lambda: procs.pane_cpu(PANE_SCOPES), disk_free=procs.disk_free, written=procs.written_bytes,
-                    swap_free=procs.swap_free, igpu=igpu, cpu_heat=procs.cpu_temp, throttled=procs.heat_throttled_ms)  # fmt: skip
+                    swap_free=procs.swap_free, igpu=igpu, cpu_heat=procs.cpu_temp, throttled=procs.heat_throttled_ms,
+                    suspend=suspend)  # fmt: skip
     daemon.recover()
+    if suspend is not None:
+        suspend.start()
     gpus = ", ".join(f"GPU {g.index} {format_size(g.vram)}" for g in capacity.gpus) or "no GPUs"
     log.info(
         "dibs %s started (pid %d): %d CPUs, %s RAM, %s; guard %s",
