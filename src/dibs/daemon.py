@@ -52,6 +52,7 @@ from dibs.model import (
 from dibs.paths import Paths, ensure_dirs, get_paths
 from dibs.planner import Plan, Queued, Running, plan
 from dibs.store import Store
+from dibs import suspend as suspend_mod
 from dibs.suspend import Suspend
 from dibs.units import GiB, MiB, format_duration, format_size, format_size_against, parse_size, suggest_mem, suggest_size
 
@@ -1496,7 +1497,10 @@ class Daemon:
         # Failing both, the margins dibs keeps over other jobs' peaks, when the machine really has room:
         # a kill at the limit loses the work for certain, and the margins may never be used (#228).
         spare, keep = self._spare(running)
+        paused = self.suspend.paused_jobs() if self.suspend is not None else set()
         for job in sorted(running, key=lambda j: (j.started or 0, j.id)):
+            if job.id in paused:  # its GPU memory sits in its RAM until the wake, its limit lifted (#293)
+                continue
             held = self._held.get(job.id)
             # Past its request into the headroom it was launched with (#249): the kernel already let it,
             # so the plan counts it now, whatever room there is, and it is given back first.
@@ -2688,7 +2692,8 @@ def run_daemon(env: Mapping[str, str] = os.environ) -> int:
     use_systemd = launcher.systemd_available(env)
     suspend = None  # GPU jobs paused across a sleep (#293), where logind and the NVIDIA driver can do it
     if capacity.gpus and use_systemd and shutil.which("gdbus") and shutil.which("systemd-inhibit"):
-        suspend = Suspend(paths.state_dir / "paused.json", _cudapause)
+        suspend = Suspend(paths.state_dir / "paused.json", _cudapause, read_limit=suspend_mod.read_limit,
+                          set_limit=suspend_mod.set_limit)  # fmt: skip
     daemon = Daemon(paths, config, capacity, backend, use_systemd=use_systemd, programs=procs.big_programs,
                     set_mem_limit=launcher.set_memory_max if use_systemd else None,
                     panes=lambda: procs.pane_cpu(PANE_SCOPES), disk_free=procs.disk_free, written=procs.written_bytes,

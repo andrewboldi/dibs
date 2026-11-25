@@ -115,7 +115,8 @@ def _carrier(tmp_path, results=None):
         calls.append((op, sorted(pids)))
         return {pid: (results or {}).get((op, pid)) for pid in pids}
 
-    s = suspend.Suspend(tmp_path / "paused.json", pauser, spawn=spawn)
+    s = suspend.Suspend(tmp_path / "paused.json", pauser, spawn=spawn, read_limit=lambda pid: None,
+                        set_limit=lambda unit, value: True)  # never real systemd units
     return s, spawned, calls
 
 
@@ -227,3 +228,21 @@ def test_no_job_starts_while_jobs_are_paused_for_a_sleep(make_daemon, tmp_path):
     rec.paused = set()
     d.schedule()
     assert job(d, waiting).state != State.QUEUED
+
+
+def test_a_paused_jobs_ram_limit_is_lifted_for_the_pause_and_put_back_at_the_wake(tmp_path):
+    # Its GPU memory moves into its RAM, which counts against its limit: on 2026-11-24 a 2.2G pause under a 2G
+    # limit spilled 0.4G into swap and took twice as long. A big job would swap gigabytes before the sleep.
+    s, spawned, calls = _carrier(tmp_path)
+    units = {100: ("dibs-x-job-7.scope", "3221225472"), 101: ("dibs-x-job-8.scope", "max")}
+    done = []
+    s.read_limit = units.get
+    s.set_limit = lambda unit, value: done.append((unit, value, len(calls))) or True
+    s.tick({100: 7, 101: 8})
+    s.on_line(SLEEP)
+    assert sorted(done) == [("dibs-x-job-7.scope", "infinity", 0), ("dibs-x-job-8.scope", "infinity", 0)]  # before the pause
+    done.clear()
+    again, _, _ = _carrier(tmp_path)  # a restart in between: the limits come back from the record
+    again.set_limit = lambda unit, value: done.append((unit, value)) or True
+    again.on_line(WAKE)
+    assert sorted(done) == [("dibs-x-job-7.scope", "3221225472"), ("dibs-x-job-8.scope", "infinity")]

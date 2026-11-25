@@ -36,19 +36,43 @@ def sleep_signal(line: str) -> bool | None:
     return True if "(true" in line else False if "(false" in line else None
 
 
+def read_limit(pid: int) -> tuple[str, str] | None:
+    """The systemd unit of a process's dibs job scope and its RAM limit (memory.max: bytes, or "max"); None
+    for a process outside one, such as a program that left its job's scope (#265)."""
+    try:
+        cgroup = Path(f"/proc/{pid}/cgroup").read_text().strip().split("::", 1)[1]
+        name = cgroup.rsplit("/", 1)[-1]
+        if not (name.startswith("dibs-") and name.endswith(".scope")):
+            return None
+        return cgroup.rsplit("/", 1)[-1], Path(f"/sys/fs/cgroup{cgroup}/memory.max").read_text().strip()
+    except (OSError, IndexError):
+        return None
+
+
+def set_limit(unit: str, value: str) -> bool:
+    """Set a scope's RAM limit, as dibs does when a job grows (launcher.set_memory_max)."""
+    try:
+        return subprocess.run(["systemctl", "--user", "set-property", "--runtime", unit, f"MemoryMax={value}"],
+                              capture_output=True, timeout=10).returncode == 0  # fmt: skip
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
 class Suspend:
     """Holds the sleep lock while jobs hold GPU memory, and pauses and restores their CUDA processes around a
     sleep. `pauser(op, seconds, pids)` is cudapause's "pause" or "resume", run apart from the daemon."""
 
     def __init__(self, paused_file: Path, pauser: Callable[[str, float, list[int]], dict[int, str | None]],
-                 spawn: Callable = subprocess.Popen) -> None:  # fmt: skip
+                 spawn: Callable = subprocess.Popen, read_limit: Callable[[int], tuple[str, str] | None] = lambda pid: None,
+                 set_limit: Callable[[str, str], bool] = lambda unit, value: False) -> None:  # fmt: skip
         self.paused_file, self.pauser, self.spawn = paused_file, pauser, spawn
+        self.read_limit, self.set_limit = read_limit, set_limit
         self._mutex = threading.Lock()
         self._gpu_pids: dict[int, int] = {}  # pid -> job id, as of the daemon's last look
         self._lock: subprocess.Popen | None = None
         self._monitor: subprocess.Popen | None = None
         self._sleeping: float | None = None  # monotonic time of the sleep signal, until the wake
-        self._paused: dict[int, int] = self._read()
+        self._paused, self._limits = self._read()  # pid -> job; scope unit -> its RAM limit before the pause
 
     def start(self) -> None:
         """Listen for logind's sleep signal (the real daemon only)."""
@@ -94,8 +118,13 @@ class Suspend:
             self._sleeping = time.monotonic()
             pids = dict(self._gpu_pids)
             if pids:
+                # A paused process's GPU memory moves into its RAM, which counts against its limit: lifted for the
+                # pause, so nothing spills into swap just before the sleep, and put back after the restore.
+                limits = {found[0]: found[1] for pid in pids if (found := self.read_limit(pid))}
+                for unit in limits:
+                    self.set_limit(unit, "infinity")
                 results = self.pauser("pause", PAUSE_FOR, sorted(pids))
-                self._paused = pids  # those that failed too: resuming finishes whatever a pause left
+                self._paused, self._limits = pids, limits  # the failed too: resuming finishes whatever a pause left
                 self._write(results)
                 failed = {pid: error for pid, error in results.items() if error}
                 log.info("paused the GPU work of jobs %s before the sleep in %.1f s%s", sorted(set(pids.values())),
@@ -114,7 +143,9 @@ class Suspend:
         failed = {pid: error for pid, error in results.items() if error}
         log.info("restored the GPU work of jobs %s after %s in %.1f s%s", sorted(set(self._paused.values())), why,
                  time.monotonic() - began, f"; failed: {failed}" if failed else "")  # fmt: skip
-        self._paused = {}
+        for unit, value in self._limits.items():
+            self.set_limit(unit, "infinity" if value == "max" else value)
+        self._paused, self._limits = {}, {}
         self.paused_file.unlink(missing_ok=True)
 
     def _held(self) -> bool:
@@ -146,15 +177,16 @@ class Suspend:
         for line in monitor.stdout:
             self.on_line(line)
 
-    def _read(self) -> dict[int, int]:
+    def _read(self) -> tuple[dict[int, int], dict[str, str]]:
         try:
-            return {int(pid): job for pid, job in json.loads(self.paused_file.read_text())["pids"].items()}
+            record = json.loads(self.paused_file.read_text())
+            return {int(pid): job for pid, job in record["pids"].items()}, dict(record.get("limits", {}))
         except (OSError, ValueError, KeyError):
-            return {}
+            return {}, {}
 
     def _write(self, results: dict[int, str | None]) -> None:
-        record = {"pids": {str(pid): job for pid, job in self._paused.items()}, "time": time.time(),
-                  "results": {str(pid): error for pid, error in results.items()}}  # fmt: skip
+        record = {"pids": {str(pid): job for pid, job in self._paused.items()}, "limits": self._limits,
+                  "time": time.time(), "results": {str(pid): error for pid, error in results.items()}}  # fmt: skip
         tmp = self.paused_file.with_suffix(".tmp")
         tmp.write_text(json.dumps(record))
         tmp.replace(self.paused_file)
