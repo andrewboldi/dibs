@@ -1,4 +1,4 @@
-"""Pausing other processes' CUDA state, and restoring it, through the CUDA driver's checkpoint API (driver 550
+"""Pausing other processes' CUDA state, and restoring it, through the CUDA driver's checkpoint API (driver 570
 and later), so GPU jobs can be carried across a suspend (#293).
 
 A paused process's GPU memory is copied into its own RAM and the GPU is released; its CPU threads carry on,

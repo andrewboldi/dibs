@@ -140,6 +140,20 @@ command. Each program gets a notice at most once an hour per pane, a script what
 so in a terminal that subagents share, one program's notice doesn't hold back another's (#170).
 Nothing is written into the program's own output, which may be data.
 
+**A laptop's sleep.** GPU work running when the machine sleeps may not come back: the NVIDIA
+driver's save of GPU memory can fail, leaving the job spinning with its memory held and the GPU
+idle. So while jobs hold GPU memory, dibs holds a "delay" sleep lock from logind. When logind says
+the machine is about to sleep, dibs pauses each of those jobs' CUDA state with the CUDA driver's
+checkpoint API (driver 570 or later), from a process of its own: a job's GPU memory moves into its
+RAM, its RAM limit lifted for the pause, and the sleep goes on. After the wake dibs restores them,
+and no job starts until it has. A restore that fails is tried again every 5 seconds, since the
+driver can wake a few seconds after the machine; after 5 minutes the job's session is told (#293).
+This needs NVML, a systemd user session, `gdbus` and `systemd-inhibit`. Without it, a job that was
+using the GPU when the machine slept and then holds its memory idle for a minute after the wake
+gets its session told that its work most likely didn't survive (#292): with NVML, by the job's own
+use of the GPU; with nvidia-smi alone, only when no other job holds memory on that GPU. dibs
+doesn't read AMD GPUs' use yet, so on AMD nothing is said.
+
 **Sizing.** `dibs show ID` lists a job's peak RAM (memory in use, not file cache) and peak VRAM.
 `dibs submit` shows what earlier runs of the same command in the same folder used:
 
