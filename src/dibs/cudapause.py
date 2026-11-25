@@ -10,8 +10,10 @@ import ctypes
 import json
 import sys
 import threading
+import time
 
 RUNNING, LOCKED, CHECKPOINTED, FAILED = 0, 1, 2, 3  # CUprocessState
+GONE = "not a CUDA process, or gone"
 
 
 class _LockArgs(ctypes.Structure):
@@ -47,7 +49,7 @@ def resume(lib, pid: int) -> str | None:
     runs again, else what went wrong."""
     state = _state(lib, pid)
     if state is None:
-        return "not a CUDA process, or gone"
+        return GONE
     if state == FAILED:
         return "its CUDA state failed"
     if state == CHECKPOINTED and (r := lib.cuCheckpointProcessRestore(pid, None)):
@@ -58,19 +60,21 @@ def resume(lib, pid: int) -> str | None:
 
 
 def run(op: str, seconds: float, pids: list[int], lib=None) -> dict[int, str | None]:
-    """Each pid's result, done side by side so one slow process doesn't hold up the others; "timed out" for one
-    still going after `seconds` (resuming it later finishes from whatever step it got to)."""
+    """Each pid's result, done side by side so one slow process doesn't hold up the others, all within one
+    deadline `seconds` from now: "timed out" for one still going then (resuming it later finishes from
+    whatever step it got to)."""
     lib = lib or driver()
+    deadline = time.monotonic() + seconds
     results: dict[int, str | None] = {}
 
-    def one(pid: int) -> None:
-        results[pid] = pause(lib, pid, int(seconds * 1000)) if op == "pause" else resume(lib, pid)
+    def one(pid: int) -> None:  # the lock waits at most half the time, leaving the rest for the copy
+        results[pid] = pause(lib, pid, int(seconds * 500)) if op == "pause" else resume(lib, pid)
 
     threads = [threading.Thread(target=one, args=(pid,), daemon=True) for pid in pids]
     for t in threads:
         t.start()
     for t in threads:
-        t.join(seconds)
+        t.join(max(0.0, deadline - time.monotonic()))
     return {pid: results.get(pid, "timed out") for pid in pids}
 
 

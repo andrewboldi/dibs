@@ -193,6 +193,9 @@ class Recorder:
     def paused_jobs(self):
         return set(self.paused)
 
+    def close(self):
+        self.closed = True
+
 
 def test_each_look_at_the_gpus_tells_which_jobs_cuda_processes_hold_gpu_memory(make_daemon, tmp_path):
     from conftest import FakeBackend, run_until
@@ -246,3 +249,109 @@ def test_a_paused_jobs_ram_limit_is_lifted_for_the_pause_and_put_back_at_the_wak
     again.set_limit = lambda unit, value: done.append((unit, value)) or True
     again.on_line(WAKE)
     assert sorted(done) == [("dibs-x-job-7.scope", "3221225472"), ("dibs-x-job-8.scope", "infinity")]
+
+
+def _limits(s):
+    units = {100: ("dibs-x-job-7.scope", "3221225472"), 101: ("dibs-x-job-8.scope", "2147483648")}
+    done = []
+    s.read_limit = units.get
+    s.set_limit = lambda unit, value: done.append((unit, value)) or True
+    return done
+
+
+def test_a_restore_that_failed_is_tried_again_and_its_limit_kept_lifted_until_it_works(tmp_path, monkeypatch):
+    # The NVIDIA driver finishes waking 0-9 s after the machine does, so a restore at the wake can fail.
+    # Forgotten, the job would hang with its GPU memory in its RAM, holding nothing on the GPU to be noticed.
+    clock = [1000.0]
+    monkeypatch.setattr(suspend.time, "monotonic", lambda: clock[0])
+    fails = {("resume", 101): "restore: CUDA error 999"}
+    s, spawned, calls = _carrier(tmp_path, results=fails)
+    done = _limits(s)
+    s.tick({100: 7, 101: 8})
+    s.on_line(SLEEP)
+    done.clear()
+    s.on_line(WAKE)
+    assert calls[-1] == ("resume", [100, 101]) and s.paused_jobs() == {8}
+    assert done == [("dibs-x-job-7.scope", "3221225472")]  # only the job that came back
+    clock[0] += suspend.RESUME_EVERY
+    del fails[("resume", 101)]
+    s.tick({101: 8})
+    assert calls[-1] == ("resume", [101]) and s.paused_jobs() == set()
+    assert done[-1] == ("dibs-x-job-8.scope", "2147483648")
+
+
+def test_a_restore_that_keeps_failing_is_given_up_and_its_session_told(tmp_path, monkeypatch):
+    clock = [1000.0]
+    monkeypatch.setattr(suspend.time, "monotonic", lambda: clock[0])
+    s, spawned, calls = _carrier(tmp_path, results={("resume", 101): "restore: CUDA error 999"})
+    told = []
+    s.gave_up = told.append
+    s.tick({101: 8})
+    s.on_line(SLEEP)
+    s.on_line(WAKE)
+    clock[0] += suspend.RESUME_GIVE_UP + 1
+    s.tick({101: 8})
+    assert told == [{8: "restore: CUDA error 999"}] and s.paused_jobs() == set()  # jobs start again
+
+
+def test_the_listener_survives_an_error_and_never_leaves_the_lock_held(tmp_path, caplog):
+    s, spawned, calls = _carrier(tmp_path)
+
+    def broken(op, seconds, pids):
+        raise RuntimeError("the record can't be written")
+
+    s.pauser = broken
+    s.tick({100: 7})
+
+    class Monitor:
+        stdout = [SLEEP, WAKE]
+
+    s._listen(Monitor())
+    assert _lock(spawned) is None and "the record can't be written" in caplog.text
+
+
+def test_every_sleep_and_wake_heard_is_logged(tmp_path, caplog):
+    import logging
+
+    caplog.set_level(logging.INFO, logger="dibs")
+    s, spawned, calls = _carrier(tmp_path)
+    s.on_line(SLEEP)
+    s.on_line(WAKE)
+    assert "the machine is about to sleep" in caplog.text and "the machine woke" in caplog.text
+
+
+def test_a_paused_jobs_ram_isnt_taken_for_what_it_needs(make_daemon, tmp_path, monkeypatch):
+    # A test job's record said "RAM 2.2G of 2G" after a pause: its 0.8G plus its GPU memory, moved into its
+    # RAM. Sampled, every sleep would raise the peaks the plan and the sizing advice go by.
+    from test_daemon import _job_holding, job
+
+    from dibs.units import GiB
+
+    rec = Recorder()
+    d = make_daemon(suspend=rec)
+    job_id, stat, go = _job_holding(d, tmp_path, monkeypatch, 2 * GiB)
+    stat.write_text(f"anon {1 * GiB}\nshmem 0\n")
+    d._watch_memory()
+    assert job(d, job_id).peak_mem == 1 * GiB
+    rec.paused = {job_id}
+    stat.write_text(f"anon {3 * GiB}\nshmem 0\n")
+    d._watch_memory()
+    assert job(d, job_id).peak_mem == 1 * GiB
+    go.touch()
+
+
+def test_a_session_whose_job_couldnt_be_restored_is_told(make_daemon, tmp_path):
+    from test_daemon import submit
+
+    d = make_daemon()
+    job_id = submit(d, tmp_path, ["sleep", "30"], session="s1")
+    d._restore_failed({job_id: "restore: CUDA error 999"})
+    (told,) = [n for n in d.notices("s1", d.clock())["notices"] if n["kind"] == "idle_gpu"]
+    assert f"dibs paused job {job_id}'s GPU work for the suspend and couldn't restore it" in told["message"]
+
+
+def test_only_the_real_nvidia_backend_gets_a_suspend_watcher():
+    from dibs import daemon, gpu
+
+    assert daemon._suspend_for(gpu.SmiBackend.__new__(gpu.SmiBackend), use_systemd=True, paths=None) is None
+    assert daemon._suspend_for(gpu.NoGpuBackend(), use_systemd=True, paths=None) is None

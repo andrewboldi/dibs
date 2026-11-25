@@ -18,10 +18,14 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 
+from dibs.cudapause import GONE as cudapause_gone
+
 log = logging.getLogger("dibs")
 
 PAUSE_FOR = 20.0  # seconds dibs gives itself to pause GPU jobs before letting the sleep go on (logind waits 30 here)
 RESUME_FOR = 60.0  # seconds a restore may take
+RESUME_EVERY = 5.0  # seconds between tries at a restore that failed: the NVIDIA driver wakes 0-9 s after the machine
+RESUME_GIVE_UP = 300.0  # seconds of failed restores after which the job's session is told and the jobs start again
 WAKE_MISSED = 90.0  # seconds awake after the sleep signal with no wake signal: the sleep didn't happen, or the wake was missed
 MONITOR = ["gdbus", "monitor", "--system", "--dest", "org.freedesktop.login1", "--object-path", "/org/freedesktop/login1"]
 LOCK = ["systemd-inhibit", "--what=sleep", "--mode=delay", "--who=dibs",
@@ -67,6 +71,9 @@ class Suspend:
                  set_limit: Callable[[str, str], bool] = lambda unit, value: False) -> None:  # fmt: skip
         self.paused_file, self.pauser, self.spawn = paused_file, pauser, spawn
         self.read_limit, self.set_limit = read_limit, set_limit
+        self.gave_up: Callable[[dict[int, str]], None] = lambda failed: None  # job id -> why it couldn't be restored
+        self._resuming: float | None = None  # monotonic time of the first try at restoring what's on record
+        self._tried: float = -float("inf")
         self._mutex = threading.Lock()
         self._gpu_pids: dict[int, int] = {}  # pid -> job id, as of the daemon's last look
         self._lock: subprocess.Popen | None = None
@@ -88,8 +95,10 @@ class Suspend:
             if self._sleeping is not None and time.monotonic() - self._sleeping < WAKE_MISSED:
                 return  # between the sleep signal and the wake: leave things as they are
             self._sleeping = None
-            if self._paused:
-                self._resume("a missed wake or a restart")
+            if self._paused and time.monotonic() - self._tried >= RESUME_EVERY:
+                failed = self._resume("a missed wake, a restart or a failed restore")
+                if failed and time.monotonic() - (self._resuming or time.monotonic()) >= RESUME_GIVE_UP:
+                    self._give_up(failed)
             if self._gpu_pids and not self._held():
                 # It holds the lock while `cat` reads dibs's end of a pipe: when dibs dies, the lock goes too.
                 self._lock = self.spawn(LOCK, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -102,10 +111,19 @@ class Suspend:
 
     def on_line(self, line: str) -> None:
         said = sleep_signal(line)
+        if said is not None:
+            log.info("logind: the machine %s", "is about to sleep" if said else "woke")
         if said is True:
             self._before_sleep()
         elif said is False:
             self._after_wake()
+
+    def close(self) -> None:
+        """Let go of the lock and stop listening, when dibs stops."""
+        with self._mutex:
+            self._release()
+            if self._monitor is not None and self._monitor.poll() is None:
+                self._monitor.terminate()
 
     def paused_jobs(self) -> set[int]:
         """The jobs whose CUDA processes are paused now."""
@@ -117,36 +135,69 @@ class Suspend:
                 return
             self._sleeping = time.monotonic()
             pids = dict(self._gpu_pids)
-            if pids:
-                # A paused process's GPU memory moves into its RAM, which counts against its limit: lifted for the
-                # pause, so nothing spills into swap just before the sleep, and put back after the restore.
-                limits = {found[0]: found[1] for pid in pids if (found := self.read_limit(pid))}
-                for unit in limits:
-                    self.set_limit(unit, "infinity")
-                results = self.pauser("pause", PAUSE_FOR, sorted(pids))
-                self._paused, self._limits = pids, limits  # the failed too: resuming finishes whatever a pause left
-                self._write(results)
-                failed = {pid: error for pid, error in results.items() if error}
-                log.info("paused the GPU work of jobs %s before the sleep in %.1f s%s", sorted(set(pids.values())),
-                         time.monotonic() - self._sleeping, f"; failed: {failed}" if failed else "")  # fmt: skip
-            self._release()
+            try:
+                self._pause(pids)
+            finally:
+                self._release()  # whatever happened, the sleep goes on
+
+    def _pause(self, pids: dict[int, int]) -> None:
+        if not pids:
+            return
+        # A paused process's GPU memory moves into its RAM, which counts against its limit: lifted for the pause,
+        # so nothing spills into swap just before the sleep, and put back once the job is restored.
+        limits = {found[0]: (found[1], pids[pid]) for pid in pids if (found := self.read_limit(pid))}
+        for unit in limits:
+            self.set_limit(unit, "infinity")
+        self._paused, self._limits = dict(pids), limits  # on record first: resuming finishes whatever a pause left
+        self._write({})
+        results = self.pauser("pause", PAUSE_FOR, sorted(pids))
+        self._write(results)
+        failed = {pid: error for pid, error in results.items() if error}
+        log.info("paused the GPU work of jobs %s before the sleep in %.1f s%s", sorted(set(pids.values())),
+                 time.monotonic() - (self._sleeping or time.monotonic()), f"; failed: {failed}" if failed else "")  # fmt: skip
 
     def _after_wake(self) -> None:
         with self._mutex:
             self._sleeping = None
             if self._paused:
-                self._resume("the wake")
+                failed = self._resume("the wake")
+                if failed:
+                    log.info("will try again every %.0f s: the GPU driver may still be waking", RESUME_EVERY)
 
-    def _resume(self, why: str) -> None:
-        began = time.monotonic()
+    def _resume(self, why: str) -> dict[int, str]:
+        """Restore what's on record; keep on record, with its RAM limit still lifted, what didn't come back.
+        What failed, by pid."""
+        began = self._tried = time.monotonic()
+        if self._resuming is None:
+            self._resuming = began
         results = self.pauser("resume", RESUME_FOR, sorted(self._paused))
-        failed = {pid: error for pid, error in results.items() if error}
+        failed = {pid: error for pid, error in results.items() if error and error != cudapause_gone}
         log.info("restored the GPU work of jobs %s after %s in %.1f s%s", sorted(set(self._paused.values())), why,
                  time.monotonic() - began, f"; failed: {failed}" if failed else "")  # fmt: skip
-        for unit, value in self._limits.items():
+        stuck = {self._paused[pid] for pid in failed}
+        for unit, (value, job) in list(self._limits.items()):
+            if job not in stuck:
+                self.set_limit(unit, "infinity" if value == "max" else value)
+                del self._limits[unit]
+        self._paused = {pid: job for pid, job in self._paused.items() if pid in failed}
+        if self._paused:
+            self._write(failed)
+        else:
+            self._resuming = None
+            self.paused_file.unlink(missing_ok=True)
+        return failed
+
+    def _give_up(self, failed: dict[int, str]) -> None:
+        """Stop trying: tell the jobs' sessions, put their limits back, and let jobs start again."""
+        by_job: dict[int, str] = {}
+        for pid, error in failed.items():
+            by_job.setdefault(self._paused[pid], error)
+        log.info("gave up restoring the GPU work of jobs %s after %.0f s: %s", sorted(by_job), RESUME_GIVE_UP, failed)
+        for unit, (value, _) in self._limits.items():
             self.set_limit(unit, "infinity" if value == "max" else value)
-        self._paused, self._limits = {}, {}
+        self._paused, self._limits, self._resuming = {}, {}, None
         self.paused_file.unlink(missing_ok=True)
+        self.gave_up(by_job)
 
     def _held(self) -> bool:
         return self._lock is not None and self._lock.poll() is None
@@ -175,17 +226,22 @@ class Suspend:
 
     def _listen(self, monitor: subprocess.Popen) -> None:
         for line in monitor.stdout:
-            self.on_line(line)
+            try:
+                self.on_line(line)
+            except Exception:  # noqa: BLE001 - the listener must outlive any one signal's trouble
+                log.exception("handling the machine's sleep signal failed")
 
     def _read(self) -> tuple[dict[int, int], dict[str, str]]:
         try:
             record = json.loads(self.paused_file.read_text())
-            return {int(pid): job for pid, job in record["pids"].items()}, dict(record.get("limits", {}))
+            limits = {unit: (value, job) for unit, (value, job) in record.get("limits", {}).items()}
+            return {int(pid): job for pid, job in record["pids"].items()}, limits
         except (OSError, ValueError, KeyError):
             return {}, {}
 
     def _write(self, results: dict[int, str | None]) -> None:
-        record = {"pids": {str(pid): job for pid, job in self._paused.items()}, "limits": self._limits,
+        record = {"pids": {str(pid): job for pid, job in self._paused.items()},
+                  "limits": {unit: [value, job] for unit, (value, job) in self._limits.items()},
                   "time": time.time(), "results": {str(pid): error for pid, error in results.items()}}  # fmt: skip
         tmp = self.paused_file.with_suffix(".tmp")
         tmp.write_text(json.dumps(record))
