@@ -145,10 +145,10 @@ when those resources are free, so jobs never crash each other by running out of 
   then had to stop to give it back.
 - Without --retry (or once it has run out of retries), such a job fails with a reason that ends with
   the --vram or --mem to resubmit with: use that, not the same request again.
-- On some machines GPU work that is running when the machine suspends doesn't survive it: its process
-  carries on, holding its GPU memory, but its GPU work never continues. dibs tells you when a job used
-  its GPU before a suspend and hasn't since the wake. Have a long GPU job save checkpoints, so that
-  resubmitting it resumes it.
+- On some machines GPU work that is running when the machine suspends doesn't survive it. dibs pauses
+  its jobs' CUDA work before the machine sleeps and restores it after the wake (a paused job's GPU
+  memory sits in its RAM meanwhile), and tells you if a job used its GPU before a suspend and hasn't
+  since. Have a long GPU job save checkpoints anyway, so that resubmitting it resumes it.
 
 ## Waiting and checking
 

@@ -1,0 +1,357 @@
+"""Carrying GPU jobs across a suspend (#293). On this machine GPU work running when the machine sleeps doesn't
+come back (#292): dibs pauses the jobs' CUDA state before the sleep, through the driver's checkpoint API, and
+restores it after the wake. Nothing here loads the real driver or touches logind."""
+
+import json
+
+import pytest
+
+from dibs import cudapause
+
+
+class FakeDriver:
+    """The CUDA driver's checkpoint calls, on made-up processes: pid -> state (0 running, 1 locked,
+    2 checkpointed); `fail` makes one call return an error for one pid."""
+
+    def __init__(self, states, fail=None):
+        self.states, self.fail, self.calls = dict(states), fail or {}, []
+
+    def _call(self, name, pid, to=None, needs=None):
+        self.calls.append((name, pid))
+        if self.fail.get(pid) == name:
+            return 999
+        if pid not in self.states or (needs is not None and self.states[pid] not in needs):
+            return 1
+        if to is not None:
+            self.states[pid] = to
+        return 0
+
+    def cuCheckpointProcessGetState(self, pid, out):
+        if pid not in self.states:
+            return 1
+        out._obj.value = self.states[pid]
+        return 0
+
+    def cuCheckpointProcessLock(self, pid, args):
+        return self._call("lock", pid, to=1, needs=(0,))
+
+    def cuCheckpointProcessCheckpoint(self, pid, args):
+        return self._call("checkpoint", pid, to=2, needs=(1,))
+
+    def cuCheckpointProcessRestore(self, pid, args):
+        return self._call("restore", pid, to=1, needs=(2,))
+
+    def cuCheckpointProcessUnlock(self, pid, args):
+        return self._call("unlock", pid, to=0, needs=(1,))
+
+
+def test_pausing_locks_a_process_then_moves_its_gpu_memory_out_and_resuming_undoes_both():
+    drv = FakeDriver({10: 0, 11: 0})
+    assert cudapause.run("pause", 5, [10, 11], lib=drv) == {10: None, 11: None}
+    assert drv.states == {10: 2, 11: 2}
+    assert cudapause.run("resume", 5, [10, 11], lib=drv) == {10: None, 11: None}
+    assert drv.states == {10: 0, 11: 0}
+
+
+def test_a_pause_that_fails_after_the_lock_unlocks_again():
+    drv = FakeDriver({10: 0}, fail={10: "checkpoint"})
+    assert cudapause.run("pause", 5, [10], lib=drv) == {10: "checkpoint: CUDA error 999"}
+    assert drv.states == {10: 0} and drv.calls[-1] == ("unlock", 10)
+
+
+@pytest.mark.parametrize("state", [0, 1, 2])  # never paused, locked only, fully paused
+def test_resuming_finishes_from_whatever_step_a_pause_got_to(state):
+    drv = FakeDriver({10: state})
+    assert cudapause.run("resume", 5, [10], lib=drv) == {10: None}
+    assert drv.states == {10: 0}
+
+
+def test_a_process_that_is_gone_or_not_cuda_is_reported_not_raised(capsys, monkeypatch):
+    drv = FakeDriver({})
+    assert cudapause.run("resume", 5, [42], lib=drv) == {42: "not a CUDA process, or gone"}
+    monkeypatch.setattr(cudapause, "driver", lambda: (_ for _ in ()).throw(OSError("no CUDA driver")))
+    assert cudapause.main(["pause", "5", "7"]) == 0
+    assert json.loads(capsys.readouterr().out) == {"7": "no CUDA driver"}
+
+
+from dibs import suspend  # noqa: E402
+
+SLEEP = "/org/freedesktop/login1: org.freedesktop.login1.Manager.PrepareForSleep (true,)"
+WAKE = "/org/freedesktop/login1: org.freedesktop.login1.Manager.PrepareForSleep (false,)"
+
+
+def test_logind_saying_the_machine_sleeps_or_woke_is_read_from_gdbus_monitor():
+    assert suspend.sleep_signal(SLEEP) is True and suspend.sleep_signal(WAKE) is False
+    assert suspend.sleep_signal("/org/freedesktop/login1: org.freedesktop.login1.Manager.PrepareForShutdown (true,)") is None
+    assert suspend.sleep_signal("Monitoring signals on object /org/freedesktop/login1 owned by org.freedesktop.login1") is None
+
+
+class FakeProc:
+    def __init__(self, argv):
+        self.argv, self.ended, self.stdin = argv, None, None
+
+    def poll(self):
+        return self.ended
+
+    def terminate(self):
+        self.ended = -15
+
+    def kill(self):
+        self.ended = -9
+
+    def wait(self, timeout=None):
+        return self.ended
+
+
+def _carrier(tmp_path, results=None):
+    """A Suspend with fakes for the lock holder and the pauser; `calls` records the pauser's."""
+    spawned, calls = [], []
+
+    def spawn(argv, **kw):
+        spawned.append(FakeProc(argv))
+        return spawned[-1]
+
+    def pauser(op, seconds, pids):
+        calls.append((op, sorted(pids)))
+        return {pid: (results or {}).get((op, pid)) for pid in pids}
+
+    s = suspend.Suspend(tmp_path / "paused.json", pauser, spawn=spawn, read_limit=lambda pid: None,
+                        set_limit=lambda unit, value: True)  # never real systemd units
+    return s, spawned, calls
+
+
+def _lock(spawned):
+    held = [p for p in spawned if p.argv[0] == "systemd-inhibit" and p.ended is None]
+    return held[0] if held else None
+
+
+def test_dibs_holds_a_sleep_delay_lock_only_while_jobs_hold_gpu_memory(tmp_path):
+    s, spawned, _ = _carrier(tmp_path)
+    s.tick({})
+    assert _lock(spawned) is None  # nothing to carry: no suspend waits on dibs
+    s.tick({100: 7})
+    lock = _lock(spawned)
+    assert lock.argv[:4] == ["systemd-inhibit", "--what=sleep", "--mode=delay", "--who=dibs"]
+    s.tick({100: 7})
+    assert _lock(spawned) is lock  # one lock, kept
+    s.tick({})
+    assert _lock(spawned) is None and lock.ended is not None
+
+
+def test_jobs_are_paused_before_the_sleep_and_restored_after_the_wake(tmp_path):
+    s, spawned, calls = _carrier(tmp_path)
+    s.tick({100: 7, 101: 8})
+    s.on_line(SLEEP)
+    assert calls == [("pause", [100, 101])]
+    assert s.paused_jobs() == {7, 8} and _lock(spawned) is None  # paused, then the sleep goes on
+    s.tick({100: 7, 101: 8})
+    assert _lock(spawned) is None and calls == [("pause", [100, 101])]  # nothing more until the wake
+    s.on_line(WAKE)
+    assert calls[-1] == ("resume", [100, 101]) and s.paused_jobs() == set()
+    assert not (tmp_path / "paused.json").exists()
+    s.tick({100: 7, 101: 8})
+    assert _lock(spawned) is not None  # held again for the next sleep
+
+
+def test_a_pause_that_failed_is_still_undone_at_the_wake(tmp_path):
+    s, spawned, calls = _carrier(tmp_path, results={("pause", 101): "lock: CUDA error 2"})
+    s.tick({100: 7, 101: 8})
+    s.on_line(SLEEP)
+    s.on_line(WAKE)
+    assert calls[-1] == ("resume", [100, 101])  # resuming finishes whatever a pause left
+
+
+def test_a_sleep_with_no_gpu_jobs_pauses_nothing(tmp_path):
+    s, spawned, calls = _carrier(tmp_path)
+    s.tick({})
+    s.on_line(SLEEP)
+    s.on_line(WAKE)
+    assert calls == [] and s.paused_jobs() == set()
+
+
+def test_jobs_left_paused_by_a_missed_wake_or_a_restart_are_restored(tmp_path):
+    # A dibs that stopped while jobs were paused, or a wake that never came through: whatever is on record
+    # as paused is restored at the next look while the machine is awake.
+    s, spawned, calls = _carrier(tmp_path)
+    s.tick({100: 7})
+    s.on_line(SLEEP)
+    again, _, calls_again = _carrier(tmp_path)
+    assert again.paused_jobs() == {7}
+    again.tick({100: 7})
+    assert calls_again == [("resume", [100])] and again.paused_jobs() == set()
+
+
+class Recorder:
+    """Stands in for the daemon's Suspend: records what each look reports, and says which jobs are paused."""
+
+    def __init__(self):
+        self.ticks, self.paused = [], set()
+
+    def tick(self, gpu_pids):
+        self.ticks.append(dict(gpu_pids))
+
+    def paused_jobs(self):
+        return set(self.paused)
+
+    def close(self):
+        self.closed = True
+
+
+def test_each_look_at_the_gpus_tells_which_jobs_cuda_processes_hold_gpu_memory(make_daemon, tmp_path):
+    from conftest import FakeBackend, run_until
+    from test_daemon import job, submit
+    from test_idle_gpu import _end, _holding
+
+    from dibs.gpu import GpuProcess
+    from dibs.units import GiB
+
+    backend, rec = FakeBackend(), Recorder()
+    d = make_daemon(backend=backend, suspend=rec)
+    go, holding = _holding(tmp_path)
+    holder = submit(d, tmp_path, holding, vram=2 * GiB, session="s1")
+    run_until(d, lambda: job(d, holder).shim_pid)
+    pid = job(d, holder).shim_pid
+    backend.procs = [GpuProcess(pid, 0, GiB), GpuProcess(999_999, 0, GiB)]  # the second is nobody's job
+    d._watch_gpus(d.clock())
+    assert rec.ticks[-1] == {pid: holder}
+    _end(d, go, holder)
+
+
+def test_no_job_starts_while_jobs_are_paused_for_a_sleep(make_daemon, tmp_path):
+    from test_daemon import job, submit
+
+    from dibs.model import State
+
+    rec = Recorder()
+    rec.paused = {1}
+    d = make_daemon(suspend=rec)
+    waiting = submit(d, tmp_path, ["true"], session="s1")
+    d.schedule()
+    assert job(d, waiting).state == State.QUEUED
+    rec.paused = set()
+    d.schedule()
+    assert job(d, waiting).state != State.QUEUED
+
+
+def test_a_paused_jobs_ram_limit_is_lifted_for_the_pause_and_put_back_at_the_wake(tmp_path):
+    # Its GPU memory moves into its RAM, which counts against its limit: on 2026-11-24 a 2.2G pause under a 2G
+    # limit spilled 0.4G into swap and took twice as long. A big job would swap gigabytes before the sleep.
+    s, spawned, calls = _carrier(tmp_path)
+    units = {100: ("dibs-x-job-7.scope", "3221225472"), 101: ("dibs-x-job-8.scope", "max")}
+    done = []
+    s.read_limit = units.get
+    s.set_limit = lambda unit, value: done.append((unit, value, len(calls))) or True
+    s.tick({100: 7, 101: 8})
+    s.on_line(SLEEP)
+    assert sorted(done) == [("dibs-x-job-7.scope", "infinity", 0), ("dibs-x-job-8.scope", "infinity", 0)]  # before the pause
+    done.clear()
+    again, _, _ = _carrier(tmp_path)  # a restart in between: the limits come back from the record
+    again.set_limit = lambda unit, value: done.append((unit, value)) or True
+    again.on_line(WAKE)
+    assert sorted(done) == [("dibs-x-job-7.scope", "3221225472"), ("dibs-x-job-8.scope", "infinity")]
+
+
+def _limits(s):
+    units = {100: ("dibs-x-job-7.scope", "3221225472"), 101: ("dibs-x-job-8.scope", "2147483648")}
+    done = []
+    s.read_limit = units.get
+    s.set_limit = lambda unit, value: done.append((unit, value)) or True
+    return done
+
+
+def test_a_restore_that_failed_is_tried_again_and_its_limit_kept_lifted_until_it_works(tmp_path, monkeypatch):
+    # The NVIDIA driver finishes waking 0-9 s after the machine does, so a restore at the wake can fail.
+    # Forgotten, the job would hang with its GPU memory in its RAM, holding nothing on the GPU to be noticed.
+    clock = [1000.0]
+    monkeypatch.setattr(suspend.time, "monotonic", lambda: clock[0])
+    fails = {("resume", 101): "restore: CUDA error 999"}
+    s, spawned, calls = _carrier(tmp_path, results=fails)
+    done = _limits(s)
+    s.tick({100: 7, 101: 8})
+    s.on_line(SLEEP)
+    done.clear()
+    s.on_line(WAKE)
+    assert calls[-1] == ("resume", [100, 101]) and s.paused_jobs() == {8}
+    assert done == [("dibs-x-job-7.scope", "3221225472")]  # only the job that came back
+    clock[0] += suspend.RESUME_EVERY
+    del fails[("resume", 101)]
+    s.tick({101: 8})
+    assert calls[-1] == ("resume", [101]) and s.paused_jobs() == set()
+    assert done[-1] == ("dibs-x-job-8.scope", "2147483648")
+
+
+def test_a_restore_that_keeps_failing_is_given_up_and_its_session_told(tmp_path, monkeypatch):
+    clock = [1000.0]
+    monkeypatch.setattr(suspend.time, "monotonic", lambda: clock[0])
+    s, spawned, calls = _carrier(tmp_path, results={("resume", 101): "restore: CUDA error 999"})
+    told = []
+    s.gave_up = told.append
+    s.tick({101: 8})
+    s.on_line(SLEEP)
+    s.on_line(WAKE)
+    clock[0] += suspend.RESUME_GIVE_UP + 1
+    s.tick({101: 8})
+    assert told == [{8: "restore: CUDA error 999"}] and s.paused_jobs() == set()  # jobs start again
+
+
+def test_the_listener_survives_an_error_and_never_leaves_the_lock_held(tmp_path, caplog):
+    s, spawned, calls = _carrier(tmp_path)
+
+    def broken(op, seconds, pids):
+        raise RuntimeError("the record can't be written")
+
+    s.pauser = broken
+    s.tick({100: 7})
+
+    class Monitor:
+        stdout = [SLEEP, WAKE]
+
+    s._listen(Monitor())
+    assert _lock(spawned) is None and "the record can't be written" in caplog.text
+
+
+def test_every_sleep_and_wake_heard_is_logged(tmp_path, caplog):
+    import logging
+
+    caplog.set_level(logging.INFO, logger="dibs")
+    s, spawned, calls = _carrier(tmp_path)
+    s.on_line(SLEEP)
+    s.on_line(WAKE)
+    assert "the machine is about to sleep" in caplog.text and "the machine woke" in caplog.text
+
+
+def test_a_paused_jobs_ram_isnt_taken_for_what_it_needs(make_daemon, tmp_path, monkeypatch):
+    # A test job's record said "RAM 2.2G of 2G" after a pause: its 0.8G plus its GPU memory, moved into its
+    # RAM. Sampled, every sleep would raise the peaks the plan and the sizing advice go by.
+    from test_daemon import _job_holding, job
+
+    from dibs.units import GiB
+
+    rec = Recorder()
+    d = make_daemon(suspend=rec)
+    job_id, stat, go = _job_holding(d, tmp_path, monkeypatch, 2 * GiB)
+    stat.write_text(f"anon {1 * GiB}\nshmem 0\n")
+    d._watch_memory()
+    assert job(d, job_id).peak_mem == 1 * GiB
+    rec.paused = {job_id}
+    stat.write_text(f"anon {3 * GiB}\nshmem 0\n")
+    d._watch_memory()
+    assert job(d, job_id).peak_mem == 1 * GiB
+    go.touch()
+
+
+def test_a_session_whose_job_couldnt_be_restored_is_told(make_daemon, tmp_path):
+    from test_daemon import submit
+
+    d = make_daemon()
+    job_id = submit(d, tmp_path, ["sleep", "30"], session="s1")
+    d._restore_failed({job_id: "restore: CUDA error 999"})
+    (told,) = [n for n in d.notices("s1", d.clock())["notices"] if n["kind"] == "idle_gpu"]
+    assert f"dibs paused job {job_id}'s GPU work for the suspend and couldn't restore it" in told["message"]
+
+
+def test_only_the_real_nvidia_backend_gets_a_suspend_watcher():
+    from dibs import daemon, gpu
+
+    assert daemon._suspend_for(gpu.SmiBackend.__new__(gpu.SmiBackend), use_systemd=True, paths=None) is None
+    assert daemon._suspend_for(gpu.NoGpuBackend(), use_systemd=True, paths=None) is None

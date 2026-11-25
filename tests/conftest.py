@@ -102,7 +102,7 @@ def make_daemon(tmp_path):
 
     def _make(config=Config(), cap=None, backend=None, clock=time.time, meminfo=lambda: None, slept=procs.slept,
               pressure=lambda: 0.0, cpu_busy=lambda: None, programs=lambda minimum: [], set_mem_limit=None, panes=lambda: {},
-              igpu=None, cpu_heat=lambda: None, throttled=lambda: None):
+              igpu=None, cpu_heat=lambda: None, throttled=lambda: None, suspend=None):
         paths = get_paths({"DIBS_HOME": str(tmp_path / "home"), "HOME": str(tmp_path)})
         d = Daemon(
             paths, config, cap or capacity(), backend or FakeBackend(), use_systemd=False, clock=clock, meminfo=meminfo,
@@ -114,6 +114,7 @@ def make_daemon(tmp_path):
             panes=panes,  # never this machine's real terminals (#158)
             igpu=igpu,  # never this machine's real integrated GPU (#274)
             cpu_heat=cpu_heat, throttled=throttled,  # never this machine's real sensors (#278)
+            suspend=suspend,  # never the real logind or CUDA driver (#293)
         )
         made.append(d)
         return d
